@@ -1,0 +1,30 @@
+# All requirements excluding torch and torch-related packages
+# (torch is pre-installed in the base docker image)
+numpy
+scipy
+joblib
+pandas
+scikit-learn
+timm
+torchsummary
+tensorboardX
+tqdm
+gdown
+torch-optimizer
+einops
+nibabel
+Pillow
+scikit-image
+torchio
+MedPy
+SimpleITK
+tensorflow
+opencv-python
+accelerate
+matplotlib
+seaborn
+requests
+PyYAML
+IPython
+bib-lookup
+diff-binom-confint
