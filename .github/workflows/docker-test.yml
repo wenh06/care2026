@@ -1,0 +1,86 @@
+name: Docker Image CI and Test
+
+on:
+  push:
+    branches: [ docker-test ]
+  pull_request:
+    branches: [ master ]
+
+env:
+  status: pre
+  CARE2026_TEST: 1
+  download_data_dir: ${{ github.workspace }}/download_data
+  output_dir: ${{ github.workspace }}/output
+  mount_data_dir: /input
+  mount_output_dir: /output
+  model_cache_dir: /challenge/cache/model_dir
+  docker_main_filename: Dockerfile
+  DOCKER_HUB_REPOSITORY: care2026-docker-image
+  DOCKER_IMAGE_TAG: latest
+
+jobs:
+
+  build:
+    if: contains(fromJson('["wenh06", "DeepPSP"]'), github.repository_owner)
+
+    runs-on: ubuntu-22.04
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+    - name: Clear unnecessary system components
+      run: |
+        echo "Free space before cleanup:"
+        df -h
+        sudo rm -rf /usr/local/lib/android
+        sudo rm -rf /usr/share/dotnet
+        sudo rm -rf /opt/ghc
+        sudo rm -rf /usr/local/share/boost
+        sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+        echo "Free space after cleanup:"
+        df -h
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      with:
+        driver: docker
+    - name: Build the Docker image
+      uses: docker/build-push-action@v6
+      with:
+        context: .
+        file: ${{ env.docker_main_filename }}
+        push: false
+        tags: ${{ env.DOCKER_HUB_REPOSITORY }}:${{ env.DOCKER_IMAGE_TAG }}
+
+    - name: Set up Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.10"
+    - name: Download the test data
+      if: ${{ env.status != 'pre' }}
+      run: |
+        python -m pip install gdown
+        mkdir -p ${{ env.download_data_dir }} ${{ env.output_dir }}
+        # TODO: set data_gdrive_id once data is available
+        # gdown -O ${{ env.download_data_dir }}/care2026.zip ${{ env.data_gdrive_id }}
+        # unzip ${{ env.download_data_dir }}/care2026.zip -d ${{ env.download_data_dir }}
+        # rm ${{ env.download_data_dir }}/care2026.zip
+        du -sh ${{ env.download_data_dir }}
+
+    - name: Run the Docker image
+      if: ${{ env.status != 'pre' }}
+      run: |
+        docker images
+        docker run \
+          -e PYTHONUNBUFFERED=1 \
+          -e CARE2026_TEST=${{ env.CARE2026_TEST }} \
+          -e model_cache_dir=${{ env.model_cache_dir }} \
+          -e mount_data_dir=${{ env.mount_data_dir }} \
+          -e mount_output_dir=${{ env.mount_output_dir }} \
+          -v ${{ env.download_data_dir }}:${{ env.mount_data_dir }} \
+          -v ${{ env.output_dir }}:${{ env.mount_output_dir }} \
+          ${{ env.DOCKER_HUB_REPOSITORY }}:${{ env.DOCKER_IMAGE_TAG }}
+        docker ps -a
+        ls -l ${{ env.output_dir }}

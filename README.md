@@ -1,6 +1,7 @@
 # MICCAI CARE 2026 - Left Atrial Segmentation and Analysis
 
-[![GitHub Actions](https://github.com/wenh06/care2026/actions/workflows/test-suite.yml/badge.svg)](https://github.com/wenh06/care2026/actions/workflows/test-suite.yml)
+[![Formatting](https://github.com/wenh06/care2026/actions/workflows/check-formatting.yml/badge.svg)](https://github.com/wenh06/care2026/actions/workflows/check-formatting.yml)
+[![Docker CI](https://github.com/wenh06/care2026/actions/workflows/docker-test.yml/badge.svg)](https://github.com/wenh06/care2026/actions/workflows/docker-test.yml)
 [![pre-commit](https://img.shields.io/badge/pre--commit-enabled-brightgreen?logo=pre-commit&logoColor=white)](https://github.com/pre-commit/pre-commit)
 [![black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
