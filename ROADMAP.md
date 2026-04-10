@@ -86,7 +86,7 @@ Additional tricks:
 
 ---
 
-## Phase 2 — Constants, Config & Dataset ⏳
+## Phase 2 — Constants, Config & Dataset ✅
 
 ### 2.1 `const.py`
 
