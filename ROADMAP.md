@@ -137,34 +137,67 @@ Implement PyTorch Dataset classes:
 
 ## Phase 3 — Model Implementation ✅
 
-### 3.1 `models/vnet.py` — multi-output V-Net for MRI
+### 3.1 `models/layers.py` — shared 3D building blocks
 
-Extend the stub with:
-- Two decoder heads (LA cavity + scar) branching from the bottleneck.
-- Config-driven: `num_heads`, `head_channels`, `shared_depth` (how far up the decoder is shared).
-- Instance Norm option (replacing Batch Norm) for domain generalisation.
-- Deep supervision: auxiliary losses at each decoder scale.
+`ConvNormAct`, `ResBlock3D`, `DownBlock3D`, `UpBlock3D`, `NestedUpBlock3D`.
 
-### 3.2 `models/nested_vnet.py` — nested / V-Net++ for MRI (optional)
+### 3.2 `models/vnet.py` — V-Net for MRI & CT
 
-Nested skip connections (similar to UNet++). May improve scar boundary delineation.
+- `_SegEncoder3D`: shared encoder (stem + DownBlock3D stack).
+- `DualHeadVNet`: shared encoder → two independent decoders (LA cavity + scar). **Instance Norm** for domain generalisation.
+- `VNet`: shared encoder → single decoder. **Batch Norm**. Used as both Model 1 and Model 2 in CPS for CT.
 
-### 3.3 CT U-Net (`models/unet3d.py`)
+### 3.3 `models/nested_vnet.py` — Nested V-Net (UNet++) for MRI
 
-New file.  Symmetric 3D U-Net with:
-- Residual blocks in encoder and decoder.
-- Deep supervision.
-- Batch Norm (CT single-center, no domain shift needed within training).
-- Multi-class softmax output (4 classes).
+`DualHeadNestedVNet`: same `_SegEncoder3D` encoder as above + two `_NestedDecoder` paths.
+- Dense skip connections across all encoder levels (UNet++ node grid).
+- **Deep supervision**: returns one logit tensor per decoder level (coarse → fine); loss averaged across levels. Particularly helpful for superior/inferior slice regions (see MBAS2024 insights below).
 
 ### 3.4 `models/loss/`
 
 | File | Contents |
 |------|----------|
-| `region_loss.py` | `DiceLoss`, `FocalLoss`, `CrossEntropyLoss3D` |
-| `boundary_loss.py` | `BoundaryLoss` (distance-transform-based) |
-| `distribution_loss.py` | `KLDivergenceLoss` (for consistency regularisation in CPS) |
-| `compound_loss.py` | `CompoundLoss`: configurable weighted sum of any combination |
+| `dice_loss.py` | `SoftDiceLoss`, `DiceCELoss`, `TverskyLoss`, `FocalTverskyLoss` |
+| `boundary_loss.py` | `BoundaryLoss` (on-the-fly scipy distance transform) |
+| `__init__.py` | `MRILoss` (LA DiceCE + scar Tversky/Focal/Boundary), `CTLoss` (supervised DiceCE + CPS CE) |
+
+### 3.5 `models/__init__.py` — model wrappers
+
+`CARE2026_MRI_Model`: wraps `DualHeadVNet` or `DualHeadNestedVNet` (controlled by `backbone=` arg); loss computed inside `forward()` when labels are provided; handles deep-supervision list output.
+
+`CARE2026_CT_Model`: wraps two `VNet` instances for CPS; loss includes supervised DiceCE + consistency CE.
+
+---
+
+## Insights & Lessons Learned from MBAS2024
+
+> Summarised from the MBAS2024 post-challenge analysis. These findings directly inform our design and experimental choices.
+
+### What works
+
+| Finding | Implication for CARE2026 |
+|---------|--------------------------|
+| **Architecture > hyperparameter tuning** — baseline DSC was statistically indistinguishable across augmentation strategies, loss functions, and ensemble variants | Focus engineering effort on architecture; avoid endless hyperparameter search |
+| **CNN outperforms Transformer** on limited-size 3D MRI datasets; Transformers fail without task-specific adaptation | Do not use UNETR / SwinUNETR / nnFormer; stick to residual UNet / VNet |
+| **ResUNet + 5-fold CV + ensemble** — top-3 teams all ensembled 5 sub-models | 5-fold CV + ensemble is mandatory for final submission; not for development runs |
+| **SGD lr=0.01, 1000 epochs** — most common winning configuration | Our planned 150/200 epochs is too short; target ≥ 400 epochs; revisit optimiser |
+| **Instance Norm** is critical for cross-center generalisation | Already in our MRI models; do not switch to Batch Norm for MRI |
+| **Lightweight CNN (VNet, UMamba) matches large models** — no correlation between parameter count and DSC | Our ~7M-param VNet is well-chosen; no need to scale up |
+| **Labeling strategy matters**: separating cavity and wall heads consistently outperformed joint multi-class models | Validates our dual-head design (LA cavity head + scar head) |
+
+### Hardest failure modes (directly relevant to our tasks)
+
+| Failure mode | Where it hurts us | Mitigation |
+|---|---|---|
+| **Domain shift** — wall/scar DSC drops ~10 pp at unseen center | Task 2 (cross-center LA segmentation) | InstanceNorm; TTA; test-time BN adaptation |
+| **Post-ablation scar signal ≈ atrial wall** — models confuse the two | Task 1 (scar quantification) | Dual-head avoids mixing; Tversky/Focal losses for imbalance |
+| **Superior/inferior slice degradation** — U-shaped DSC profile along z-axis; complex vascular junctions | All tasks | Deep supervision (NestedVNet); slice-position feature |
+| **Segmentation leakage** — predictions bleed into adjacent structures | All tasks | Connected-component post-processing (keep largest component) |
+| **Low-SNR images** — wall/scar DSC strongly correlated with SNR | Task 1 scar boundary accuracy | CLAHE preprocessing (`utils/mclahe.py` already exists) |
+
+### UMamba as alternative backbone
+
+UMambaBot (Mamba-based state-space model) achieved near-ResUNet performance with better computational efficiency. Worth evaluating as a drop-in backbone replacement for MRI tasks if VNet under-performs.
 
 ---
 
@@ -216,14 +249,31 @@ After training converges:
 
 ## Phase 7 — Experiments & Ablations ⏳
 
+### Core ablations
+
 | Experiment | Goal |
 |------------|------|
 | Multi-task MRI vs. separate models | Verify joint training helps scar head |
-| Instance Norm vs. Batch Norm (MRI) | Quantify domain generalisation gain |
-| CPS vs. supervised-only (CT) | Measure semi-supervised benefit |
-| Boundary Loss weight sweep | Optimise PV / LAA delineation |
-| TTA (flip / rotation) | Measure inference-time accuracy boost |
+| `DualHeadVNet` vs. `DualHeadNestedVNet` | Deep supervision benefit; especially for superior/inferior slices |
+| Instance Norm vs. Batch Norm (MRI) | Quantify domain generalisation gain for Task 2 |
+| CPS vs. supervised-only (CT) | Measure semi-supervised benefit on 50 labelled / 100 unlabelled |
+| Boundary Loss weight sweep | Optimise PV / LAA delineation (CT Task 3) |
 | Patch size: 128³ vs. 64³ (CT) | Memory vs. accuracy trade-off |
+
+### Experiments from MBAS2024 insights
+
+| Experiment | Goal | Priority |
+|------------|------|----------|
+| **Extend MRI training: 150 → 400 epochs** | Close epoch-count gap vs. winning teams (1000 epochs) | 🔴 High |
+| **CLAHE preprocessing** — enable `utils/mclahe.py` in MRI dataset | Improve low-SNR scar boundary accuracy | 🔴 High |
+| **Connected-component post-processing** — keep largest component per class | Eliminate segmentation leakage | 🔴 High |
+| **Test-time augmentation (TTA)** — flip + 90° rotations, average logits | Low-cost accuracy boost; especially useful for Task 2 domain generalisation | 🔴 High |
+| **5-fold CV + ensemble** — train 5 folds, ensemble predictions | Expected +1–2 pp DSC; mandatory for final submission | 🟡 Medium (Phase 8) |
+| **SGD + polynomial LR for MRI** (vs. AdamW) | Winning teams used SGD lr=0.01; compare convergence | 🟡 Medium |
+| **Slice-position encoding** — append z-coordinate channel to input | Help model handle hard superior/inferior slices | 🟡 Medium |
+| **Test-time BN/IN adaptation** — update norm stats on test volume | Domain-shift mitigation for Task 2 unseen centers | 🟡 Medium |
+| **UMamba backbone** — replace VNet encoder with Mamba SSM | Near-ResUNet accuracy, more efficient; possible Task 2 alternative | 🟢 Low |
+| **Shape-constrained regularisation** — atlas-based prior or topology loss | Anatomy-aware design; reduce leakage at vascular junctions | 🟢 Low |
 
 ---
 
@@ -231,7 +281,8 @@ After training converges:
 
 - [ ] Implement `post_docker_build.py`: cache trained weights from cloud storage.
 - [ ] Verify Docker build (`docker-test.yml`) passes with `status: pre`.
-- [ ] Run full training (MRI: 150 epochs, CT: 200 epochs); save best checkpoints.
+- [ ] Run full training (MRI: ≥ 400 epochs, CT: ≥ 400 epochs); save best checkpoints.
+  - Development runs: 150/200 epochs; final submission runs: 400+ epochs with 5-fold CV.
 - [ ] End-to-end inference smoke test inside Docker container.
 - [ ] Set `status: alpha` in `docker-test.yml`; enable dataset download step.
 - [ ] Submit to official evaluation platform.
