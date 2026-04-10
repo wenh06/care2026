@@ -145,19 +145,16 @@ ModelCfg.vnet = CFG(
     # Instance Norm for domain generalisation (Task 2 test set has new centres)
     norm="instance",
     activation="mish",
-    conv_ordering="cna",
     input_conv=CFG(channels=16, kernel_size=5),
     down_conv=CFG(
         channels=[32, 64, 128, 256],
-        blocks=[1, 2, 2, 2],
-        kernel_size=[5, 5, 5, 5],
-        dropout=[False, False, True, True],
+        kernel_size=[3, 3, 3, 3],
+        dropout=[0.0, 0.0, 0.3, 0.3],
     ),
     up_conv=CFG(
-        channels=[256, 128, 64, 32],
-        blocks=[2, 2, 1, 1],
-        kernel_size=[5, 5, 5, 5],
-        dropout=[True, True, False, False],
+        channels=[128, 64, 32, 16],
+        kernel_size=[3, 3, 3, 3],
+        dropout=[0.0, 0.0, 0.0, 0.0],
     ),
     output_conv=CFG(kernel_size=1),
     # Two output heads: LA cavity (binary) and LA scar (binary)
@@ -173,19 +170,16 @@ ModelCfg.nested_vnet = CFG(
     in_channels=1,
     norm="instance",
     activation="mish",
-    conv_ordering="cna",
     input_conv=CFG(channels=16, kernel_size=5),
     down_conv=CFG(
         channels=[32, 64, 128, 256],
-        blocks=[1, 2, 2, 2],
-        kernel_size=[5, 5, 5, 5],
-        dropout=[False, False, True, True],
+        kernel_size=[3, 3, 3, 3],
+        dropout=[0.0, 0.0, 0.3, 0.3],
     ),
     up_conv=CFG(
-        channels=[256, 128, 64, 32],
-        blocks=[2, 2, 1, 1],
-        kernel_size=[5, 5, 5, 5],
-        dropout=[True, True, False, False],
+        channels=[128, 64, 32, 16],
+        kernel_size=[3, 3, 3, 3],
+        dropout=[0.0, 0.0, 0.0, 0.0],
     ),
     output_conv=CFG(kernel_size=1),
     deep_supervision=True,
@@ -195,14 +189,23 @@ ModelCfg.nested_vnet = CFG(
     ),
 )
 
-# -- UNet3D for CT CPS (Task 3) ---------------------------------------------
+# -- VNet (single-head) for CT CPS (Task 3) ----------------------------------
 
-ModelCfg.unet3d = CFG(
+ModelCfg.vnet_ct = CFG(
     in_channels=1,
     num_classes=CT_NUM_CLASSES,  # 4
     norm="batch",
     activation="relu",
-    base_channels=16,
-    depth=4,  # number of encoder/decoder levels
-    dropout=0.2,
+    input_conv=CFG(channels=16, kernel_size=3),
+    down_conv=CFG(
+        channels=[32, 64, 128, 256],
+        kernel_size=[3, 3, 3, 3],
+        dropout=[0.0, 0.0, 0.0, 0.2],
+    ),
+    up_conv=CFG(
+        channels=[128, 64, 32, 16],
+        kernel_size=[3, 3, 3, 3],
+        dropout=[0.0, 0.0, 0.0, 0.0],
+    ),
+    output_conv=CFG(kernel_size=1),
 )

@@ -135,7 +135,7 @@ Implement PyTorch Dataset classes:
 
 ---
 
-## Phase 3 — Model Implementation ⏳
+## Phase 3 — Model Implementation ✅
 
 ### 3.1 `models/vnet.py` — multi-output V-Net for MRI
 
