@@ -21,14 +21,7 @@ from torch_ecg.utils.misc import ReprMixin
 from tqdm.auto import tqdm
 
 from cfg import CT_TrainCfg, MRI_TrainCfg
-from const import (
-    CT_HU_MAX,
-    CT_HU_MIN,
-    CT_PATCH_SIZE,
-    CT_TARGET_SPACING,
-    DEFAULT_VAL_RATIO,
-    MRI_PATCH_SHAPE,
-)
+from const import CT_HU_MAX, CT_HU_MIN, CT_TARGET_SPACING, DEFAULT_VAL_RATIO
 from data_reader import CARE2026_CT, CARE2026_MRI
 
 __all__ = [
@@ -168,8 +161,8 @@ class CARE2026_MRI_Dataset(Dataset, ReprMixin):
         return len(self._indices)
 
     def __getitem__(self, idx: int) -> Dict:
-        image = self._cache_image[idx].copy()       # (1, H, W, D)
-        la_mask = self._cache_la_mask[idx].copy()   # (H, W, D)
+        image = self._cache_image[idx].copy()  # (1, H, W, D)
+        la_mask = self._cache_la_mask[idx].copy()  # (H, W, D)
         scar_mask = self._cache_scar_mask[idx].copy()
         has_scar = bool(self._cache_has_scar[idx])
         task = int(self._cache_task[idx])
@@ -379,13 +372,10 @@ def _random_patch(
     else:
         centre = np.array([rng.integers(max(H, 1)), rng.integers(max(W, 1)), rng.integers(max(D, 1))])
 
-    starts = np.array([
-        np.clip(int(centre[i]) - ps // 2, 0, max(image.shape[i] - ps, 0))
-        for i in range(3)
-    ])
+    starts = np.array([np.clip(int(centre[i]) - ps // 2, 0, max(image.shape[i] - ps, 0)) for i in range(3)])
     x0, y0, z0 = starts
-    img_patch = image[x0: x0 + ps, y0: y0 + ps, z0: z0 + ps]
-    msk_patch = mask[x0: x0 + ps, y0: y0 + ps, z0: z0 + ps] if mask is not None else None
+    img_patch = image[x0 : x0 + ps, y0 : y0 + ps, z0 : z0 + ps]
+    msk_patch = mask[x0 : x0 + ps, y0 : y0 + ps, z0 : z0 + ps] if mask is not None else None
 
     img_patch, msk_patch = _pad_to_size(img_patch, msk_patch, ps)
     return img_patch, msk_patch
@@ -399,8 +389,8 @@ def _center_patch(
     """Extract the centre crop of size ``ps³`` (used for validation)."""
     H, W, D = image.shape[:3]
     x0, y0, z0 = max((H - ps) // 2, 0), max((W - ps) // 2, 0), max((D - ps) // 2, 0)
-    img_patch = image[x0: x0 + ps, y0: y0 + ps, z0: z0 + ps]
-    msk_patch = mask[x0: x0 + ps, y0: y0 + ps, z0: z0 + ps] if mask is not None else None
+    img_patch = image[x0 : x0 + ps, y0 : y0 + ps, z0 : z0 + ps]
+    msk_patch = mask[x0 : x0 + ps, y0 : y0 + ps, z0 : z0 + ps] if mask is not None else None
     img_patch, msk_patch = _pad_to_size(img_patch, msk_patch, ps)
     return img_patch, msk_patch
 
@@ -444,7 +434,7 @@ def _augment_mri(
         img_range = float(image.max()) - img_min
         if img_range > 0:
             image_norm = (image - img_min) / img_range
-            image = (image_norm ** gamma) * img_range + img_min
+            image = (image_norm**gamma) * img_range + img_min
 
     # Additive Gaussian noise
     if rng.random() < p:
@@ -513,15 +503,15 @@ def collate_fn_mri(batch: List[Dict]) -> Dict:
     -------
     dict
         ``image``     : float32 tensor ``(B, 1, H, W, D)``
-        ``la_mask``   : float32 tensor ``(B, H, W, D)``
-        ``scar_mask`` : float32 tensor ``(B, H, W, D)``
+        ``la_mask``   : int64 tensor   ``(B, H, W, D)``
+        ``scar_mask`` : int64 tensor   ``(B, H, W, D)``
         ``has_scar``  : bool tensor    ``(B,)``
         ``task``      : int64 tensor   ``(B,)``
         ``record``    : list of str, length ``B``
     """
     images = torch.from_numpy(np.stack([s["image"] for s in batch]))
-    la_masks = torch.from_numpy(np.stack([s["la_mask"] for s in batch])).float()
-    scar_masks = torch.from_numpy(np.stack([s["scar_mask"] for s in batch])).float()
+    la_masks = torch.from_numpy(np.stack([s["la_mask"] for s in batch])).long()
+    scar_masks = torch.from_numpy(np.stack([s["scar_mask"] for s in batch])).long()
     has_scar = torch.tensor([s["has_scar"] for s in batch], dtype=torch.bool)
     tasks = torch.tensor([s["task"] for s in batch], dtype=torch.int64)
     records = [s["record"] for s in batch]

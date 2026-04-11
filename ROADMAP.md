@@ -201,23 +201,24 @@ UMambaBot (Mamba-based state-space model) achieved near-ResUNet performance with
 
 ---
 
-## Phase 4 — Training Loops ⏳
+## Phase 4 — Training Loops ✅
 
 ### 4.1 MRI trainer (`trainer.py`)
 
 `CARE2026_MRI_Trainer`:
 - Multi-task loss: applies Head A loss on all batches, Head B loss only when `has_scar=True`.
-- Metric: DSC (Task 2 / LA head); G-DSC + ACC + SEN (Task 1 / scar head).
-- Validation set: 10 Center A samples (Task 1), 20 samples (Task 2, including 10 Center C for domain shift check).
-- Checkpointing: save best scar DSC for Task 1, best LA DSC for Task 2.
+- Metric: local validation `la_dice`, `scar_dice`, `scar_acc`, `scar_sen`.
+- Config-driven monitor key (default `la_dice`) for checkpoint selection.
+- Supports `backbone="vnet"` and `backbone="nested_vnet"` via the wrapped MRI model.
+- Uses `BaseTrainer` logging / checkpointing, with model-contained loss.
 
 ### 4.2 CT trainer (`trainer.py`)
 
 `CARE2026_CT_Trainer`:
 - CPS loss: ramped consistency weight `λ_cps(t)`.
-- Maintain two independent models (M1, M2) and two optimisers.
-- Metric: per-class DSC (LA / PV / LAA) and mean HD.
-- Save best mean DSC checkpoint.
+- Wrapped model maintains two internal VNet branches (`model1`, `model2`) under one optimiser.
+- Metric: local validation `ct_dice_la`, `ct_dice_pv`, `ct_dice_laa`, `ct_mean_dice`.
+- Uses mixed labeled + unlabeled training split, labeled-only validation split.
 
 ---
 
@@ -292,13 +293,13 @@ After training converges:
 
 ## Immediate Next Steps
 
-1. **`const.py`**: define all constants listed in Phase 2.1.
-2. **`cfg.py`**: implement `BaseCfg` / `TrainCfg` / `ModelCfg` with V-Net and U-Net config blocks.
-3. **`dataset.py`**: `CARE2026_MRI_Dataset` with bounding-box crop + augmentation; `CARE2026_CT_Dataset` with CT windowing + patch sampling.
-4. **`models/vnet.py`**: extend stub to dual-head multi-task V-Net (shared encoder, two decoder heads).
-5. **`models/unet3d.py`**: new file — 3D residual U-Net for CT semi-supervised training.
-6. **`models/loss/region_loss.py`** and **`models/loss/compound_loss.py`**: implement Dice, Focal, CE, compound loss.
-7. **`trainer.py`**: MRI multi-task trainer first (simpler, no CPS); CT CPS trainer second.
+1. **`predict.py`**: implement MRI/CT inference entrypoints and task routing.
+2. **MRI post-processing**: scar constrained by LA cavity; connected-component cleanup.
+3. **CT post-processing**: largest connected component per class; optional morphological closing for LAA.
+4. **`pipeline.py`**: end-to-end `run(record, task, model, output_dir)` wrapper.
+5. **Validation pass**: run a small real-data train/val smoke test for both trainers.
+6. **CLAHE ablation**: wire `utils/mclahe.py` into the MRI dataset and compare.
+7. **TTA**: add inference-time flip/rotation averaging, especially for Task 2.
 
 ---
 
