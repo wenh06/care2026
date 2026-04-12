@@ -7,15 +7,34 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-from .boundary_loss import BoundaryLoss
+from .boundary_loss import BoundaryLoss, HausdorffDTLoss, HausdorffERLoss
+from .compound_loss import DiceBoundaryLoss, DiceFocalLoss, DiceTopKLoss
 from .dice_loss import DiceCELoss, FocalTverskyLoss, SoftDiceLoss, TverskyLoss
+from .distribution_loss import FocalLoss, TopKCELoss
+from .region_loss import GeneralizedDiceLoss, IoULoss, LovaszSoftmaxLoss
 
 __all__ = [
+    # dice / region — dice_loss.py
     "SoftDiceLoss",
     "DiceCELoss",
     "TverskyLoss",
     "FocalTverskyLoss",
+    # region — region_loss.py
+    "IoULoss",
+    "GeneralizedDiceLoss",
+    "LovaszSoftmaxLoss",
+    # distribution — distribution_loss.py
+    "FocalLoss",
+    "TopKCELoss",
+    # boundary — boundary_loss.py
     "BoundaryLoss",
+    "HausdorffDTLoss",
+    "HausdorffERLoss",
+    # compound — compound_loss.py
+    "DiceFocalLoss",
+    "DiceBoundaryLoss",
+    "DiceTopKLoss",
+    # task-level compound wrappers
     "MRILoss",
     "CTLoss",
 ]
