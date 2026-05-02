@@ -222,17 +222,31 @@ UMambaBot (Mamba-based state-space model) achieved near-ResUNet performance with
 
 ---
 
-## Phase 5 — Prediction & Post-processing ⏳
+## Phase 5 — Prediction & Post-processing ✅
 
 `predict.py`:
-- **MRI inference**: slide window or crop-to-bbox, ensemble flip TTA.
-- **MRI post-processing (scar)**: keep only scar voxels within LA cavity mask.
-- **CT inference**: sliding window (128³, stride 64³), soft-max vote over overlapping patches.
-- **CT post-processing**: largest connected component per class; morphological closing on LAA.
+- **MRI inference** (coarse-to-fine, two-stage):
+  1. Resize whole volume → `(256, 256, 44)`, LA head → coarse LA mask.
+  2. Un-resize coarse mask → original space → compute LA bounding box.
+  3. Crop original volume to bbox + 7px pad, resize to `(256, 256, 44)`, run both heads.
+  4. Un-resize and un-crop predictions back to original shape + original NIfTI affine.
+- **CT inference**: sliding window `128³` patches, stride `64³`, Gaussian overlap weighting, soft-vote argmax.
+- **TTA**: 8-fold flip averaging (all `{H, W, D}` axis combinations) for both MRI and CT.
 
-`outputs.py`: `CARE2026Outputs` dataclass wrapping predictions and file-save helpers (`save_as_nifti`, `evaluate`).
+`outputs.py`:
+- `CARE2026Outputs` dataclass: `la_mask`, `scar_mask`, `ct_mask` + `source_affine` / `source_header`.
+- `save_as_nifti(output_dir, record_id, task_num)`: writes `<task_dirname>/<record_id>/<record_id>_pred.nii.gz` with original affine.
+- `package_submission(results_dir, team_name)`: creates challenge-compliant `CARE-Leftatrium-<team>.zip`.
 
-`pipeline.py`: end-to-end `run(record, task, model, output_dir)`.
+`pipeline.py`:
+- `run_task1_inference` / `run_task2_inference` / `run_task3_inference`: per-task validation runners.
+- `run_all_tasks()`: convenience wrapper; `None` models safely skipped.
+- CLI entry point: `python pipeline.py --val_data_root ... --results_dir ... --team_name ...`.
+
+**Validation data confirmed** (already on disk at `/Data1/wenh06/CARE2026-LeftAtrium/`):
+- Task 1: 10 records (`val_1..val_10`), `enhanced.nii.gz`, spacing 1.0 mm isotropic.
+- Task 2: 20 records (`val_1..val_20`), `enhanced.nii.gz`.
+- Task 3: 20 records (`val_1..val_20`), `NNNN.nii.gz` (4-digit zero-padded).
 
 ---
 
@@ -293,13 +307,12 @@ After training converges:
 
 ## Immediate Next Steps
 
-1. **`predict.py`**: implement MRI/CT inference entrypoints and task routing.
+1. **Train models**: kick off MRI and CT trainers (even short runs for initial checkpoint validation submission).
 2. **MRI post-processing**: scar constrained by LA cavity; connected-component cleanup.
 3. **CT post-processing**: largest connected component per class; optional morphological closing for LAA.
-4. **`pipeline.py`**: end-to-end `run(record, task, model, output_dir)` wrapper.
-5. **Validation pass**: run a small real-data train/val smoke test for both trainers.
-6. **CLAHE ablation**: wire `utils/mclahe.py` into the MRI dataset and compare.
-7. **TTA**: add inference-time flip/rotation averaging, especially for Task 2.
+4. **Validation pass**: run a small real-data train/val smoke test for both trainers.
+5. **CLAHE ablation**: wire `utils/mclahe.py` into the MRI dataset and compare.
+6. **5-fold CV + ensemble** (Phase 8): train 5 folds, ensemble predictions for final submission.
 
 ---
 
