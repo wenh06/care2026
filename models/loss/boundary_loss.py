@@ -36,7 +36,10 @@ def _compute_distance_map(seg: np.ndarray) -> np.ndarray:
         return np.zeros_like(seg, dtype=np.float32)
     dist_inside = distance_transform_edt(seg)
     dist_outside = distance_transform_edt(1 - seg)
-    return (dist_inside - dist_outside).astype(np.float32)
+    # Positive outside, negative inside — matches Kervadec et al. (2019):
+    # minimising mean(prob_fg * phi) pushes prob_fg up inside (phi < 0) and
+    # down outside (phi > 0).
+    return (dist_outside - dist_inside).astype(np.float32)
 
 
 class BoundaryLoss(nn.Module):

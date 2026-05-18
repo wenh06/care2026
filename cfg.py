@@ -78,7 +78,7 @@ MRI_TrainCfg.aug_prob = 0.5
 MRI_TrainCfg.loss_weights = CFG(
     la_dice=1.0,
     scar_dice=2.0,
-    scar_boundary=0.5,
+    scar_boundary=0.0,   # disabled by default (costly scipy EDT); enable for fine-tuning
     scar_focal=0.5,
 )
 
