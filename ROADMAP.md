@@ -250,9 +250,42 @@ UMambaBot (Mamba-based state-space model) achieved near-ResUNet performance with
 
 ---
 
-## Phase 6 — Validation & Analysis ⏳
+## Phase 6 — Training Runs 🏃
 
-After training converges:
+### 6.1 MRI Baseline (Tasks 1 & 2) — **IN PROGRESS**
+
+Running: `PYTORCH_ALLOC_CONF=expandable_segments:True python trainer.py --task mri --db-dir /Data1/wenh06/CARE2026-LeftAtrium --epochs 150 2>&1 | tee log/mri_train.log`
+
+**Key fixes required to get training working:**
+- ❌ **BoundaryLoss sign bug**: `_compute_distance_map` had `dist_inside − dist_outside` (wrong); fixed to `dist_outside − dist_inside`. Disabled by default (`scar_boundary=0.0`) — scipy EDT is ~1–2s/call, too slow for baseline.
+- ❌ **CUDA OOM at full 256×256×44 resolution**: even with AMP + `expandable_segments`, Conv3d at final decoder level requests 6.96 GiB contiguous — exceeds 5.12 GiB truly free on RTX 5060 Ti 16 GB. Fixed with **training-time H×W patch crop** (128×128×D) in dataset `__getitem__`.
+- ✅ **Patch-based training (128×128×D crop)** added: foreground-biased random H×W crop; validation still uses full 256×256×D volumes. ~4× memory reduction at full-resolution decoder layers.
+- ✅ **AMP + gradient accumulation**: `use_amp=True`, `accumulate_grad_batches=2`, `batch_size=1` → effective batch = 2.
+
+**1-epoch sanity check results** (commit `d087485`):
+- Training speed: ~6.7 samples/s → 150 epochs ≈ 63 minutes
+- `la_dice = 0.696` after epoch 0 ✅
+- No OOM, checkpoint saved ✅
+
+**Ongoing training metrics snapshot (epoch 4)**:
+- `la_loss ≈ 0.243`, `scar_loss ≈ 1.86` (expected — scar head needs many more epochs; high loss at early stages)
+
+### 6.2 CT Baseline (Task 3) — ⏳ Not started
+
+```bash
+PYTORCH_ALLOC_CONF=expandable_segments:True python trainer.py --task ct \
+  --db-dir /Data1/wenh06/CARE2026-LeftAtrium --epochs 200 2>&1 | tee log/ct_train.log
+```
+
+### 6.3 Validation & Submission
+
+After ≥ 30–50 epochs:
+
+```bash
+python pipeline.py --val_data_root /Data1/wenh06/CARE2026-LeftAtrium \
+  --results_dir results/ --team_name REVENGER
+# Then zip and upload CARE-Leftatrium-REVENGER.zip
+```
 
 - Compute per-task metrics on local validation split.
 - Task 1: G-DSC / ACC / SEN curves vs. epoch.
@@ -307,12 +340,17 @@ After training converges:
 
 ## Immediate Next Steps
 
-1. **Train models**: kick off MRI and CT trainers (even short runs for initial checkpoint validation submission).
-2. **MRI post-processing**: scar constrained by LA cavity; connected-component cleanup.
-3. **CT post-processing**: largest connected component per class; optional morphological closing for LAA.
-4. **Validation pass**: run a small real-data train/val smoke test for both trainers.
-5. **CLAHE ablation**: wire `utils/mclahe.py` into the MRI dataset and compare.
-6. **5-fold CV + ensemble** (Phase 8): train 5 folds, ensemble predictions for final submission.
+1. **MRI training in progress** — monitor `log/mri_train.log`; checkpoint saved at `checkpoints/BestModel_*mri*`.
+2. **After ~30–50 MRI epochs** — run pipeline + submit validation:
+   ```bash
+   python pipeline.py --val_data_root /Data1/wenh06/CARE2026-LeftAtrium --results_dir results/ --team_name REVENGER
+   # zip CARE-Leftatrium-REVENGER.zip and upload to http://zmic.org.cn/care_2026/eval
+   ```
+3. **CT training** — kick off `python trainer.py --task ct ...` once MRI training stabilises.
+4. **MRI post-processing**: scar constrained by LA cavity; connected-component cleanup.
+5. **CT post-processing**: largest connected component per class; optional morphological closing for LAA.
+6. **CLAHE ablation**: wire `utils/mclahe.py` into the MRI dataset and compare.
+7. **5-fold CV + ensemble** (Phase 8): train 5 folds, ensemble predictions for final submission.
 
 ---
 
