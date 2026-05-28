@@ -50,11 +50,17 @@ MRI_TrainCfg = deepcopy(BaseCfg)
 MRI_TrainCfg.task = "mri"
 
 # Volume shape after crop + resize
-MRI_TrainCfg.patch_shape = MRI_PATCH_SHAPE  # (H, W, D)
+MRI_TrainCfg.patch_shape = MRI_PATCH_SHAPE  # (H, W, D) — stored in RAM at this shape
+
+# Training patch: crop H×W to this size during training to reduce GPU memory
+# The cached volume stays at MRI_PATCH_SHAPE; the crop happens in __getitem__
+MRI_TrainCfg.train_crop_hw = 128  # 128×128×D per training sample (vs 256×256 full)
 
 # Training duration and batch
 MRI_TrainCfg.n_epochs = 150
-MRI_TrainCfg.batch_size = 2  # limited by GPU memory (full 256×256×44 volumes)
+MRI_TrainCfg.batch_size = 1          # 16 GB GPU: 128×128 crop with AMP fits comfortably
+MRI_TrainCfg.use_amp = True           # automatic mixed precision (fp16 forward/backward)
+MRI_TrainCfg.accumulate_grad_batches = 2  # gradient accumulation → effective batch = 2
 
 # Optimizer
 MRI_TrainCfg.optimizer = "adamw"
@@ -101,6 +107,8 @@ CT_TrainCfg.patch_size = CT_PATCH_SIZE  # 128³
 # Training duration and batch
 CT_TrainCfg.n_epochs = 200
 CT_TrainCfg.batch_size = 2
+CT_TrainCfg.use_amp = True
+CT_TrainCfg.accumulate_grad_batches = 1
 
 # Optimizer (SGD + polynomial LR, standard for semi-supervised 3-D seg)
 CT_TrainCfg.optimizer = "sgd"

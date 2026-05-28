@@ -85,6 +85,15 @@ class _BaseCARE2026Trainer(BaseTrainer):
             **kwargs,
         )
 
+        # AMP (automatic mixed precision)
+        use_amp = bool(tc.get("use_amp", True)) and torch.cuda.is_available()
+        self._use_amp = use_amp
+        self._scaler = torch.amp.GradScaler("cuda") if use_amp else None
+
+        # Gradient accumulation: accumulate over N micro-batches before stepping
+        self._accum_steps = max(1, int(tc.get("accumulate_grad_batches", 1)))
+        self._accum_counter = 0
+
     @property
     def batch_dim(self) -> int:
         return 0
@@ -137,21 +146,38 @@ class _BaseCARE2026Trainer(BaseTrainer):
         pass
 
     def train_one_epoch(self, pbar: tqdm) -> None:
+        self._accum_counter = 0
+        self.optimizer.zero_grad()
         for input_tensors in self.train_loader:
             self.global_step += 1
             n_samples = input_tensors["image"].shape[self.batch_dim]
+            self._accum_counter += 1
 
-            out_tensors = self.run_one_step(input_tensors)
-            loss = out_tensors["total_loss"].mean()
+            if self._use_amp:
+                with torch.amp.autocast("cuda"):
+                    out_tensors = self.run_one_step(input_tensors)
+                loss = out_tensors["total_loss"].mean() / self._accum_steps
+                self._scaler.scale(loss).backward()
+            else:
+                out_tensors = self.run_one_step(input_tensors)
+                loss = out_tensors["total_loss"].mean() / self._accum_steps
+                loss.backward()
 
-            self.epoch_loss += loss.item()
-            self.optimizer.zero_grad()
-            loss.backward()
-            self.optimizer.step()
-            self._update_lr()
+            # Scale loss back for logging (undo the accumulation divisor)
+            loss_for_log = loss.item() * self._accum_steps
+            self.epoch_loss += loss_for_log
+
+            if self._accum_counter % self._accum_steps == 0:
+                if self._use_amp:
+                    self._scaler.step(self.optimizer)
+                    self._scaler.update()
+                else:
+                    self.optimizer.step()
+                self.optimizer.zero_grad()
+                self._update_lr()
 
             if self.global_step % self.train_config.log_step == 0:
-                step_metrics = {"loss": loss.item()}
+                step_metrics = {"loss": loss_for_log}
                 for key in ["la_loss", "scar_loss", "sup_loss", "cps_loss"]:
                     if key in out_tensors:
                         value = out_tensors[key]
@@ -161,9 +187,9 @@ class _BaseCARE2026Trainer(BaseTrainer):
                     step_metrics["cps_weight"] = self._current_cps_weight
                 if self.scheduler is not None:
                     step_metrics["lr"] = self.optimizer.param_groups[0]["lr"]
-                    pbar.set_postfix(loss=loss.item(), lr=self.optimizer.param_groups[0]["lr"])
+                    pbar.set_postfix(loss=loss_for_log, lr=self.optimizer.param_groups[0]["lr"])
                 else:
-                    pbar.set_postfix(loss=loss.item())
+                    pbar.set_postfix(loss=loss_for_log)
                 self.log_manager.log_metrics(
                     metrics=step_metrics,
                     step=self.global_step,
@@ -455,6 +481,8 @@ def get_args(**kwargs: Any) -> CFG:
     parser.add_argument("--db-dir", dest="db_dir", required=True)
     parser.add_argument("--backbone", default="vnet", choices=["vnet", "nested_vnet"])
     parser.add_argument("-b", "--batch-size", type=int, default=None, dest="batch_size")
+    parser.add_argument("--accum-steps", type=int, default=None, dest="accumulate_grad_batches")
+    parser.add_argument("--use-amp", type=str2bool, default=None, dest="use_amp")
     parser.add_argument("--epochs", type=int, default=None, dest="n_epochs")
     parser.add_argument("--debug", type=str2bool, default=False, dest="debug")
     args = {k: v for k, v in vars(parser.parse_args()).items() if v is not None}
@@ -463,6 +491,10 @@ def get_args(**kwargs: Any) -> CFG:
 
 
 if __name__ == "__main__":
+    # Prevent CUDA memory fragmentation (critical for large 3-D volumes)
+    import os as _os
+    _os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
+
     args = get_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

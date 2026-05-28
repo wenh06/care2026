@@ -171,6 +171,9 @@ class CARE2026_MRI_Dataset(Dataset, ReprMixin):
         if self.training:
             aug_prob = float(self.config.get("aug_prob", 0.5))
             image, la_mask, scar_mask = _augment_mri(image, la_mask, scar_mask, p=aug_prob)
+            crop_hw = int(self.config.get("train_crop_hw", 0))
+            if crop_hw > 0:
+                image, la_mask, scar_mask = _crop_hw_train(image, la_mask, scar_mask, crop_hw)
 
         return {
             "image": image,
@@ -354,6 +357,52 @@ def _pad_to_size(
         if mask is not None:
             mask = np.pad(mask, pad, mode="constant", constant_values=0)
     return image, mask
+
+
+def _crop_hw_train(
+    image: np.ndarray,
+    la_mask: np.ndarray,
+    scar_mask: np.ndarray,
+    crop_hw: int,
+    fg_bias: float = 0.5,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Random H×W crop with foreground-biased centre sampling for MRI training.
+
+    Parameters
+    ----------
+    image : (1, H, W, D) float32 array
+    la_mask : (H, W, D) uint8 array
+    scar_mask : (H, W, D) uint8 array
+    crop_hw : target crop size (same for H and W)
+    fg_bias : probability of centering the crop on a foreground voxel
+    """
+    _, H, W, D = image.shape
+    rng = np.random.default_rng()
+
+    if la_mask.max() > 0 and rng.random() < fg_bias:
+        fg = np.argwhere(la_mask > 0)
+        c = fg[rng.integers(len(fg))]
+        ch, cw = int(c[0]), int(c[1])
+    else:
+        ch = rng.integers(max(H, 1))
+        cw = rng.integers(max(W, 1))
+
+    h0 = int(np.clip(ch - crop_hw // 2, 0, max(H - crop_hw, 0)))
+    w0 = int(np.clip(cw - crop_hw // 2, 0, max(W - crop_hw, 0)))
+
+    img_crop  = image[:, h0 : h0 + crop_hw, w0 : w0 + crop_hw, :]
+    la_crop   = la_mask[h0 : h0 + crop_hw, w0 : w0 + crop_hw, :]
+    scar_crop = scar_mask[h0 : h0 + crop_hw, w0 : w0 + crop_hw, :]
+
+    # Pad if any dimension is smaller than crop_hw
+    ph = max(0, crop_hw - img_crop.shape[1])
+    pw = max(0, crop_hw - img_crop.shape[2])
+    if ph > 0 or pw > 0:
+        img_crop  = np.pad(img_crop,  [(0, 0), (0, ph), (0, pw), (0, 0)])
+        la_crop   = np.pad(la_crop,   [(0, ph), (0, pw), (0, 0)])
+        scar_crop = np.pad(scar_crop, [(0, ph), (0, pw), (0, 0)])
+
+    return img_crop, la_crop, scar_crop
 
 
 def _random_patch(
