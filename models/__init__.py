@@ -5,7 +5,9 @@ Loss is computed inside forward() when labels are provided (MBAS2024 pattern).
 The Trainer reads out_tensors["total_loss"] and calls loss.backward().
 """
 
+import re
 from copy import deepcopy
+from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
 import numpy as np
@@ -178,6 +180,18 @@ class CARE2026_MRI_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
     def train_config(self) -> CFG:
         return self.__train_config
 
+    def save(self, path, **kwargs) -> None:
+        """Override CkptMixin.save to prevent decimal suffixes from being treated as file extensions.
+
+        e.g. ``...epochloss_0.17121_metric_0.91`` → saves as
+        ``...epochloss_0_17121_metric_0_91.safetensors``
+        instead of the broken ``...epochloss_0.safetensors``.
+        """
+        p = Path(str(path))
+        name = re.sub(r"(?<=\d)\.(?=\d)", "_", p.name)
+        path = str(p.parent / name)
+        super().save(path=path, **kwargs)
+
 
 class CARE2026_CT_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
     """Wrapper for Cross Pseudo Supervision (CPS) CT model (Task 3).
@@ -291,3 +305,10 @@ class CARE2026_CT_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
     @property
     def train_config(self) -> CFG:
         return self.__train_config
+
+    def save(self, path, **kwargs) -> None:
+        """Override CkptMixin.save to prevent decimal suffixes from being treated as file extensions."""
+        p = Path(str(path))
+        name = re.sub(r"(?<=\d)\.(?=\d)", "_", p.name)
+        path = str(p.parent / name)
+        super().save(path=path, **kwargs)

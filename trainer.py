@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
+from collections import deque
 from copy import deepcopy
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -53,6 +56,34 @@ def _binary_sensitivity(pred: np.ndarray, target: np.ndarray, eps: float = 1e-7)
     return float((tp + eps) / (tp + fn + eps))
 
 
+def _sanitize_ckpt_path(path) -> Path:
+    """Convert a checkpoint stem path to the actual .safetensors file path.
+
+    torch_ecg BaseTrainer stores paths like ``...epochloss_0.17121_metric_0.91``
+    in ``saved_models``, but CkptMixin.save() treats decimal parts as file
+    extensions.  We instead save with dots replaced by underscores (e.g.
+    ``...epochloss_0_17121_metric_0_91.safetensors``) via the model's save()
+    override; this helper applies the same normalisation so cleanup works.
+    """
+    p = Path(str(path))
+    # Replace every digit.digit sequence in the filename with digit_digit
+    name = re.sub(r"(?<=\d)\.(?=\d)", "_", p.name)
+    return (p.parent / name).with_suffix(".safetensors")
+
+
+class _FixedPathDeque(deque):
+    """A deque that transparently normalises checkpoint paths on append.
+
+    The base trainer appends the *stem* path (e.g. ``checkpoints/…metric_0.91``)
+    to ``saved_models``.  We intercept that to store the *actual* file path
+    (``checkpoints/…metric_0_91.safetensors``) so that the base trainer's
+    ``os.remove(model_to_remove)`` call succeeds.
+    """
+
+    def append(self, item) -> None:
+        super().append(_sanitize_ckpt_path(item))
+
+
 class _BaseCARE2026Trainer(BaseTrainer):
     """Shared training utilities for CARE2026 MRI/CT trainers."""
 
@@ -84,6 +115,10 @@ class _BaseCARE2026Trainer(BaseTrainer):
             lazy=lazy,
             **kwargs,
         )
+
+        # Replace the base trainer's saved_models deque with our path-normalising version
+        # so that keep_checkpoint_max cleanup (os.remove) targets the correct .safetensors file.
+        self.saved_models = _FixedPathDeque()
 
         # AMP (automatic mixed precision)
         use_amp = bool(tc.get("use_amp", True)) and torch.cuda.is_available()
