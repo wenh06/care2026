@@ -93,10 +93,7 @@ class _NestedDecoder(nn.Module):
             in_ch = enc_channels[idx]  # input to first block in this column
             for i, out_ch in enumerate(channels_slice):
                 # Skip connection: cat over all nodes at same spatial scale
-                skip_ch = sum(
-                    node_ch[j][j - (idx - i - 1)]  # type: ignore[index]
-                    for j in range(idx - i - 1, idx)
-                )
+                skip_ch = sum(node_ch[j][j - (idx - i - 1)] for j in range(idx - i - 1, idx))  # type: ignore[index]
                 ks_idx = n_levels - 1 - lv + i  # maps (lv, i) → up_conv array index
                 lv_blocks.append(
                     NestedUpBlock3D(
@@ -116,15 +113,11 @@ class _NestedDecoder(nn.Module):
         # Output convolutions (one per level for deep supervision)
         # ------------------------------------------------------------------
         terminal_ch = up_ch[-1]  # all terminal nodes output this many channels
-        self.out_convs = nn.ModuleList(
-            [nn.Conv3d(terminal_ch, num_classes, kernel_size=1) for _ in range(n_levels)]
-        )
+        self.out_convs = nn.ModuleList([nn.Conv3d(terminal_ch, num_classes, kernel_size=1) for _ in range(n_levels)])
         self.n_levels = n_levels
         self.deep_supervision = deep_supervision
 
-    def forward(
-        self, skips: List[torch.Tensor]
-    ) -> Union[torch.Tensor, List[torch.Tensor]]:
+    def forward(self, skips: List[torch.Tensor]) -> Union[torch.Tensor, List[torch.Tensor]]:
         """
         Parameters
         ----------
@@ -137,9 +130,7 @@ class _NestedDecoder(nn.Module):
         With deep supervision   : list of tensors, coarse to fine
         """
         # tc[row][col]: row = 0..n_levels, col = 0..row
-        tc: List[List[Optional[torch.Tensor]]] = [
-            [None] * (row + 1) for row in range(self.n_levels + 1)
-        ]
+        tc: List[List[Optional[torch.Tensor]]] = [[None] * (row + 1) for row in range(self.n_levels + 1)]
         for idx in range(self.n_levels + 1):
             tc[idx][0] = skips[idx]
 
@@ -147,10 +138,7 @@ class _NestedDecoder(nn.Module):
         for idx in range(1, self.n_levels + 1):
             lv = idx - 1
             for i, block in enumerate(self.up_blocks[lv]):  # type: ignore[index]
-                skip_tensors = [
-                    tc[j][j - (idx - i - 1)]  # type: ignore[index]
-                    for j in range(idx - i - 1, idx)
-                ]
+                skip_tensors = [tc[j][j - (idx - i - 1)] for j in range(idx - i - 1, idx)]  # type: ignore[index]
                 tc[idx][i + 1] = block(tc[idx][i], skip_tensors)  # type: ignore[arg-type]
             # Terminal node at this level → output conv
             terminal = tc[idx][-1]
@@ -231,9 +219,7 @@ class DualHeadNestedVNet(nn.Module, SizeMixin):
         self.la_decoder = _NestedDecoder(enc_ch, up_conv, norm, act, self.__config.heads.la.out_channels, ds)
         self.scar_decoder = _NestedDecoder(enc_ch, up_conv, norm, act, self.__config.heads.scar.out_channels, ds)
 
-    def forward(
-        self, x: torch.Tensor
-    ) -> Tuple[
+    def forward(self, x: torch.Tensor) -> Tuple[
         Union[torch.Tensor, List[torch.Tensor]],
         Union[torch.Tensor, List[torch.Tensor]],
     ]:
@@ -255,15 +241,14 @@ class DualHeadNestedVNet(nn.Module, SizeMixin):
     def _check_config(self) -> None:
         dc = self.__config.down_conv
         uc = self.__config.up_conv
-        assert len(dc.channels) == len(dc.kernel_size) == len(dc.dropout), (
-            "down_conv: channels, kernel_size, dropout must have equal length"
-        )
-        assert len(uc.channels) == len(uc.kernel_size) == len(uc.dropout), (
-            "up_conv: channels, kernel_size, dropout must have equal length"
-        )
+        assert (
+            len(dc.channels) == len(dc.kernel_size) == len(dc.dropout)
+        ), "down_conv: channels, kernel_size, dropout must have equal length"
+        assert (
+            len(uc.channels) == len(uc.kernel_size) == len(uc.dropout)
+        ), "up_conv: channels, kernel_size, dropout must have equal length"
         assert len(dc.channels) == len(uc.channels), "down_conv and up_conv must have the same depth"
 
     @property
     def config(self) -> CFG:
         return self.__config
-

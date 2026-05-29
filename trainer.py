@@ -21,7 +21,7 @@ from torch_ecg.components.trainer import BaseTrainer
 from torch_ecg.utils.misc import str2bool
 from tqdm.auto import tqdm
 
-from cfg import CT_TrainCfg, ModelCfg, MRI_Stage1_TrainCfg, MRI_Stage2_TrainCfg, MRI_TrainCfg
+from cfg import CT_TrainCfg, ModelCfg, MRI_Stage1_TrainCfg, MRI_Stage2_TrainCfg
 from dataset import (
     CARE2026_CT_Dataset,
     CARE2026_MRI_Stage1_Dataset,
@@ -35,7 +35,7 @@ from models import CARE2026_CT_Model, CARE2026_MRI_Stage1_Model, CARE2026_MRI_St
 __all__ = [
     "CARE2026_MRI_Stage1_Trainer",
     "CARE2026_MRI_Stage2_Trainer",
-    "CARE2026_MRI_Trainer",          # alias for Stage2
+    "CARE2026_MRI_Trainer",  # alias for Stage2
     "CARE2026_CT_Trainer",
 ]
 
@@ -658,6 +658,7 @@ def get_args(**kwargs: Any) -> CFG:
 if __name__ == "__main__":
     # Prevent CUDA memory fragmentation (critical for large 3-D volumes)
     import os as _os
+
     _os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
 
     args = get_args()

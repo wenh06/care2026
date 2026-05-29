@@ -24,7 +24,7 @@ __all__ = [
     "BaseCfg",
     "MRI_Stage1_TrainCfg",
     "MRI_Stage2_TrainCfg",
-    "MRI_TrainCfg",   # alias for MRI_Stage2_TrainCfg
+    "MRI_TrainCfg",  # alias for MRI_Stage2_TrainCfg
     "CT_TrainCfg",
     "ModelCfg",
 ]
@@ -65,14 +65,14 @@ MRI_Stage1_TrainCfg.stage = 1
 
 # Volume shape after resampling to canonical then downsampling to Stage 1 resolution
 MRI_Stage1_TrainCfg.canonical_shape = MRI_CANONICAL_SHAPE  # (576, 576, 44)
-MRI_Stage1_TrainCfg.patch_shape = MRI_STAGE1_SHAPE         # (144, 144, 44)
+MRI_Stage1_TrainCfg.patch_shape = MRI_STAGE1_SHAPE  # (144, 144, 44)
 
 # No HW sub-crop during training: Stage 1 input is already small
 MRI_Stage1_TrainCfg.train_crop_hw = 0
 
 # Training duration and batch
 MRI_Stage1_TrainCfg.n_epochs = 100
-MRI_Stage1_TrainCfg.batch_size = 4         # small input → larger batch fits fine
+MRI_Stage1_TrainCfg.batch_size = 4  # small input → larger batch fits fine
 MRI_Stage1_TrainCfg.use_amp = True
 MRI_Stage1_TrainCfg.accumulate_grad_batches = 1
 
@@ -110,9 +110,9 @@ MRI_Stage2_TrainCfg.task = "mri"
 MRI_Stage2_TrainCfg.stage = 2
 
 # Volume shape: canonical → crop centred on LA centroid
-MRI_Stage2_TrainCfg.canonical_shape = MRI_CANONICAL_SHAPE    # (576, 576, 44)
-MRI_Stage2_TrainCfg.cache_shape = MRI_STAGE2_CACHE_SHAPE     # (320, 320, 44) generous cache
-MRI_Stage2_TrainCfg.patch_shape = MRI_STAGE2_CROP_SHAPE      # (256, 256, 44) model input
+MRI_Stage2_TrainCfg.canonical_shape = MRI_CANONICAL_SHAPE  # (576, 576, 44)
+MRI_Stage2_TrainCfg.cache_shape = MRI_STAGE2_CACHE_SHAPE  # (320, 320, 44) generous cache
+MRI_Stage2_TrainCfg.patch_shape = MRI_STAGE2_CROP_SHAPE  # (256, 256, 44) model input
 MRI_Stage2_TrainCfg.centroid_jitter = MRI_STAGE2_CENTROID_JITTER  # (32, 32, 0)
 
 # Training patch: optional further HW sub-crop to reduce GPU memory
@@ -186,7 +186,7 @@ CT_TrainCfg.lr_poly_power = 0.9
 CT_TrainCfg.aug_prob = 0.5
 
 # Cross Pseudo Supervision (CPS) settings
-CT_TrainCfg.cps_lambda_max = 1.0    # maximum CPS consistency weight
+CT_TrainCfg.cps_lambda_max = 1.0  # maximum CPS consistency weight
 CT_TrainCfg.cps_rampup_epochs = 30  # ramp λ_cps linearly from 0 → cps_lambda_max
 
 # Loss weights (supervised Dice + CE on labeled, CPS on all)
@@ -211,7 +211,7 @@ ModelCfg = CFG()
 
 ModelCfg.vnet_stage1 = CFG(
     in_channels=1,
-    num_classes=2,   # binary: background + LA cavity
+    num_classes=2,  # binary: background + LA cavity
     norm="instance",
     activation="mish",
     input_conv=CFG(channels=16, kernel_size=5),
@@ -249,8 +249,8 @@ ModelCfg.vnet = CFG(
     output_conv=CFG(kernel_size=1),
     # Two output heads: LA cavity (binary) and LA scar (binary)
     heads=CFG(
-        la=CFG(out_channels=2),   # 2-class: background + LA cavity
-        scar=CFG(out_channels=2), # 2-class: background + scar
+        la=CFG(out_channels=2),  # 2-class: background + LA cavity
+        scar=CFG(out_channels=2),  # 2-class: background + scar
     ),
 )
 

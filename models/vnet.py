@@ -189,12 +189,12 @@ class DualHeadVNet(nn.Module, SizeMixin):
     def _check_config(self) -> None:
         dc = self.__config.down_conv
         uc = self.__config.up_conv
-        assert len(dc.channels) == len(dc.kernel_size) == len(dc.dropout), (
-            "down_conv: channels, kernel_size, dropout must have equal length"
-        )
-        assert len(uc.channels) == len(uc.kernel_size) == len(uc.dropout), (
-            "up_conv: channels, kernel_size, dropout must have equal length"
-        )
+        assert (
+            len(dc.channels) == len(dc.kernel_size) == len(dc.dropout)
+        ), "down_conv: channels, kernel_size, dropout must have equal length"
+        assert (
+            len(uc.channels) == len(uc.kernel_size) == len(uc.dropout)
+        ), "up_conv: channels, kernel_size, dropout must have equal length"
         assert len(dc.channels) == len(uc.channels), "down_conv and up_conv must have the same depth"
 
     @property
@@ -275,15 +275,14 @@ class VNet(nn.Module, SizeMixin):
     def _check_config(self) -> None:
         dc = self.__config.down_conv
         uc = self.__config.up_conv
-        assert len(dc.channels) == len(dc.kernel_size) == len(dc.dropout), (
-            "down_conv: channels, kernel_size, dropout must have equal length"
-        )
-        assert len(uc.channels) == len(uc.kernel_size) == len(uc.dropout), (
-            "up_conv: channels, kernel_size, dropout must have equal length"
-        )
+        assert (
+            len(dc.channels) == len(dc.kernel_size) == len(dc.dropout)
+        ), "down_conv: channels, kernel_size, dropout must have equal length"
+        assert (
+            len(uc.channels) == len(uc.kernel_size) == len(uc.dropout)
+        ), "up_conv: channels, kernel_size, dropout must have equal length"
         assert len(dc.channels) == len(uc.channels), "down_conv and up_conv must have the same depth"
 
     @property
     def config(self) -> CFG:
         return self.__config
-

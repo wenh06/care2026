@@ -20,7 +20,7 @@ from torch_ecg.cfg import CFG
 from torch_ecg.utils.misc import ReprMixin
 from tqdm.auto import tqdm
 
-from cfg import CT_TrainCfg, MRI_Stage1_TrainCfg, MRI_Stage2_TrainCfg, MRI_TrainCfg
+from cfg import CT_TrainCfg, MRI_Stage1_TrainCfg, MRI_Stage2_TrainCfg
 from const import (
     CT_HU_MAX,
     CT_HU_MIN,
@@ -37,7 +37,7 @@ from data_reader import CARE2026_CT, CARE2026_MRI
 __all__ = [
     "CARE2026_MRI_Stage1_Dataset",
     "CARE2026_MRI_Stage2_Dataset",
-    "CARE2026_MRI_Dataset",         # alias for Stage2
+    "CARE2026_MRI_Dataset",  # alias for Stage2
     "CARE2026_CT_Dataset",
     "collate_fn_mri_stage1",
     "collate_fn_mri",
@@ -170,7 +170,7 @@ class CARE2026_MRI_Stage1_Dataset(Dataset, ReprMixin):
         return len(self._indices)
 
     def __getitem__(self, idx: int) -> Dict:
-        image = self._cache_image[idx].copy()   # (1, H, W, D)
+        image = self._cache_image[idx].copy()  # (1, H, W, D)
         la_mask = self._cache_la_mask[idx].copy()
         record = self._cache_records[idx]
 
@@ -297,7 +297,9 @@ class CARE2026_MRI_Stage2_Dataset(Dataset, ReprMixin):
                 # 3. Crop generous cache region around centroid
                 cH, cW, cD = self._cache_shape
                 img_cache, la_cache, scar_cache = _centroid_crop(
-                    image, la_mask, scar_mask,
+                    image,
+                    la_mask,
+                    scar_mask,
                     centroid=(cx, cy, cz),
                     crop_shape=self._cache_shape,
                 )
@@ -317,7 +319,7 @@ class CARE2026_MRI_Stage2_Dataset(Dataset, ReprMixin):
         return len(self._indices)
 
     def __getitem__(self, idx: int) -> Dict:
-        image = self._cache_image[idx].copy()   # (1, cH, cW, cD)
+        image = self._cache_image[idx].copy()  # (1, cH, cW, cD)
         la_mask = self._cache_la_mask[idx].copy()
         scar_mask = self._cache_scar_mask[idx].copy()
         has_scar = bool(self._cache_has_scar[idx])
@@ -332,7 +334,9 @@ class CARE2026_MRI_Stage2_Dataset(Dataset, ReprMixin):
                 jitter[i] = int(np.random.randint(-max_j, max_j + 1)) if max_j > 0 else 0
 
             image, la_mask, scar_mask = _jitter_and_crop(
-                image, la_mask, scar_mask,
+                image,
+                la_mask,
+                scar_mask,
                 jitter=jitter,
                 crop_shape=self._crop_shape,
             )
@@ -344,7 +348,9 @@ class CARE2026_MRI_Stage2_Dataset(Dataset, ReprMixin):
         else:
             # Validation: take the exact centre sub-crop (no jitter)
             image, la_mask, scar_mask = _jitter_and_crop(
-                image, la_mask, scar_mask,
+                image,
+                la_mask,
+                scar_mask,
                 jitter=[0, 0, 0],
                 crop_shape=self._crop_shape,
             )
@@ -569,9 +575,9 @@ def _centroid_crop(
     y0 = _clamp(cy - cW // 2, cW, W)
     z0 = _clamp(cz - cD // 2, cD, D)
 
-    img_crop   = image   [x0:x0 + cH, y0:y0 + cW, z0:z0 + cD]
-    la_crop    = la_mask [x0:x0 + cH, y0:y0 + cW, z0:z0 + cD]
-    scar_crop  = scar_mask[x0:x0 + cH, y0:y0 + cW, z0:z0 + cD]
+    img_crop = image[x0 : x0 + cH, y0 : y0 + cW, z0 : z0 + cD]
+    la_crop = la_mask[x0 : x0 + cH, y0 : y0 + cW, z0 : z0 + cD]
+    scar_crop = scar_mask[x0 : x0 + cH, y0 : y0 + cW, z0 : z0 + cD]
 
     # Pad to exact crop_shape if the centroid is too close to a border
     for i, (arr, sz) in enumerate(zip([img_crop, la_crop, scar_crop], [cH, cW, cD])):
@@ -580,9 +586,9 @@ def _centroid_crop(
     pad_y = max(0, cW - img_crop.shape[1])
     pad_z = max(0, cD - img_crop.shape[2])
     if pad_x > 0 or pad_y > 0 or pad_z > 0:
-        img_crop   = np.pad(img_crop,   [(0, pad_x), (0, pad_y), (0, pad_z)])
-        la_crop    = np.pad(la_crop,    [(0, pad_x), (0, pad_y), (0, pad_z)])
-        scar_crop  = np.pad(scar_crop,  [(0, pad_x), (0, pad_y), (0, pad_z)])
+        img_crop = np.pad(img_crop, [(0, pad_x), (0, pad_y), (0, pad_z)])
+        la_crop = np.pad(la_crop, [(0, pad_x), (0, pad_y), (0, pad_z)])
+        scar_crop = np.pad(scar_crop, [(0, pad_x), (0, pad_y), (0, pad_z)])
 
     return img_crop, la_crop, scar_crop
 
@@ -622,17 +628,17 @@ def _jitter_and_crop(
     y0 = _clamp(jitter[1], cW, tW)
     z0 = _clamp(jitter[2], cD, tD)
 
-    img_out  = image  [:, x0:x0 + tH, y0:y0 + tW, z0:z0 + tD]
-    la_out   = la_mask   [x0:x0 + tH, y0:y0 + tW, z0:z0 + tD]
-    scar_out = scar_mask [x0:x0 + tH, y0:y0 + tW, z0:z0 + tD]
+    img_out = image[:, x0 : x0 + tH, y0 : y0 + tW, z0 : z0 + tD]
+    la_out = la_mask[x0 : x0 + tH, y0 : y0 + tW, z0 : z0 + tD]
+    scar_out = scar_mask[x0 : x0 + tH, y0 : y0 + tW, z0 : z0 + tD]
 
     # Pad to exact shape if needed (e.g. near boundaries)
     px = max(0, tH - img_out.shape[1])
     py = max(0, tW - img_out.shape[2])
     pz = max(0, tD - img_out.shape[3])
     if px > 0 or py > 0 or pz > 0:
-        img_out  = np.pad(img_out,  [(0, 0), (0, px), (0, py), (0, pz)])
-        la_out   = np.pad(la_out,   [(0, px), (0, py), (0, pz)])
+        img_out = np.pad(img_out, [(0, 0), (0, px), (0, py), (0, pz)])
+        la_out = np.pad(la_out, [(0, px), (0, py), (0, pz)])
         scar_out = np.pad(scar_out, [(0, px), (0, py), (0, pz)])
 
     return img_out, la_out, scar_out
@@ -669,16 +675,16 @@ def _crop_hw_train(
     h0 = int(np.clip(ch - crop_hw // 2, 0, max(H - crop_hw, 0)))
     w0 = int(np.clip(cw - crop_hw // 2, 0, max(W - crop_hw, 0)))
 
-    img_crop  = image[:, h0 : h0 + crop_hw, w0 : w0 + crop_hw, :]
-    la_crop   = la_mask[h0 : h0 + crop_hw, w0 : w0 + crop_hw, :]
+    img_crop = image[:, h0 : h0 + crop_hw, w0 : w0 + crop_hw, :]
+    la_crop = la_mask[h0 : h0 + crop_hw, w0 : w0 + crop_hw, :]
     scar_crop = scar_mask[h0 : h0 + crop_hw, w0 : w0 + crop_hw, :]
 
     # Pad if any dimension is smaller than crop_hw
     ph = max(0, crop_hw - img_crop.shape[1])
     pw = max(0, crop_hw - img_crop.shape[2])
     if ph > 0 or pw > 0:
-        img_crop  = np.pad(img_crop,  [(0, 0), (0, ph), (0, pw), (0, 0)])
-        la_crop   = np.pad(la_crop,   [(0, ph), (0, pw), (0, 0)])
+        img_crop = np.pad(img_crop, [(0, 0), (0, ph), (0, pw), (0, 0)])
+        la_crop = np.pad(la_crop, [(0, ph), (0, pw), (0, 0)])
         scar_crop = np.pad(scar_crop, [(0, ph), (0, pw), (0, 0)])
 
     return img_crop, la_crop, scar_crop

@@ -332,9 +332,7 @@ class CARE2026_MRI(_DataBase):
         """
         path = self.get_la_path(rec)
         if path is None:
-            raise FileNotFoundError(
-                f"LA cavity annotation not found for record '{self._resolve_rec(rec)}'"
-            )
+            raise FileNotFoundError(f"LA cavity annotation not found for record '{self._resolve_rec(rec)}'")
         mask = (nib.load(str(path)).get_fdata() > 0).astype(np.uint8)
         if output_shape is not None:
             mask = self.resample_ann(mask, output_shape)
@@ -362,9 +360,7 @@ class CARE2026_MRI(_DataBase):
         """
         path = self.get_scar_path(rec)
         if path is None:
-            raise FileNotFoundError(
-                f"Scar annotation not found for record '{self._resolve_rec(rec)}'"
-            )
+            raise FileNotFoundError(f"Scar annotation not found for record '{self._resolve_rec(rec)}'")
         mask = (nib.load(str(path)).get_fdata() > 0).astype(np.uint8)
         if output_shape is not None:
             mask = self.resample_ann(mask, output_shape)
@@ -836,9 +832,7 @@ class CARE2026_CT(_DataBase):
         """
         path = self.get_ann_path(rec)
         if path is None:
-            raise FileNotFoundError(
-                f"No label available for record '{self._resolve_rec(rec)}'"
-            )
+            raise FileNotFoundError(f"No label available for record '{self._resolve_rec(rec)}'")
         mask = nib.load(str(path)).get_fdata().astype(np.uint8)
         if output_shape is not None:
             mask = self.resample_ann(mask, output_shape)

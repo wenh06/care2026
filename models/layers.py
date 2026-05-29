@@ -7,7 +7,7 @@ Conventions:
 - activation: "relu", "leaky_relu", "mish", "elu", "prelu"
 """
 
-from typing import Literal, Optional, Union, List
+from typing import List, Literal, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -116,9 +116,7 @@ class ResBlock3D(nn.Module):
         super().__init__()
         self.conv1 = ConvNormAct(in_channels, out_channels, kernel_size, norm=norm, activation=activation)
         self.conv2 = ConvNormAct(out_channels, out_channels, kernel_size, norm=norm, activation=activation)
-        self.skip = (
-            nn.Conv3d(in_channels, out_channels, 1, bias=False) if in_channels != out_channels else nn.Identity()
-        )
+        self.skip = nn.Conv3d(in_channels, out_channels, 1, bias=False) if in_channels != out_channels else nn.Identity()
         self.dropout = nn.Dropout3d(p=dropout) if dropout > 0 else nn.Identity()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -151,7 +149,9 @@ class DownBlock3D(nn.Module):
     ) -> None:
         super().__init__()
         self.down = nn.Conv3d(in_channels, in_channels, 2, stride=2, padding=0, bias=False)
-        self.block = ResBlock3D(in_channels, out_channels, kernel_size=kernel_size, norm=norm, activation=activation, dropout=dropout)
+        self.block = ResBlock3D(
+            in_channels, out_channels, kernel_size=kernel_size, norm=norm, activation=activation, dropout=dropout
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.block(self.down(x))

@@ -41,12 +41,8 @@ __all__ = [
 # Cache directories (override via environment variables)
 # ---------------------------------------------------------------------------
 
-MODEL_CACHE_DIR = Path(
-    os.environ.get("CARE2026_MODEL_CACHE", Path.home() / ".cache" / "care2026" / "models")
-)
-DATA_CACHE_DIR = Path(
-    os.environ.get("CARE2026_DATA_CACHE", Path.home() / ".cache" / "care2026" / "data")
-)
+MODEL_CACHE_DIR = Path(os.environ.get("CARE2026_MODEL_CACHE", Path.home() / ".cache" / "care2026" / "models"))
+DATA_CACHE_DIR = Path(os.environ.get("CARE2026_DATA_CACHE", Path.home() / ".cache" / "care2026" / "data"))
 
 MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 DATA_CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -102,7 +98,7 @@ CT_PATCH_SIZE = 128  # voxels per side after isotropic resampling
 # ---------------------------------------------------------------------------
 
 CT_HU_MIN = -200.0  # lower clip value (HU)
-CT_HU_MAX = 800.0   # upper clip value (HU)
+CT_HU_MAX = 800.0  # upper clip value (HU)
 
 # ---------------------------------------------------------------------------
 # Class mappings
@@ -131,10 +127,10 @@ CT_NUM_CLASSES = len(CT_CLASS_MAP)  # 4
 # Dataset size constants
 # ---------------------------------------------------------------------------
 
-TASK1_TRAIN_COUNT = 60    # Task 1 MRI samples (scar + cavity labels)
-TASK2_TRAIN_COUNT = 130   # Task 2 MRI samples (cavity label only)
-CT_TOTAL_COUNT = 150      # CT samples total
-CT_LABELED_COUNT = 50     # CT samples with ground-truth labels (train_1..train_50)
+TASK1_TRAIN_COUNT = 60  # Task 1 MRI samples (scar + cavity labels)
+TASK2_TRAIN_COUNT = 130  # Task 2 MRI samples (cavity label only)
+CT_TOTAL_COUNT = 150  # CT samples total
+CT_LABELED_COUNT = 50  # CT samples with ground-truth labels (train_1..train_50)
 CT_UNLABELED_COUNT = 100  # CT samples without labels (train_51..train_150)
 
 # ---------------------------------------------------------------------------

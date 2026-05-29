@@ -17,7 +17,7 @@ from torch_ecg.cfg import CFG
 from torch_ecg.utils.misc import CitationMixin
 from torch_ecg.utils.utils_nn import CkptMixin, SizeMixin
 
-from cfg import CT_TrainCfg, ModelCfg, MRI_Stage1_TrainCfg, MRI_Stage2_TrainCfg, MRI_TrainCfg
+from cfg import CT_TrainCfg, ModelCfg, MRI_Stage1_TrainCfg, MRI_Stage2_TrainCfg
 from outputs import CARE2026Outputs
 
 from .loss import CTLoss, MRILoss, Stage1MRILoss
@@ -27,7 +27,7 @@ from .vnet import DualHeadVNet, VNet
 __all__ = [
     "CARE2026_MRI_Stage1_Model",
     "CARE2026_MRI_Stage2_Model",
-    "CARE2026_MRI_Model",       # alias for Stage2
+    "CARE2026_MRI_Model",  # alias for Stage2
     "CARE2026_CT_Model",
 ]
 

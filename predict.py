@@ -41,7 +41,7 @@ from outputs import CARE2026Outputs
 
 __all__ = [
     "predict_mri_two_stage",
-    "predict_mri",              # deprecated shim
+    "predict_mri",  # deprecated shim
     "predict_ct",
     "sliding_window_inference",
 ]
@@ -299,13 +299,13 @@ def predict_mri_two_stage(
         else:
             la_prob_s2, scar_prob_s2 = _run_stage2_model(stage2_model, t_s2, device)
 
-    la_crop = la_prob_s2.argmax(axis=0).astype(np.uint8)      # (tH, tW, tD)
+    la_crop = la_prob_s2.argmax(axis=0).astype(np.uint8)  # (tH, tW, tD)
     scar_crop = scar_prob_s2.argmax(axis=0).astype(np.uint8)
 
     # ── Place Stage-2 results back in canonical space ─────────────────────
     # Strip any padding that was added before placing back
-    la_unpad = la_crop[px0: tH - px1, py0: tW - py1, pz0: tD - pz1]
-    scar_unpad = scar_crop[px0: tH - px1, py0: tW - py1, pz0: tD - pz1]
+    la_unpad = la_crop[px0 : tH - px1, py0 : tW - py1, pz0 : tD - pz1]
+    scar_unpad = scar_crop[px0 : tH - px1, py0 : tW - py1, pz0 : tD - pz1]
 
     la_canonical = np.zeros(canonical_shape, dtype=np.uint8)
     scar_canonical = np.zeros(canonical_shape, dtype=np.uint8)
@@ -374,9 +374,12 @@ def predict_mri(
         x1, y1, z1 = orig_shape
     else:
         mins, maxs = fg.min(axis=0), fg.max(axis=0)
-        x0 = max(0, mins[0] - pad);  x1 = min(orig_shape[0], maxs[0] + pad)
-        y0 = max(0, mins[1] - pad);  y1 = min(orig_shape[1], maxs[1] + pad)
-        z0 = max(0, mins[2] - pad);  z1 = min(orig_shape[2], maxs[2] + pad)
+        x0 = max(0, mins[0] - pad)
+        x1 = min(orig_shape[0], maxs[0] + pad)
+        y0 = max(0, mins[1] - pad)
+        y1 = min(orig_shape[1], maxs[1] + pad)
+        z0 = max(0, mins[2] - pad)
+        z1 = min(orig_shape[2], maxs[2] + pad)
 
     crop = image_raw[x0:x1, y0:y1, z0:z1]
     crop_shape = crop.shape

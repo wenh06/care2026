@@ -6,8 +6,6 @@ All losses accept:
     target : torch.Tensor, shape (B, H, W, D), dtype long (integer class indices)
 """
 
-from typing import Optional
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
