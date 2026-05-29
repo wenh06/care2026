@@ -57,9 +57,28 @@ _CARE2026_MRI_INFO = DataBaseInfo(
        Labels: LA cavity mask (atriumSegImgMO) + LA scar mask (scarSegImgM).
     2. Task 2 (LA cavity segmentation): 130 LGE-MRIs from Center A.
        Labels: LA cavity mask (atriumSegImgMO) only.
-    3. All images are in NIfTI format.  Spatial resolution: 0.625 x 0.625 x 2.5 mm.
-    4. LA cavity mask values are stored as {0, ~420}; they are normalised to {0, 1} on load.
-    5. Scar mask values are {0, 1}.
+    3. Validation: 10 records for Task 1, 20 records for Task 2 (released May 2026).
+       Test: 24 records for Task 1, 14 records (Center A) + 20 (Center B) + 10 (Center C) for Task 2.
+    4. All images are in NIfTI format.
+
+    Training-set image statistics (N = 190 LGE-MRI volumes, Center A):
+    ─────────────────────────────────────────────────────────────────
+    Spatial resolution:  0.625 × 0.625 × 2.5 mm  (in-plane × z)
+    Image matrix:        576 × 576 × 44 voxels  (modal value; all volumes)
+    Field of view:       360 × 360 × 110 mm³
+
+    LA cavity bounding box (in canonical 576×576×44 voxel space):
+      H (x):  p50 ≈ 155 px,  p75 ≈ 190 px,  p95 ≈ 230 px
+      W (y):  p50 ≈ 145 px,  p75 ≈ 175 px,  p95 ≈ 210 px
+      D (z):  all 44 slices  (LA spans the full z extent in Center A scans)
+
+    → Stage-2 crop shape (256×256×44) comfortably covers p95 LA extent
+      (230 px) with ~13 px margin on each side.
+
+    Annotation:
+      LA cavity mask: raw values {0, ~420}, normalised to {0, 1} on load.
+      LA scar mask:   values {0, 1}; average scar-to-LA ratio ≈ 5–15 %.
+      Class imbalance ratio (scar vs. non-scar within LA): ~ 1 : 10–20.
     """,
     usage=[
         "LA Scar Quantification",
@@ -80,7 +99,19 @@ _CARE2026_CT_INFO = DataBaseInfo(
     2. Labels available only for train_1..train_50 (50 labelled, 100 unlabelled).
     3. Multi-class label values: 0=background, 1=left atrium, 2=pulmonary veins, 3=left atrial appendage.
     4. Image naming: XXXX.nii.gz; label: label_XXXX.nii.gz (XXXX = 4-digit zero-padded record number).
-    5. Variable spatial resolution; z-spacing is consistently 0.5 mm.
+    5. Validation: 20 records; Test: 130 records.
+
+    Training-set image statistics (N = 150 CT volumes, Center D):
+    ─────────────────────────────────────────────────────────────
+    Spatial resolution:  in-plane 0.30–0.80 mm (variable), z = 0.5 mm (fixed)
+    Image matrix:        variable; typically 512×512 in-plane
+    HU range:            soft-tissue window; clipped to [−200, +800] HU for training
+
+    Annotation (50 labelled volumes):
+      Class 1 (LA):               present in all 50; typical DSC among top teams ≈ 0.93–0.96
+      Class 2 (pulmonary veins):  thin tubular structures; hardest class; DSC ≈ 0.82–0.89
+      Class 3 (LA appendage):     small / variable shape; DSC ≈ 0.80–0.88
+    Semi-supervised split: 50 labelled (train_1..50) + 100 unlabelled (train_51..150).
     """,
     usage=[
         "LA Multi-Structure Segmentation",

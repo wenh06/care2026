@@ -20,46 +20,87 @@ from torch_ecg.cfg import CFG
 from torch_ecg.utils.misc import ReprMixin
 from tqdm.auto import tqdm
 
-from cfg import CT_TrainCfg, MRI_TrainCfg
-from const import CT_HU_MAX, CT_HU_MIN, CT_TARGET_SPACING, DEFAULT_VAL_RATIO
+from cfg import CT_TrainCfg, MRI_Stage1_TrainCfg, MRI_Stage2_TrainCfg, MRI_TrainCfg
+from const import (
+    CT_HU_MAX,
+    CT_HU_MIN,
+    CT_TARGET_SPACING,
+    DEFAULT_VAL_RATIO,
+    MRI_CANONICAL_SHAPE,
+    MRI_STAGE1_SHAPE,
+    MRI_STAGE2_CACHE_SHAPE,
+    MRI_STAGE2_CENTROID_JITTER,
+    MRI_STAGE2_CROP_SHAPE,
+)
 from data_reader import CARE2026_CT, CARE2026_MRI
 
 __all__ = [
-    "CARE2026_MRI_Dataset",
+    "CARE2026_MRI_Stage1_Dataset",
+    "CARE2026_MRI_Stage2_Dataset",
+    "CARE2026_MRI_Dataset",         # alias for Stage2
     "CARE2026_CT_Dataset",
+    "collate_fn_mri_stage1",
     "collate_fn_mri",
     "collate_fn_ct",
 ]
 
 
 # ---------------------------------------------------------------------------
-# MRI Dataset (Tasks 1 & 2 — dual-head, in-memory)
+# Shared helpers for MRI datasets
 # ---------------------------------------------------------------------------
 
 
-class CARE2026_MRI_Dataset(Dataset, ReprMixin):
-    """In-memory dataset covering both Task 1 (scar) and Task 2 (cavity) MRI data.
+def _build_mri_index(reader_t1, reader_t2):
+    """Build unified record index: list of (reader, rec, task_id, has_scar)."""
+    index = []
+    for rec in reader_t1.all_records:
+        index.append((reader_t1, rec, 1, True))
+    for rec in reader_t2.all_records:
+        index.append((reader_t2, rec, 2, False))
+    return index
 
-    Combines all 190 LGE-MRI records (60 from Task 1 + 130 from Task 2) into a
-    single dataset.  Task-1 records carry both ``la_mask`` and ``scar_mask``;
-    Task-2 records only carry ``la_mask`` (``has_scar = False``).
 
-    Each volume is bbox-cropped to the LA region, resized to ``MRI_PATCH_SHAPE``
-    (256 × 256 × 44), and z-score normalised before being stored in RAM.
+def _mri_train_val_split(index, val_ratio, random_seed):
+    """Stratified train/val split on task label."""
+    task_labels = [item[2] for item in index]
+    idx_all = list(range(len(index)))
+    idx_train, idx_val = train_test_split(
+        idx_all,
+        test_size=val_ratio,
+        stratify=task_labels,
+        random_state=random_seed,
+    )
+    return idx_train, idx_val
+
+
+# ---------------------------------------------------------------------------
+# MRI Stage 1 Dataset — coarse LA localisation (Tasks 1 & 2)
+# ---------------------------------------------------------------------------
+
+
+class CARE2026_MRI_Stage1_Dataset(Dataset, ReprMixin):
+    """In-memory dataset for Stage 1 coarse LA localisation.
+
+    All 190 LGE-MRI records are:
+    1. Loaded at native resolution.
+    2. Resampled to ``MRI_CANONICAL_SHAPE`` (576 × 576 × 44).
+    3. Downsampled to ``MRI_STAGE1_SHAPE`` (144 × 144 × 44).
+    4. Z-score normalised, then cached in RAM as ``(1, 144, 144, 44)`` float32.
+
+    Labels: binary LA mask at Stage 1 resolution.
 
     Parameters
     ----------
     db_dir : path-like
         Root directory of the CARE 2026 dataset.
     config : CFG, optional
-        Training configuration (defaults to ``MRI_TrainCfg``).
+        Training configuration (defaults to ``MRI_Stage1_TrainCfg``).
     training : bool, default True
         Whether this is the training split (enables augmentation).
-    val_ratio : float, default 0.1
+    val_ratio : float, default DEFAULT_VAL_RATIO
         Fraction of samples held out for validation.
     random_seed : int, default 42
         Reproducible train/val split seed.
-
     """
 
     def __init__(
@@ -71,7 +112,7 @@ class CARE2026_MRI_Dataset(Dataset, ReprMixin):
         random_seed: int = 42,
     ) -> None:
         super().__init__()
-        self.config = CFG(deepcopy(MRI_TrainCfg))
+        self.config = CFG(deepcopy(MRI_Stage1_TrainCfg))
         if config is not None:
             self.config.update(deepcopy(config))
         self.training = training
@@ -79,101 +120,234 @@ class CARE2026_MRI_Dataset(Dataset, ReprMixin):
 
         self._reader_t1 = CARE2026_MRI(db_dir=self.db_dir, task=1, verbose=0)
         self._reader_t2 = CARE2026_MRI(db_dir=self.db_dir, task=2, verbose=0)
+        self._index = _build_mri_index(self._reader_t1, self._reader_t2)
 
-        # Unified record index: (reader, record_name, task_id, has_scar)
-        self._index: List[Tuple] = []
-        for rec in self._reader_t1.all_records:
-            self._index.append((self._reader_t1, rec, 1, True))
-        for rec in self._reader_t2.all_records:
-            self._index.append((self._reader_t2, rec, 2, False))
-
-        # Stratified train/val split (stratify by task to preserve proportions)
-        task_labels = [item[2] for item in self._index]
-        idx_all = list(range(len(self._index)))
-        idx_train, idx_val = train_test_split(
-            idx_all,
-            test_size=val_ratio,
-            stratify=task_labels,
-            random_state=random_seed,
-        )
+        idx_train, idx_val = _mri_train_val_split(self._index, val_ratio, random_seed)
         self._indices = idx_train if training else idx_val
 
-        # Pre-allocate in-memory cache arrays
-        patch_shape = tuple(self.config.patch_shape)  # (H, W, D)
+        canonical_shape = tuple(self.config.get("canonical_shape", MRI_CANONICAL_SHAPE))
+        stage1_shape = tuple(self.config.get("patch_shape", MRI_STAGE1_SHAPE))
         n = len(self._indices)
-        self._cache_image = np.zeros((n, 1, *patch_shape), dtype=np.float32)
-        self._cache_la_mask = np.zeros((n, *patch_shape), dtype=np.uint8)
-        self._cache_scar_mask = np.zeros((n, *patch_shape), dtype=np.uint8)
+        self._cache_image = np.zeros((n, 1, *stage1_shape), dtype=np.float32)
+        self._cache_la_mask = np.zeros((n, *stage1_shape), dtype=np.uint8)
+        self._cache_records: List[str] = [""] * n
+
+        self._canonical_shape = canonical_shape
+        self._stage1_shape = stage1_shape
+        self._load_all()
+
+    def _load_all(self) -> None:
+        split_name = "train" if self.training else "val"
+        with tqdm(
+            enumerate(self._indices),
+            total=len(self._indices),
+            desc=f"Loading MRI Stage1 ({split_name})",
+            unit="vol",
+            dynamic_ncols=True,
+        ) as pbar:
+            for cache_idx, data_idx in pbar:
+                reader, rec, _task, _has_scar = self._index[data_idx]
+                image = reader.load_data(rec)
+                la_mask = reader.load_la_ann(rec)
+
+                # 1. Resample to canonical shape
+                image = CARE2026_MRI.resample_data(image, self._canonical_shape)
+                la_mask = CARE2026_MRI.resample_ann(la_mask, self._canonical_shape)
+
+                # 2. Downsample to Stage 1 shape
+                image = CARE2026_MRI.resample_data(image, self._stage1_shape)
+                la_mask = CARE2026_MRI.resample_ann(la_mask, self._stage1_shape)
+
+                # 3. Z-score normalise
+                mean, std = float(image.mean()), float(image.std())
+                image = (image - mean) / (std + 1e-8)
+
+                self._cache_image[cache_idx, 0] = image
+                self._cache_la_mask[cache_idx] = la_mask
+                self._cache_records[cache_idx] = rec
+
+    def __len__(self) -> int:
+        return len(self._indices)
+
+    def __getitem__(self, idx: int) -> Dict:
+        image = self._cache_image[idx].copy()   # (1, H, W, D)
+        la_mask = self._cache_la_mask[idx].copy()
+        record = self._cache_records[idx]
+
+        if self.training:
+            p = float(self.config.get("aug_prob", 0.5))
+            image, la_mask, _ = _augment_mri(image, la_mask, np.zeros_like(la_mask), p=p)
+
+        return {"image": image, "la_mask": la_mask, "record": record}
+
+    @property
+    def extra_repr_keys(self) -> List[str]:
+        return ["training", "db_dir"]
+
+
+# ---------------------------------------------------------------------------
+# MRI Stage 2 Dataset — fine LA+scar segmentation (Tasks 1 & 2)
+# ---------------------------------------------------------------------------
+
+
+class CARE2026_MRI_Stage2_Dataset(Dataset, ReprMixin):
+    """In-memory dataset for Stage 2 fine segmentation.
+
+    Each volume is:
+    1. Resampled to ``MRI_CANONICAL_SHAPE`` (576 × 576 × 44).
+    2. The GT LA centroid is computed in canonical space.
+    3. A generous region ``MRI_STAGE2_CACHE_SHAPE`` (320 × 320 × 44) centred on
+       the centroid is cropped and cached (with zero-padding at image borders).
+    4. At ``__getitem__`` time a random spatial jitter ``MRI_STAGE2_CENTROID_JITTER``
+       is applied to simulate Stage 1 prediction noise, then a sub-crop of size
+       ``MRI_STAGE2_CROP_SHAPE`` (256 × 256 × 44) is returned.
+
+    The jitter margin = (cache_H - crop_H) / 2 = (320 - 256) / 2 = 32, which
+    equals ``MRI_STAGE2_CENTROID_JITTER[0]``.
+
+    Task-1 records carry both ``la_mask`` and ``scar_mask``;
+    Task-2 records only carry ``la_mask`` (``has_scar = False``).
+
+    Parameters
+    ----------
+    db_dir : path-like
+        Root directory of the CARE 2026 dataset.
+    config : CFG, optional
+        Training configuration (defaults to ``MRI_Stage2_TrainCfg``).
+    training : bool, default True
+        Whether this is the training split (enables augmentation + jitter).
+    val_ratio : float, default DEFAULT_VAL_RATIO
+        Fraction of samples held out for validation.
+    random_seed : int, default 42
+        Reproducible train/val split seed.
+    """
+
+    def __init__(
+        self,
+        db_dir: Union[str, Path],
+        config: Optional[CFG] = None,
+        training: bool = True,
+        val_ratio: float = DEFAULT_VAL_RATIO,
+        random_seed: int = 42,
+    ) -> None:
+        super().__init__()
+        self.config = CFG(deepcopy(MRI_Stage2_TrainCfg))
+        if config is not None:
+            self.config.update(deepcopy(config))
+        self.training = training
+        self.db_dir = Path(db_dir).expanduser().resolve()
+
+        self._reader_t1 = CARE2026_MRI(db_dir=self.db_dir, task=1, verbose=0)
+        self._reader_t2 = CARE2026_MRI(db_dir=self.db_dir, task=2, verbose=0)
+        self._index = _build_mri_index(self._reader_t1, self._reader_t2)
+
+        idx_train, idx_val = _mri_train_val_split(self._index, val_ratio, random_seed)
+        self._indices = idx_train if training else idx_val
+
+        self._canonical_shape = tuple(self.config.get("canonical_shape", MRI_CANONICAL_SHAPE))
+        self._cache_shape = tuple(self.config.get("cache_shape", MRI_STAGE2_CACHE_SHAPE))
+        self._crop_shape = tuple(self.config.get("patch_shape", MRI_STAGE2_CROP_SHAPE))
+        self._jitter = tuple(self.config.get("centroid_jitter", MRI_STAGE2_CENTROID_JITTER))
+
+        n = len(self._indices)
+        self._cache_image = np.zeros((n, 1, *self._cache_shape), dtype=np.float32)
+        self._cache_la_mask = np.zeros((n, *self._cache_shape), dtype=np.uint8)
+        self._cache_scar_mask = np.zeros((n, *self._cache_shape), dtype=np.uint8)
         self._cache_has_scar = np.zeros(n, dtype=bool)
         self._cache_task = np.zeros(n, dtype=np.int64)
         self._cache_records: List[str] = [""] * n
 
         self._load_all()
 
-    # ------------------------------------------------------------------
+    def _centroid(self, mask: np.ndarray) -> Tuple[int, int, int]:
+        """Return the integer centroid of foreground voxels.  Falls back to centre."""
+        fg = np.argwhere(mask > 0)
+        if len(fg) == 0:
+            return tuple(s // 2 for s in mask.shape)
+        return tuple(int(fg[:, i].mean()) for i in range(3))
 
     def _load_all(self) -> None:
-        """Crop, resize, z-score normalise, and cache every volume."""
-        patch_shape = tuple(self.config.patch_shape)
         split_name = "train" if self.training else "val"
         with tqdm(
             enumerate(self._indices),
             total=len(self._indices),
-            desc=f"Loading MRI ({split_name})",
+            desc=f"Loading MRI Stage2 ({split_name})",
             unit="vol",
             dynamic_ncols=True,
         ) as pbar:
             for cache_idx, data_idx in pbar:
                 reader, rec, task, has_scar = self._index[data_idx]
 
-                # LA mask is always available (used for bounding box in both tasks)
-                la_mask = reader.load_la_ann(rec)
-                box = reader.load_ann_box(rec, ann_mask=la_mask)
-                (x0, x1), (y0, y1), (z0, z1) = box
+                image = reader.load_data(rec)
+                la_mask_native = reader.load_la_ann(rec)
 
-                # Crop image and LA mask to the LA bounding box
-                image = reader.load_data(rec)[x0:x1, y0:y1, z0:z1]
-                la_crop = la_mask[x0:x1, y0:y1, z0:z1]
-
-                # Resize to canonical patch shape
-                image = CARE2026_MRI.resample_data(image, patch_shape)
-                la_crop = CARE2026_MRI.resample_ann(la_crop, patch_shape)
-
-                # Z-score normalise
-                mean, std = float(image.mean()), float(image.std())
-                image = (image - mean) / (std + 1e-8)
-
-                self._cache_image[cache_idx, 0] = image
-                self._cache_la_mask[cache_idx] = la_crop
-                self._cache_task[cache_idx] = task
-                self._cache_has_scar[cache_idx] = has_scar
-                self._cache_records[cache_idx] = rec
+                # 1. Resample to canonical shape
+                image = CARE2026_MRI.resample_data(image, self._canonical_shape)
+                la_mask = CARE2026_MRI.resample_ann(la_mask_native, self._canonical_shape)
 
                 if has_scar:
-                    scar_mask = reader.load_scar_ann(rec)
-                    scar_crop = scar_mask[x0:x1, y0:y1, z0:z1]
-                    scar_crop = CARE2026_MRI.resample_ann(scar_crop, patch_shape)
-                    self._cache_scar_mask[cache_idx] = scar_crop
+                    scar_mask_native = reader.load_scar_ann(rec)
+                    scar_mask = CARE2026_MRI.resample_ann(scar_mask_native, self._canonical_shape)
+                else:
+                    scar_mask = np.zeros_like(la_mask)
 
-    # ------------------------------------------------------------------
+                # 2. Find LA centroid in canonical space
+                cx, cy, cz = self._centroid(la_mask)
+
+                # 3. Crop generous cache region around centroid
+                cH, cW, cD = self._cache_shape
+                img_cache, la_cache, scar_cache = _centroid_crop(
+                    image, la_mask, scar_mask,
+                    centroid=(cx, cy, cz),
+                    crop_shape=self._cache_shape,
+                )
+
+                # 4. Z-score normalise the image cache
+                mean, std = float(img_cache.mean()), float(img_cache.std())
+                img_cache = (img_cache - mean) / (std + 1e-8)
+
+                self._cache_image[cache_idx, 0] = img_cache
+                self._cache_la_mask[cache_idx] = la_cache
+                self._cache_scar_mask[cache_idx] = scar_cache
+                self._cache_has_scar[cache_idx] = has_scar
+                self._cache_task[cache_idx] = task
+                self._cache_records[cache_idx] = rec
 
     def __len__(self) -> int:
         return len(self._indices)
 
     def __getitem__(self, idx: int) -> Dict:
-        image = self._cache_image[idx].copy()  # (1, H, W, D)
-        la_mask = self._cache_la_mask[idx].copy()  # (H, W, D)
+        image = self._cache_image[idx].copy()   # (1, cH, cW, cD)
+        la_mask = self._cache_la_mask[idx].copy()
         scar_mask = self._cache_scar_mask[idx].copy()
         has_scar = bool(self._cache_has_scar[idx])
         task = int(self._cache_task[idx])
         record = self._cache_records[idx]
 
         if self.training:
-            aug_prob = float(self.config.get("aug_prob", 0.5))
-            image, la_mask, scar_mask = _augment_mri(image, la_mask, scar_mask, p=aug_prob)
+            # Simulate Stage 1 prediction error: apply random jitter then sub-crop
+            jitter = [0, 0, 0]
+            for i in range(3):
+                max_j = int(self._jitter[i])
+                jitter[i] = int(np.random.randint(-max_j, max_j + 1)) if max_j > 0 else 0
+
+            image, la_mask, scar_mask = _jitter_and_crop(
+                image, la_mask, scar_mask,
+                jitter=jitter,
+                crop_shape=self._crop_shape,
+            )
+            p = float(self.config.get("aug_prob", 0.5))
+            image, la_mask, scar_mask = _augment_mri(image, la_mask, scar_mask, p=p)
             crop_hw = int(self.config.get("train_crop_hw", 0))
             if crop_hw > 0:
                 image, la_mask, scar_mask = _crop_hw_train(image, la_mask, scar_mask, crop_hw)
+        else:
+            # Validation: take the exact centre sub-crop (no jitter)
+            image, la_mask, scar_mask = _jitter_and_crop(
+                image, la_mask, scar_mask,
+                jitter=[0, 0, 0],
+                crop_shape=self._crop_shape,
+            )
 
         return {
             "image": image,
@@ -187,6 +361,10 @@ class CARE2026_MRI_Dataset(Dataset, ReprMixin):
     @property
     def extra_repr_keys(self) -> List[str]:
         return ["training", "db_dir"]
+
+
+# Backward-compatibility alias
+CARE2026_MRI_Dataset = CARE2026_MRI_Stage2_Dataset
 
 
 # ---------------------------------------------------------------------------
@@ -357,6 +535,107 @@ def _pad_to_size(
         if mask is not None:
             mask = np.pad(mask, pad, mode="constant", constant_values=0)
     return image, mask
+
+
+def _centroid_crop(
+    image: np.ndarray,
+    la_mask: np.ndarray,
+    scar_mask: np.ndarray,
+    centroid: Tuple[int, int, int],
+    crop_shape: Tuple[int, int, int],
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Crop a fixed-size region centred on *centroid* from the canonical volume.
+
+    Parameters
+    ----------
+    image : (H, W, D) float32 array (canonical space, not yet normalised)
+    la_mask : (H, W, D) uint8 array
+    scar_mask : (H, W, D) uint8 array
+    centroid : (cx, cy, cz) voxel coordinates in the canonical volume
+    crop_shape : (cH, cW, cD) target crop size
+
+    Returns
+    -------
+    Tuple of (image_crop, la_crop, scar_crop), each of shape *crop_shape*.
+    """
+    H, W, D = image.shape
+    cH, cW, cD = crop_shape
+    cx, cy, cz = centroid
+
+    def _clamp(start, size, max_dim):
+        return int(np.clip(start, 0, max(max_dim - size, 0)))
+
+    x0 = _clamp(cx - cH // 2, cH, H)
+    y0 = _clamp(cy - cW // 2, cW, W)
+    z0 = _clamp(cz - cD // 2, cD, D)
+
+    img_crop   = image   [x0:x0 + cH, y0:y0 + cW, z0:z0 + cD]
+    la_crop    = la_mask [x0:x0 + cH, y0:y0 + cW, z0:z0 + cD]
+    scar_crop  = scar_mask[x0:x0 + cH, y0:y0 + cW, z0:z0 + cD]
+
+    # Pad to exact crop_shape if the centroid is too close to a border
+    for i, (arr, sz) in enumerate(zip([img_crop, la_crop, scar_crop], [cH, cW, cD])):
+        pass  # padding handled below
+    pad_x = max(0, cH - img_crop.shape[0])
+    pad_y = max(0, cW - img_crop.shape[1])
+    pad_z = max(0, cD - img_crop.shape[2])
+    if pad_x > 0 or pad_y > 0 or pad_z > 0:
+        img_crop   = np.pad(img_crop,   [(0, pad_x), (0, pad_y), (0, pad_z)])
+        la_crop    = np.pad(la_crop,    [(0, pad_x), (0, pad_y), (0, pad_z)])
+        scar_crop  = np.pad(scar_crop,  [(0, pad_x), (0, pad_y), (0, pad_z)])
+
+    return img_crop, la_crop, scar_crop
+
+
+def _jitter_and_crop(
+    image: np.ndarray,
+    la_mask: np.ndarray,
+    scar_mask: np.ndarray,
+    jitter: List[int],
+    crop_shape: Tuple[int, int, int],
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Apply jitter offset and extract a sub-crop from the cache arrays.
+
+    The cache arrays have shape ``(1, cH, cW, cD)`` (image) / ``(cH, cW, cD)``
+    (masks).  The crop is taken from the centre of the cache with an added jitter.
+
+    Parameters
+    ----------
+    image : (1, cH, cW, cD) float32
+    la_mask : (cH, cW, cD) uint8
+    scar_mask : (cH, cW, cD) uint8
+    jitter : [dx, dy, dz] integers (may be negative)
+    crop_shape : (H, W, D) target output size
+
+    Returns
+    -------
+    Tuple (image_crop, la_crop, scar_crop) with image shape (1, H, W, D).
+    """
+    _, cH, cW, cD = image.shape
+    tH, tW, tD = crop_shape
+
+    def _clamp(offset, cache_dim, target_dim):
+        start = (cache_dim - target_dim) // 2 + offset
+        return int(np.clip(start, 0, max(cache_dim - target_dim, 0)))
+
+    x0 = _clamp(jitter[0], cH, tH)
+    y0 = _clamp(jitter[1], cW, tW)
+    z0 = _clamp(jitter[2], cD, tD)
+
+    img_out  = image  [:, x0:x0 + tH, y0:y0 + tW, z0:z0 + tD]
+    la_out   = la_mask   [x0:x0 + tH, y0:y0 + tW, z0:z0 + tD]
+    scar_out = scar_mask [x0:x0 + tH, y0:y0 + tW, z0:z0 + tD]
+
+    # Pad to exact shape if needed (e.g. near boundaries)
+    px = max(0, tH - img_out.shape[1])
+    py = max(0, tW - img_out.shape[2])
+    pz = max(0, tD - img_out.shape[3])
+    if px > 0 or py > 0 or pz > 0:
+        img_out  = np.pad(img_out,  [(0, 0), (0, px), (0, py), (0, pz)])
+        la_out   = np.pad(la_out,   [(0, px), (0, py), (0, pz)])
+        scar_out = np.pad(scar_out, [(0, px), (0, py), (0, pz)])
+
+    return img_out, la_out, scar_out
 
 
 def _crop_hw_train(
@@ -543,6 +822,27 @@ def _augment_ct(
 # ---------------------------------------------------------------------------
 # Collate functions
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Collate functions
+# ---------------------------------------------------------------------------
+
+
+def collate_fn_mri_stage1(batch: List[Dict]) -> Dict:
+    """Collate Stage 1 MRI dataset samples into a batch.
+
+    Returns
+    -------
+    dict
+        ``image``   : float32 tensor ``(B, 1, H, W, D)``
+        ``la_mask`` : int64 tensor   ``(B, H, W, D)``
+        ``record``  : list of str, length ``B``
+    """
+    images = torch.from_numpy(np.stack([s["image"] for s in batch]))
+    la_masks = torch.from_numpy(np.stack([s["la_mask"] for s in batch])).long()
+    records = [s["record"] for s in batch]
+    return {"image": images, "la_mask": la_masks, "record": records}
 
 
 def collate_fn_mri(batch: List[Dict]) -> Dict:

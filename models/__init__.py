@@ -17,21 +17,130 @@ from torch_ecg.cfg import CFG
 from torch_ecg.utils.misc import CitationMixin
 from torch_ecg.utils.utils_nn import CkptMixin, SizeMixin
 
-from cfg import CT_TrainCfg, ModelCfg, MRI_TrainCfg
+from cfg import CT_TrainCfg, ModelCfg, MRI_Stage1_TrainCfg, MRI_Stage2_TrainCfg, MRI_TrainCfg
 from outputs import CARE2026Outputs
 
-from .loss import CTLoss, MRILoss
+from .loss import CTLoss, MRILoss, Stage1MRILoss
 from .nested_vnet import DualHeadNestedVNet
 from .vnet import DualHeadVNet, VNet
 
 __all__ = [
-    "CARE2026_MRI_Model",
+    "CARE2026_MRI_Stage1_Model",
+    "CARE2026_MRI_Stage2_Model",
+    "CARE2026_MRI_Model",       # alias for Stage2
     "CARE2026_CT_Model",
 ]
 
 
-class CARE2026_MRI_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
-    """Wrapper for dual-head VNet (or NestedVNet) for MRI Tasks 1 & 2.
+class CARE2026_MRI_Stage1_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
+    """Wrapper for single-head VNet for coarse LA localisation (Stage 1).
+
+    Operates on the full volume downsampled to MRI_STAGE1_SHAPE (144×144×44).
+    Predicts a binary LA mask used only to locate the LA centroid for Stage 2.
+
+    Parameters
+    ----------
+    config : CFG, optional
+        Model config overrides (merged on top of ``ModelCfg.vnet_stage1``).
+    train_config : CFG, optional
+        Training config for loss weights (merged on top of MRI_Stage1_TrainCfg).
+    """
+
+    __name__ = "CARE2026_MRI_Stage1_Model"
+
+    def __init__(
+        self,
+        config: Optional[CFG] = None,
+        train_config: Optional[CFG] = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__()
+        self.__config = deepcopy(ModelCfg)
+        if config is not None:
+            self.__config.update(deepcopy(config))
+        self.__train_config = deepcopy(MRI_Stage1_TrainCfg)
+        if train_config is not None:
+            self.__train_config.update(deepcopy(train_config))
+
+        # Single-head VNet (binary LA only): use the vnet_stage1 config
+        self.backbone = VNet(self.config.vnet_stage1)
+        self.criterion = Stage1MRILoss(self.train_config)
+
+    def forward(
+        self,
+        img: torch.Tensor,
+        labels: Optional[Dict[str, torch.Tensor]] = None,
+    ) -> Dict[str, torch.Tensor]:
+        """Forward pass.
+
+        Parameters
+        ----------
+        img : torch.Tensor, shape (B, 1, H, W, D)
+        labels : dict, optional
+            Training labels:
+            - "la_mask": (B, H, W, D) long
+
+        Returns
+        -------
+        dict
+            Always contains: la_logits, la_mask.
+            When labels provided: la_loss, total_loss.
+        """
+        img = img.to(device=self.device, dtype=self.dtype)
+        la_logits = self.backbone(img)
+        la_mask = la_logits.argmax(dim=1)
+
+        output = {"la_logits": la_logits, "la_mask": la_mask}
+
+        if labels is not None:
+            la_target = labels["la_mask"].to(self.device)
+            loss_dict = self.criterion(la_logits=la_logits, la_target=la_target)
+            output.update(loss_dict)
+
+        return output
+
+    @torch.no_grad()
+    def inference(self, img: Union[np.ndarray, torch.Tensor]) -> CARE2026Outputs:
+        """Run inference on a single or batch of coarse MRI volumes."""
+        original_mode = self.training
+        self.eval()
+        input_t = self._prepare_input(img)
+        output = self.forward(input_t)
+        self.train(original_mode)
+        return CARE2026Outputs(
+            task="mri",
+            la_mask=output["la_mask"].cpu().numpy().astype(np.uint8),
+        )
+
+    def _prepare_input(self, img: Union[np.ndarray, torch.Tensor, list]) -> torch.Tensor:
+        if isinstance(img, (list, tuple)):
+            img = torch.stack([i if isinstance(i, torch.Tensor) else torch.from_numpy(i) for i in img])
+        elif isinstance(img, np.ndarray):
+            img = torch.from_numpy(img)
+        img = img.to(device=self.device, dtype=self.dtype)
+        while img.ndim < 5:
+            img = img.unsqueeze(0)
+        img = (img - img.mean(dim=(2, 3, 4), keepdim=True)) / (img.std(dim=(2, 3, 4), keepdim=True) + 1e-8)
+        return img
+
+    @property
+    def config(self) -> CFG:
+        return self.__config
+
+    @property
+    def train_config(self) -> CFG:
+        return self.__train_config
+
+    def save(self, path, **kwargs) -> None:
+        """Override CkptMixin.save to prevent decimal suffixes from being treated as file extensions."""
+        p = Path(str(path))
+        name = re.sub(r"(?<=\d)\.(?=\d)", "_", p.name)
+        path = str(p.parent / name)
+        super().save(path=path, **kwargs)
+
+
+class CARE2026_MRI_Stage2_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
+    """Wrapper for dual-head VNet (or NestedVNet) for MRI Tasks 1 & 2 (Stage 2).
 
     Loss is computed inside forward() when labels are provided.
     Architecture: shared encoder → la_decoder + scar_decoder.
@@ -42,13 +151,13 @@ class CARE2026_MRI_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
     config : CFG, optional
         Model config overrides (merged on top of ModelCfg).
     train_config : CFG, optional
-        Training config for loss weights (merged on top of MRI_TrainCfg).
+        Training config for loss weights (merged on top of MRI_Stage2_TrainCfg).
     backbone : str, default "vnet"
         ``"vnet"``        — :class:`~.vnet.DualHeadVNet`
         ``"nested_vnet"`` — :class:`~.nested_vnet.DualHeadNestedVNet`
     """
 
-    __name__ = "CARE2026_MRI_Model"
+    __name__ = "CARE2026_MRI_Stage2_Model"
 
     def __init__(
         self,
@@ -61,7 +170,7 @@ class CARE2026_MRI_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
         self.__config = deepcopy(ModelCfg)
         if config is not None:
             self.__config.update(deepcopy(config))
-        self.__train_config = deepcopy(MRI_TrainCfg)
+        self.__train_config = deepcopy(MRI_Stage2_TrainCfg)
         if train_config is not None:
             self.__train_config.update(deepcopy(train_config))
 
@@ -191,6 +300,10 @@ class CARE2026_MRI_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
         name = re.sub(r"(?<=\d)\.(?=\d)", "_", p.name)
         path = str(p.parent / name)
         super().save(path=path, **kwargs)
+
+
+# Backward-compatibility alias
+CARE2026_MRI_Model = CARE2026_MRI_Stage2_Model
 
 
 class CARE2026_CT_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):

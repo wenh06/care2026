@@ -6,44 +6,51 @@
 
 ## Approach Overview
 
-Three tasks are evaluated independently; no cross-modal fusion is required by the challenge.
+Three tasks are evaluated independently; no cross-modal fusion is required.
 
-### Tasks 1 & 2 — LGE-MRI (Multi-task V-Net)
+### Tasks 1 & 2 — LGE-MRI (Two-stage coarse-to-fine V-Net)
 
-We train a **single multi-output 3D V-Net** on all 190 MRI samples.  The network has two segmentation heads branching from a shared encoder:
-
-```
-LGE-MRI volume (H, W, D)
-       │
-       ├─ MCLAHE preprocessing → intensity normalisation [0, 1]
-       │
-       ├─ Shared 3D V-Net encoder + decoder body
-       │
-       ├─ Head A: LA cavity (sigmoid binary) — trained on all 190 samples (Tasks 1 + 2)
-       │
-       └─ Head B: LA scar   (sigmoid binary) — trained on  60 samples  (Task 1 only)
-```
-
-Why multi-task?  Task 1 comes with both LA cavity and scar labels; Task 2 has only LA cavity labels.  The shared encoder benefits from 190 training samples for geometry understanding, while the scar head uses the 60 annotated samples only.  At inference, a two-stage crop-and-refine strategy is applied: first predict LA cavity (Head A), then crop to the bounding box and re-run to predict scars (Head B).
-
-Loss (Task 1 combined head):
+We train **two separate 3D networks in series**.
 
 ```
-L_total = λ₁ · L_dice(LA) + λ₂ · L_dice(scar) + λ₃ · L_boundary(scar) + λ₄ · L_focal(scar)
+Raw LGE-MRI volume (H, W, D)
+        │
+        ▼  resample to canonical 576×576×44 (0.625 mm in-plane)
+        │
+        ├─────────────────────── STAGE 1 ───────────────────────
+        │  downsample to 144×144×44 → z-score norm
+        │  → single-head VNet → binary LA mask (coarse)
+        │  → upsample mask to 576×576×44 → LA centroid (cx, cy)
+        │
+        ├─────────────── MIDDLE (centroid crop) ────────────────
+        │  crop 256×256×44 around (cx, cy) in canonical space
+        │
+        └─────────────────────── STAGE 2 ───────────────────────
+           z-score norm on crop
+           → shared-encoder DualHeadVNet
+               ├─ Head A: LA cavity (binary) — trained on all 190 samples
+               └─ Head B: LA scar   (binary) — trained on  60 samples only
+           → place masks back in canonical space
+           → resample canonical masks → original image space
 ```
 
-The scar class is heavily imbalanced; Boundary Loss + Focal Loss compensate.
+Training jitter: ±32 px random centroid offset at Stage 2 training time (simulates Stage 1 errors).
+
+Loss (Stage 2, Task 1 combined head):
+
+```
+L_total = λ₁·L_dice(LA) + λ₂·L_dice(scar) + λ₃·L_tversky(scar) + λ₄·L_focal(scar)
+```
 
 Domain generalisation for Task 2 test set (Centers B & C unseen during training):
-- **Instance Normalisation** instead of Batch Norm in the encoder.
+- **Instance Normalisation** in the Stage 2 encoder.
 - **Aggressive augmentation**: random gamma, random intensity shift, elastic deformation, random flip.
-- **Histogram matching**: match Center B/C validation images to Center A statistics at inference.
 
 ### Task 3 — CT (Semi-supervised 3D U-Net)
 
 100 of 150 training CTs have no labels; the model must leverage unlabelled data.
 
-**Cross Pseudo Supervision (CPS)** with two parallel 3D U-Nets:
+**Cross Pseudo Supervision (CPS)** with two parallel 3D V-Nets:
 
 ```
 Labelled batch
@@ -64,10 +71,10 @@ L_total = L_sup(M1) + L_sup(M2) + λ_cps · [L_cps(M1←M2) + L_cps(M2←M1)]
 `λ_cps` is ramped up from 0 → 1 over 20 epochs to avoid early noisy pseudo-labels.
 
 Additional tricks:
-- CT windowing to cardiac soft-tissue window (W=350, L=50 HU).
+- CT windowing to soft-tissue window (clip to −200…+800 HU, normalise to [0,1]).
 - Resample all volumes to uniform 0.5 × 0.5 × 0.5 mm isotropic.
 - Deep supervision at each decoder scale.
-- Boundary Loss for PV (pulmonary veins) and LAA (left atrial appendage) which are thin / small.
+- Boundary Loss for PV and LAA (thin / small structures).
 
 ---
 
@@ -90,48 +97,58 @@ Additional tricks:
 
 ### 2.1 `const.py`
 
-Define project-wide constants:
+Define project-wide shape, spacing, and class constants.  All shape constants are derived from training-set statistics; no hardcoding anywhere else in the pipeline.
+
+**MRI shape constants** (all in voxels, `H × W × D`):
+
+| Constant | Value | Derivation |
+|----------|-------|------------|
+| `MRI_CANONICAL_SHAPE` | `(576, 576, 44)` | Modal raw image shape across all 190 training MRIs |
+| `MRI_STAGE1_SHAPE` | `(144, 144, 44)` | 4× downsampled in H, W for coarse LA localisation |
+| `MRI_STAGE2_CROP_SHAPE` | `(256, 256, 44)` | Centroid crop fed to Stage-2 model; covers p95 LA extent (≈230 px) with ~13 px margin |
+| `MRI_STAGE2_CACHE_SHAPE` | `(320, 320, 44)` | Cache with ±32 px jitter margin: (320−256)/2 = 32 |
+| `MRI_STAGE2_CENTROID_JITTER` | `(32, 32, 0)` | Max per-axis centroid offset during Stage-2 training |
+| `MRI_PATCH_SHAPE` | alias for `MRI_STAGE2_CROP_SHAPE` | Backward compatibility |
+
+**Other constants**:
 
 | Constant | Value | Notes |
 |----------|-------|-------|
-| `MRI_CENTERS` | `["A"]` | Training centers for MRI |
-| `CT_CENTERS` | `["D"]` | Training centers for CT |
-| `MRI_SPACING` | `(0.625, 0.625, 2.5)` | mm, Center A |
-| `CT_SPACING_ISOTROPIC` | `(0.5, 0.5, 0.5)` | mm, target resampling |
-| `MRI_PATCH_SIZE` | `(128, 128, 32)` | training patch size |
-| `CT_PATCH_SIZE` | `(128, 128, 128)` | training patch size |
-| `MRI_CLASS_MAP_T1` | `{0: "bg", 1: "LA scar"}` | Task 1 |
-| `MRI_CLASS_MAP_T2` | `{0: "bg", 1: "LA cavity"}` | Task 2 |
-| `CT_CLASS_MAP` | `{0: "bg", 1: "LA", 2: "PV", 3: "LAA"}` | Task 3 |
-| `CT_LABELED_COUNT` | `50` | labelled training CTs |
-| `CT_UNLABELED_COUNT` | `100` | unlabelled training CTs |
-| `TASK1_TRAIN_COUNT` | `60` | Task 1 training MRIs |
-| `TASK2_TRAIN_COUNT` | `130` | Task 2 training MRIs |
+| `MRI_CENTER_A_SPACING` | `(0.625, 0.625, 2.5)` mm | Center A Siemens scanner (in-plane × z) |
+| `CT_TARGET_SPACING` | `(0.5, 0.5, 0.5)` mm | Isotropic resampling target |
+| `CT_PATCH_SIZE` | `128` voxels | Sliding-window patch per side |
+| `CT_HU_MIN / CT_HU_MAX` | `−200 / +800` HU | Soft-tissue window |
+| `TASK1_TRAIN_COUNT` | `60` | Task 1 MRI samples (scar + cavity) |
+| `TASK2_TRAIN_COUNT` | `130` | Task 2 MRI samples (cavity only) |
+| `CT_LABELED_COUNT` | `50` | CT samples with GT labels |
+| `CT_UNLABELED_COUNT` | `100` | CT samples without labels |
 
 ### 2.2 `cfg.py`
 
-Implement `BaseCfg`, `TrainCfg`, `ModelCfg` using `torch_ecg.cfg.CFG`.
+Implement `BaseCfg`, `ModelCfg`, and per-stage/per-task training configs using `torch_ecg.cfg.CFG`.
 
 Key settings:
 
 | Config | Value |
 |--------|-------|
-| `TrainCfg.n_epochs` | 150 (MRI), 200 (CT) |
-| `TrainCfg.batch_size` | 2 (MRI), 2 (CT) |
-| `TrainCfg.patch_size` | per `const.py` |
-| `TrainCfg.optimizer` | `"adamw_amsgrad"` |
-| `TrainCfg.lr` | `1e-3` |
-| `TrainCfg.lr_scheduler` | `"cosine_annealing"` |
-| `ModelCfg.vnet` | V-Net config dict (channels, blocks, etc.) |
-| `ModelCfg.loss` | compound loss weights `λ₁..λ₄` |
+| `MRI_Stage1_TrainCfg.n_epochs` | 100 |
+| `MRI_Stage2_TrainCfg.n_epochs` | 150 |
+| `CT_TrainCfg.n_epochs` | 200 |
+| `*.batch_size` | 4 (Stage 1), 1 (Stage 2 + CT, AMP) |
+| `*.optimizer` | `"adamw_amsgrad"` |
+| `*.lr` | `1e-3` |
+| `*.lr_scheduler` | `"cosine_annealing"` |
+| `ModelCfg.vnet_stage1` | VNet config, `num_classes=2` |
+| `ModelCfg.vnet` | DualHeadVNet config, `heads={la:2, scar:2}` |
 
 ### 2.3 `dataset.py`
 
 Implement PyTorch Dataset classes:
 
-- `CARE2026_MRI_Dataset`: random 3D patch cropping around LA bounding box; online augmentation (flip, elastic, gamma); returns `(image, la_mask, scar_mask, has_scar)` — `has_scar=False` for Task 2 samples.
+- `CARE2026_MRI_Stage1_Dataset`: resample raw volume → canonical → downsample → z-score; caches `(image, la_mask)` at `MRI_STAGE1_SHAPE`; augment on-the-fly (flip, elastic, gamma).
+- `CARE2026_MRI_Stage2_Dataset`: resample raw → canonical; cache `MRI_STAGE2_CACHE_SHAPE` patch centred on GT LA centroid; at `__getitem__` apply ±`MRI_STAGE2_CENTROID_JITTER` offset and sub-crop to `MRI_STAGE2_CROP_SHAPE`; returns `(image, la_mask, scar_mask, has_scar)`.
 - `CARE2026_CT_Dataset`: CT windowing; resample to isotropic 0.5 mm; random patch; returns `(image, mask, is_labeled)`.
-- `collate_fn_mri` and `collate_fn_ct`.
+- `collate_fn_mri_stage1`, `collate_fn_mri`, `collate_fn_ct`.
 
 ---
 
@@ -203,35 +220,52 @@ UMambaBot (Mamba-based state-space model) achieved near-ResUNet performance with
 
 ## Phase 4 — Training Loops ✅
 
-### 4.1 MRI trainer (`trainer.py`)
+### 4.1 MRI trainers (`trainer.py`)
 
-`CARE2026_MRI_Trainer`:
-- Multi-task loss: applies Head A loss on all batches, Head B loss only when `has_scar=True`.
-- Metric: local validation `la_dice`, `scar_dice`, `scar_acc`, `scar_sen`.
-- Config-driven monitor key (default `la_dice`) for checkpoint selection.
-- Supports `backbone="vnet"` and `backbone="nested_vnet"` via the wrapped MRI model.
-- Uses `BaseTrainer` logging / checkpointing, with model-contained loss.
+Two separate trainer classes:
+
+`CARE2026_MRI_Stage1_Trainer`:
+- Binary LA segmentation loss (`Stage1MRILoss`: DiceCE on LA only).
+- Metric: `la_dice` (local validation split).
+- Checkpoint prefix `*-mri1`; monitors `la_dice`.
+
+`CARE2026_MRI_Stage2_Trainer`:
+- Multi-task loss: Head A (LA DiceCE) on all batches; Head B (scar Tversky+Focal) only when `has_scar=True`.
+- Metrics: `la_dice`, `scar_dice`, `scar_acc`, `scar_sen`.
+- Checkpoint prefix `*-mri2`; monitors `la_dice` (can override to `scar_dice`).
+- Supports `backbone="vnet"` and `backbone="nested_vnet"`.
+- AMP + gradient accumulation: `use_amp=True`, `accumulate_grad_batches=2`.
+
+CLI:
+```bash
+python trainer.py --task mri --stage 1 --db-dir <data_root> --epochs 100
+python trainer.py --task mri --stage 2 --db-dir <data_root> --epochs 150
+```
 
 ### 4.2 CT trainer (`trainer.py`)
 
 `CARE2026_CT_Trainer`:
 - CPS loss: ramped consistency weight `λ_cps(t)`.
-- Wrapped model maintains two internal VNet branches (`model1`, `model2`) under one optimiser.
-- Metric: local validation `ct_dice_la`, `ct_dice_pv`, `ct_dice_laa`, `ct_mean_dice`.
-- Uses mixed labeled + unlabeled training split, labeled-only validation split.
+- Metric: `ct_dice_la`, `ct_dice_pv`, `ct_dice_laa`, `ct_mean_dice`.
+- Labeled-only validation split.
+
+```bash
+python trainer.py --task ct --db-dir <data_root> --epochs 200
+```
 
 ---
 
 ## Phase 5 — Prediction & Post-processing ✅
 
 `predict.py`:
-- **MRI inference** (coarse-to-fine, two-stage):
-  1. Resize whole volume → `(256, 256, 44)`, LA head → coarse LA mask.
-  2. Un-resize coarse mask → original space → compute LA bounding box.
-  3. Crop original volume to bbox + 7px pad, resize to `(256, 256, 44)`, run both heads.
-  4. Un-resize and un-crop predictions back to original shape + original NIfTI affine.
+- **`predict_mri_two_stage(img_path, stage1_model, stage2_model, ...)`** — true two-stage inference:
+  1. Load NIfTI → resample to `MRI_CANONICAL_SHAPE` (576×576×44).
+  2. Downsample canonical → `MRI_STAGE1_SHAPE` (144×144×44) → z-score → Stage-1 VNet → binary LA prob map → upsample to canonical → LA centroid.
+  3. Crop `MRI_STAGE2_CROP_SHAPE` (256×256×44) centred on centroid (zero-pad if near boundary).
+  4. z-score → Stage-2 DualHeadVNet → LA + scar prob maps.
+  5. Strip padding → place back in canonical → resample canonical masks to original shape + affine.
 - **CT inference**: sliding window `128³` patches, stride `64³`, Gaussian overlap weighting, soft-vote argmax.
-- **TTA**: 8-fold flip averaging (all `{H, W, D}` axis combinations) for both MRI and CT.
+- **TTA**: 8-fold flip averaging (all `{H, W, D}` axis combinations) for both stages / CT.
 
 `outputs.py`:
 - `CARE2026Outputs` dataclass: `la_mask`, `scar_mask`, `ct_mask` + `source_affine` / `source_header`.
@@ -239,12 +273,14 @@ UMambaBot (Mamba-based state-space model) achieved near-ResUNet performance with
 - `package_submission(results_dir, team_name)`: creates challenge-compliant `CARE-Leftatrium-<team>.zip`.
 
 `pipeline.py`:
-- `run_task1_inference` / `run_task2_inference` / `run_task3_inference`: per-task validation runners.
-- `run_all_tasks()`: convenience wrapper; `None` models safely skipped.
-- CLI entry point: `python pipeline.py --val_data_root ... --results_dir ... --team_name ...`.
+- `run_task1_inference(stage1_model, stage2_model, ...)` / `run_task2_inference(...)`: per-task validation runners using `predict_mri_two_stage`.
+- `run_task3_inference(ct_model, ...)`: CT validation runner.
+- `run_all_tasks(mri_stage1_model, mri_stage2_model, ct_model, ...)`: convenience wrapper; `None` models safely skipped.
+- Auto-discovers `BestModel_*-mri1*.safetensors` / `BestModel_*-mri2*.safetensors` from checkpoint dir.
+- CLI: `python pipeline.py --val_data_root ... --results_dir ... --team_name ...`.
 
 **Validation data confirmed** (already on disk at `/Data1/wenh06/CARE2026-LeftAtrium/`):
-- Task 1: 10 records (`val_1..val_10`), `enhanced.nii.gz`, spacing 1.0 mm isotropic.
+- Task 1: 10 records (`val_1..val_10`), `enhanced.nii.gz`.
 - Task 2: 20 records (`val_1..val_20`), `enhanced.nii.gz`.
 - Task 3: 20 records (`val_1..val_20`), `NNNN.nii.gz` (4-digit zero-padded).
 
@@ -252,46 +288,55 @@ UMambaBot (Mamba-based state-space model) achieved near-ResUNet performance with
 
 ## Phase 6 — Training Runs 🏃
 
-### 6.1 MRI Baseline (Tasks 1 & 2) — **IN PROGRESS**
-
-Running: `PYTORCH_ALLOC_CONF=expandable_segments:True python trainer.py --task mri --db-dir /Data1/wenh06/CARE2026-LeftAtrium --epochs 150 2>&1 | tee log/mri_train.log`
-
-**Key fixes required to get training working:**
-- ❌ **BoundaryLoss sign bug**: `_compute_distance_map` had `dist_inside − dist_outside` (wrong); fixed to `dist_outside − dist_inside`. Disabled by default (`scar_boundary=0.0`) — scipy EDT is ~1–2s/call, too slow for baseline.
-- ❌ **CUDA OOM at full 256×256×44 resolution**: even with AMP + `expandable_segments`, Conv3d at final decoder level requests 6.96 GiB contiguous — exceeds 5.12 GiB truly free on RTX 5060 Ti 16 GB. Fixed with **training-time H×W patch crop** (128×128×D) in dataset `__getitem__`.
-- ✅ **Patch-based training (128×128×D crop)** added: foreground-biased random H×W crop; validation still uses full 256×256×D volumes. ~4× memory reduction at full-resolution decoder layers.
-- ✅ **AMP + gradient accumulation**: `use_amp=True`, `accumulate_grad_batches=2`, `batch_size=1` → effective batch = 2.
-
-**1-epoch sanity check results** (commit `d087485`):
-- Training speed: ~6.7 samples/s → 150 epochs ≈ 63 minutes
-- `la_dice = 0.696` after epoch 0 ✅
-- No OOM, checkpoint saved ✅
-
-**Ongoing training metrics snapshot (epoch 4)**:
-- `la_loss ≈ 0.243`, `scar_loss ≈ 1.86` (expected — scar head needs many more epochs; high loss at early stages)
-
-### 6.2 CT Baseline (Task 3) — ⏳ Not started
+### 6.1 MRI Stage 1 — Coarse LA Localiser — ⏳ Ready to train
 
 ```bash
-PYTORCH_ALLOC_CONF=expandable_segments:True python trainer.py --task ct \
-  --db-dir /Data1/wenh06/CARE2026-LeftAtrium --epochs 200 2>&1 | tee log/ct_train.log
+PYTORCH_ALLOC_CONF=expandable_segments:True \
+  python trainer.py --task mri --stage 1 \
+  --db-dir /Data1/wenh06/CARE2026-LeftAtrium --epochs 100 \
+  2>&1 | tee log/mri1_train.log
 ```
 
-### 6.3 Validation & Submission
+Input: 144×144×44, batch_size=4.  Expected: fast (< 30 min for 100 epochs), la_dice > 0.85.
 
-After ≥ 30–50 epochs:
+### 6.2 MRI Stage 2 — Fine LA + Scar Segmenter — ⏳ Pending Stage 1
 
 ```bash
-python pipeline.py --val_data_root /Data1/wenh06/CARE2026-LeftAtrium \
+PYTORCH_ALLOC_CONF=expandable_segments:True \
+  python trainer.py --task mri --stage 2 \
+  --db-dir /Data1/wenh06/CARE2026-LeftAtrium --epochs 150 \
+  2>&1 | tee log/mri2_train.log
+```
+
+Input: 256×256×44, batch_size=1, AMP, grad_accum=2.
+
+**Historical note:** An earlier (now deprecated) single-model run reached `la_dice ≈ 0.91` at epoch 146 (checkpoint `BestModel_CARE2026_MRI_Model-mri146_*`).  The two-stage pipeline should match or exceed this; Stage 2 benefits from the centroid-cropped inputs that already cut out most background.
+
+### 6.3 CT Baseline (Task 3) — ⏳ Not started
+
+```bash
+PYTORCH_ALLOC_CONF=expandable_segments:True \
+  python trainer.py --task ct \
+  --db-dir /Data1/wenh06/CARE2026-LeftAtrium --epochs 200 \
+  2>&1 | tee log/ct_train.log
+```
+
+### 6.4 Validation & Submission
+
+After Stage 1 + Stage 2 training:
+
+```bash
+python pipeline.py \
+  --val_data_root /Data1/wenh06/CARE2026-LeftAtrium \
   --results_dir results/ --team_name REVENGER
-# Then zip and upload CARE-Leftatrium-REVENGER.zip
+# Zip CARE-Leftatrium-REVENGER.zip and upload to:
+# http://zmic.org.cn/care_2026/eval/login?track=leftatrium
 ```
 
-- Compute per-task metrics on local validation split.
-- Task 1: G-DSC / ACC / SEN curves vs. epoch.
-- Task 2: domain shift analysis — Center A val vs. Center C val DSC gap.
-- Task 3: per-class DSC (LA / PV / LAA) breakdown; CPS unlabelled sample quality curve.
-- Visualise predictions with `data_reader.view_data()`.
+Local metrics to track:
+- Task 1: G-DSC / ACC / SEN vs. epoch.
+- Task 2: DSC and domain-shift gap (Center A train-val vs. Center C val).
+- Task 3: per-class DSC (LA / PV / LAA); CPS pseudo-label quality curve.
 
 ---
 
@@ -340,17 +385,31 @@ python pipeline.py --val_data_root /Data1/wenh06/CARE2026-LeftAtrium \
 
 ## Immediate Next Steps
 
-1. **MRI training in progress** — monitor `log/mri_train.log`; checkpoint saved at `checkpoints/BestModel_*mri*`.
-2. **After ~30–50 MRI epochs** — run pipeline + submit validation:
+1. **Train MRI Stage 1** (coarse LA localiser, ~30 min):
    ```bash
-   python pipeline.py --val_data_root /Data1/wenh06/CARE2026-LeftAtrium --results_dir results/ --team_name REVENGER
-   # zip CARE-Leftatrium-REVENGER.zip and upload to http://zmic.org.cn/care_2026/eval
+   PYTORCH_ALLOC_CONF=expandable_segments:True \
+     python trainer.py --task mri --stage 1 \
+     --db-dir /Data1/wenh06/CARE2026-LeftAtrium --epochs 100 \
+     2>&1 | tee log/mri1_train.log
    ```
-3. **CT training** — kick off `python trainer.py --task ct ...` once MRI training stabilises.
-4. **MRI post-processing**: scar constrained by LA cavity; connected-component cleanup.
-5. **CT post-processing**: largest connected component per class; optional morphological closing for LAA.
-6. **CLAHE ablation**: wire `utils/mclahe.py` into the MRI dataset and compare.
-7. **5-fold CV + ensemble** (Phase 8): train 5 folds, ensemble predictions for final submission.
+2. **Train MRI Stage 2** (fine LA + scar segmenter, ~90 min):
+   ```bash
+   PYTORCH_ALLOC_CONF=expandable_segments:True \
+     python trainer.py --task mri --stage 2 \
+     --db-dir /Data1/wenh06/CARE2026-LeftAtrium --epochs 150 \
+     2>&1 | tee log/mri2_train.log
+   ```
+3. **Submit validation** (Tasks 1 & 2) once both stages are trained:
+   ```bash
+   python pipeline.py --val_data_root /Data1/wenh06/CARE2026-LeftAtrium \
+     --results_dir results/ --team_name REVENGER
+   # Upload CARE-Leftatrium-REVENGER.zip to http://zmic.org.cn/care_2026/eval
+   ```
+4. **Train CT model** (Task 3) in parallel or after MRI submission.
+5. **MRI post-processing**: constrain scar mask to within predicted LA cavity; connected-component cleanup (keep largest component per class).
+6. **CT post-processing**: largest connected component per class; optional morphological closing for LAA.
+7. **CLAHE ablation**: wire `utils/mclahe.py` into the MRI dataset and compare vs. z-score baseline.
+8. **5-fold CV + ensemble** (Phase 8): train 5 folds, ensemble predictions for final submission.
 
 ---
 

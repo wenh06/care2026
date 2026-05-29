@@ -35,9 +35,43 @@ __all__ = [
     "DiceBoundaryLoss",
     "DiceTopKLoss",
     # task-level compound wrappers
+    "Stage1MRILoss",
     "MRILoss",
     "CTLoss",
 ]
+
+
+class Stage1MRILoss(nn.Module):
+    """Loss for Stage 1 MRI coarse localisation (binary LA only).
+
+    Uses DiceCELoss with equal Dice/CE weighting.  No scar head.
+
+    Parameters
+    ----------
+    cfg : CFG
+        Training configuration.  Only ``loss_weights.la_dice`` is used.
+    """
+
+    def __init__(self, cfg) -> None:
+        super().__init__()
+        self.criterion = DiceCELoss(dice_weight=0.5, ce_weight=0.5)
+        w = cfg.loss_weights
+        self.w_la = w.get("la_dice", 1.0)
+
+    def forward(self, la_logits: torch.Tensor, la_target: torch.Tensor) -> dict:
+        """Compute Stage 1 loss.
+
+        Parameters
+        ----------
+        la_logits : torch.Tensor, shape (B, 2, H, W, D)
+        la_target : torch.Tensor, shape (B, H, W, D), dtype long
+
+        Returns
+        -------
+        dict with keys: la_loss, total_loss
+        """
+        la_loss = self.criterion(la_logits, la_target.long())
+        return {"la_loss": la_loss, "total_loss": self.w_la * la_loss}
 
 
 class MRILoss(nn.Module):

@@ -14,7 +14,13 @@ __all__ = [
     "MRI_CENTER_A_SPACING",
     "CT_NATIVE_Z_SPACING",
     "CT_TARGET_SPACING",
-    "MRI_PATCH_SHAPE",
+    # Two-stage MRI pipeline shapes
+    "MRI_CANONICAL_SHAPE",
+    "MRI_STAGE1_SHAPE",
+    "MRI_STAGE2_CROP_SHAPE",
+    "MRI_STAGE2_CACHE_SHAPE",
+    "MRI_STAGE2_CENTROID_JITTER",
+    "MRI_PATCH_SHAPE",  # alias for MRI_STAGE2_CROP_SHAPE
     "CT_PATCH_SIZE",
     "CT_HU_MIN",
     "CT_HU_MAX",
@@ -57,11 +63,36 @@ CT_NATIVE_Z_SPACING = 0.5  # mm
 CT_TARGET_SPACING = (0.5, 0.5, 0.5)  # isotropic target for resampling (mm)
 
 # ---------------------------------------------------------------------------
-# Patch / volume shape constants
+# Two-stage MRI pipeline shape constants (H × W × D, in voxels)
 # ---------------------------------------------------------------------------
+# Derived from CARE2026 training-set statistics (N=190 LGE-MRI volumes):
+#   - Raw image mode: 576×576×44 at 0.625×0.625×2.5 mm spacing
+#   - LA bbox p95:  (200 × 123 × 62) voxels in raw space
+#
+# All raw volumes are first resampled to MRI_CANONICAL_SHAPE, then processed
+# through two stages.  Changing any of these constants propagates automatically
+# through dataset / model / inference code without touching implementation logic.
 
-# MRI: crop to the LA bounding box then resize to this shape (H, W, D)
-MRI_PATCH_SHAPE = (256, 256, 44)  # matches typical LGE-MRI slice count
+# Step 0 – resample every raw volume to this common grid
+MRI_CANONICAL_SHAPE = (576, 576, 44)
+
+# Stage 1 – 4× downsampled in H,W; D kept intact (input to coarse LA localiser)
+MRI_STAGE1_SHAPE = (144, 144, 44)
+
+# Stage 2 – crop centred on the predicted LA centroid (input to fine segmenter)
+MRI_STAGE2_CROP_SHAPE = (256, 256, 44)
+
+# Internal cache shape for Stage 2 dataset: generous margin around GT centroid
+# so that ±MRI_STAGE2_CENTROID_JITTER random crop offsets remain in bounds.
+# Margin = (cache_hw - crop_hw) / 2 = (320 - 256) / 2 = 32  (== jitter_max)
+MRI_STAGE2_CACHE_SHAPE = (320, 320, 44)
+
+# Maximum per-axis centroid jitter (H, W, D) during Stage 2 training.
+# Simulates Stage 1 localisation errors; must satisfy jitter ≤ margin above.
+MRI_STAGE2_CENTROID_JITTER = (32, 32, 0)
+
+# Backward-compatibility alias  (= Stage 2 crop shape)
+MRI_PATCH_SHAPE = MRI_STAGE2_CROP_SHAPE
 
 # CT: random 3-D patch size during training (isotropic cube), in voxels
 CT_PATCH_SIZE = 128  # voxels per side after isotropic resampling

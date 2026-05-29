@@ -33,7 +33,7 @@ import torch
 from tqdm.auto import tqdm
 
 from outputs import package_submission
-from predict import predict_ct, predict_mri
+from predict import predict_ct, predict_mri_two_stage
 
 __all__ = [
     "run_task1_inference",
@@ -72,7 +72,8 @@ def _ct_image_name(record_id: str) -> str:
 
 
 def run_task1_inference(
-    model: torch.nn.Module,
+    stage1_model: torch.nn.Module,
+    stage2_model: torch.nn.Module,
     val_data_root: Union[str, Path],
     results_dir: Union[str, Path],
     device: Optional[torch.device] = None,
@@ -84,14 +85,16 @@ def run_task1_inference(
 
     Parameters
     ----------
-    model : CARE2026_MRI_Model
-        Trained dual-head VNet in eval mode.
+    stage1_model : CARE2026_MRI_Stage1_Model
+        Trained single-head VNet for coarse LA localisation.
+    stage2_model : CARE2026_MRI_Stage2_Model
+        Trained dual-head VNet for fine LA + scar segmentation.
     val_data_root : path-like
         Root containing ``task1/val_data/val_N/`` sub-directories.
     results_dir : path-like
         Output base directory for predictions.
     device : torch.device, optional
-        Inference device; defaults to the model's device.
+        Inference device; defaults to the stage1_model's device.
     use_tta : bool, default True
         Enable 8-fold flip TTA.
     """
@@ -104,20 +107,22 @@ def run_task1_inference(
         return
 
     if device is None:
-        device = next(model.parameters()).device
+        device = next(stage1_model.parameters()).device
 
-    model.eval()
+    stage1_model.eval()
+    stage2_model.eval()
     for rec in tqdm(records, desc="Task 1 (LA scar)", unit="vol", dynamic_ncols=True):
         img_path = val_dir / rec / "enhanced.nii.gz"
         if not img_path.exists():
             warnings.warn(f"Image not found: {img_path}")
             continue
-        out = predict_mri(img_path, model, device=device, use_tta=use_tta)
+        out = predict_mri_two_stage(img_path, stage1_model, stage2_model, device=device, use_tta=use_tta)
         out.save_as_nifti(results_dir, record_id=rec, task_num=1)
 
 
 def run_task2_inference(
-    model: torch.nn.Module,
+    stage1_model: torch.nn.Module,
+    stage2_model: torch.nn.Module,
     val_data_root: Union[str, Path],
     results_dir: Union[str, Path],
     device: Optional[torch.device] = None,
@@ -129,8 +134,10 @@ def run_task2_inference(
 
     Parameters
     ----------
-    model : CARE2026_MRI_Model
-        Trained dual-head VNet in eval mode.
+    stage1_model : CARE2026_MRI_Stage1_Model
+        Trained single-head VNet for coarse LA localisation.
+    stage2_model : CARE2026_MRI_Stage2_Model
+        Trained dual-head VNet for fine LA + scar segmentation.
     val_data_root : path-like
         Root containing ``task2/val_data/val_N/`` sub-directories.
     results_dir : path-like
@@ -147,15 +154,16 @@ def run_task2_inference(
         return
 
     if device is None:
-        device = next(model.parameters()).device
+        device = next(stage1_model.parameters()).device
 
-    model.eval()
+    stage1_model.eval()
+    stage2_model.eval()
     for rec in tqdm(records, desc="Task 2 (LA cavity)", unit="vol", dynamic_ncols=True):
         img_path = val_dir / rec / "enhanced.nii.gz"
         if not img_path.exists():
             warnings.warn(f"Image not found: {img_path}")
             continue
-        out = predict_mri(img_path, model, device=device, use_tta=use_tta)
+        out = predict_mri_two_stage(img_path, stage1_model, stage2_model, device=device, use_tta=use_tta)
         out.save_as_nifti(results_dir, record_id=rec, task_num=2)
 
 
@@ -204,7 +212,8 @@ def run_task3_inference(
 
 
 def run_all_tasks(
-    mri_model: Optional[torch.nn.Module],
+    mri_stage1_model: Optional[torch.nn.Module],
+    mri_stage2_model: Optional[torch.nn.Module],
     ct_model: Optional[torch.nn.Module],
     val_data_root: Union[str, Path],
     results_dir: Union[str, Path],
@@ -216,8 +225,12 @@ def run_all_tasks(
 
     Parameters
     ----------
-    mri_model : CARE2026_MRI_Model or None
-        MRI model for Tasks 1 & 2.  Pass ``None`` to skip.
+    mri_stage1_model : CARE2026_MRI_Stage1_Model or None
+        Stage-1 MRI model for coarse LA localisation.  Pass ``None`` to skip
+        Tasks 1 & 2.
+    mri_stage2_model : CARE2026_MRI_Stage2_Model or None
+        Stage-2 MRI model for fine segmentation.  Pass ``None`` to skip
+        Tasks 1 & 2.
     ct_model : CARE2026_CT_Model or None
         CT model for Task 3.  Pass ``None`` to skip.
     val_data_root : path-like
@@ -232,17 +245,19 @@ def run_all_tasks(
     if tasks is None:
         tasks = [1, 2, 3]
 
+    mri_ready = mri_stage1_model is not None and mri_stage2_model is not None
+
     if 1 in tasks:
-        if mri_model is not None:
-            run_task1_inference(mri_model, val_data_root, results_dir, device=device, use_tta=use_tta)
+        if mri_ready:
+            run_task1_inference(mri_stage1_model, mri_stage2_model, val_data_root, results_dir, device=device, use_tta=use_tta)
         else:
-            warnings.warn("Task 1 skipped: no MRI model provided.")
+            warnings.warn("Task 1 skipped: MRI Stage-1 and/or Stage-2 model not provided.")
 
     if 2 in tasks:
-        if mri_model is not None:
-            run_task2_inference(mri_model, val_data_root, results_dir, device=device, use_tta=use_tta)
+        if mri_ready:
+            run_task2_inference(mri_stage1_model, mri_stage2_model, val_data_root, results_dir, device=device, use_tta=use_tta)
         else:
-            warnings.warn("Task 2 skipped: no MRI model provided.")
+            warnings.warn("Task 2 skipped: MRI Stage-1 and/or Stage-2 model not provided.")
 
     if 3 in tasks:
         if ct_model is not None:
@@ -262,7 +277,7 @@ if __name__ == "__main__":
     from torch_ecg.utils.misc import str2bool
 
     from cfg import BaseCfg
-    from models import CARE2026_CT_Model, CARE2026_MRI_Model
+    from models import CARE2026_CT_Model, CARE2026_MRI_Stage1_Model, CARE2026_MRI_Stage2_Model
 
     parser = argparse.ArgumentParser(description="CARE2026 Left Atrium — end-to-end inference + submission packaging")
     parser.add_argument(
@@ -281,7 +296,7 @@ if __name__ == "__main__":
         "--model_dir",
         type=str,
         default=str(BaseCfg.model_dir),
-        help="Directory containing 'mri_model.pth.tar' and 'ct_model.pth.tar'.",
+        help="Directory containing model checkpoints.",
     )
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--tta", type=str2bool, default=True)
@@ -313,26 +328,51 @@ if __name__ == "__main__":
     tasks = [int(t.strip()) for t in args.tasks.split(",")]
     model_dir = Path(args.model_dir).expanduser().resolve()
 
-    mri_model, ct_model = None, None
+    mri_stage1_model, mri_stage2_model, ct_model = None, None, None
 
     if 1 in tasks or 2 in tasks:
-        mri_ckpt = model_dir / "mri_model.pth.tar"
-        if mri_ckpt.exists():
-            mri_model = CARE2026_MRI_Model.from_checkpoint(str(mri_ckpt), device=device)[0]
-            mri_model = mri_model.to(device).eval()
+        # Stage-1: discover latest BestModel_*-mri1*.safetensors
+        ckpt1 = model_dir / "mri_stage1_model.safetensors"
+        if not ckpt1.exists():
+            candidates = sorted(model_dir.glob("BestModel_*-mri1*.safetensors"), key=lambda p: p.stat().st_mtime)
+            if candidates:
+                ckpt1 = candidates[-1]
+        if ckpt1.exists():
+            mri_stage1_model = CARE2026_MRI_Stage1_Model.from_checkpoint(str(ckpt1), device=device)[0]
+            mri_stage1_model = mri_stage1_model.to(device).eval()
+            print(f"Loaded MRI Stage-1 model from: {ckpt1.name}")
         else:
-            _warnings.warn(f"MRI model checkpoint not found: {mri_ckpt}. Tasks 1 & 2 will be skipped.")
+            _warnings.warn(f"MRI Stage-1 checkpoint not found in {model_dir}. Tasks 1 & 2 will be skipped.")
+
+        # Stage-2: discover latest BestModel_*-mri2*.safetensors
+        ckpt2 = model_dir / "mri_stage2_model.safetensors"
+        if not ckpt2.exists():
+            candidates = sorted(model_dir.glob("BestModel_*-mri2*.safetensors"), key=lambda p: p.stat().st_mtime)
+            if candidates:
+                ckpt2 = candidates[-1]
+        if ckpt2.exists():
+            mri_stage2_model = CARE2026_MRI_Stage2_Model.from_checkpoint(str(ckpt2), device=device)[0]
+            mri_stage2_model = mri_stage2_model.to(device).eval()
+            print(f"Loaded MRI Stage-2 model from: {ckpt2.name}")
+        else:
+            _warnings.warn(f"MRI Stage-2 checkpoint not found in {model_dir}. Tasks 1 & 2 will be skipped.")
 
     if 3 in tasks:
-        ct_ckpt = model_dir / "ct_model.pth.tar"
+        ct_ckpt = model_dir / "ct_model.safetensors"
+        if not ct_ckpt.exists():
+            candidates = sorted(model_dir.glob("BestModel_*-ct*.safetensors"), key=lambda p: p.stat().st_mtime)
+            if candidates:
+                ct_ckpt = candidates[-1]
         if ct_ckpt.exists():
             ct_model = CARE2026_CT_Model.from_checkpoint(str(ct_ckpt), device=device)[0]
             ct_model = ct_model.to(device).eval()
+            print(f"Loaded CT model from: {ct_ckpt.name}")
         else:
-            _warnings.warn(f"CT model checkpoint not found: {ct_ckpt}. Task 3 will be skipped.")
+            _warnings.warn(f"CT model checkpoint not found in {model_dir}. Task 3 will be skipped.")
 
     run_all_tasks(
-        mri_model=mri_model,
+        mri_stage1_model=mri_stage1_model,
+        mri_stage2_model=mri_stage2_model,
         ct_model=ct_model,
         val_data_root=args.val_data_root,
         results_dir=args.results_dir,

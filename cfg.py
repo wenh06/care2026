@@ -9,11 +9,22 @@ import numpy as np
 import torch
 from torch_ecg.cfg import CFG
 
-from const import CT_NUM_CLASSES, CT_PATCH_SIZE, DEFAULT_VAL_RATIO, MRI_PATCH_SHAPE
+from const import (
+    CT_NUM_CLASSES,
+    CT_PATCH_SIZE,
+    DEFAULT_VAL_RATIO,
+    MRI_CANONICAL_SHAPE,
+    MRI_STAGE1_SHAPE,
+    MRI_STAGE2_CACHE_SHAPE,
+    MRI_STAGE2_CENTROID_JITTER,
+    MRI_STAGE2_CROP_SHAPE,
+)
 
 __all__ = [
     "BaseCfg",
-    "MRI_TrainCfg",
+    "MRI_Stage1_TrainCfg",
+    "MRI_Stage2_TrainCfg",
+    "MRI_TrainCfg",   # alias for MRI_Stage2_TrainCfg
     "CT_TrainCfg",
     "ModelCfg",
 ]
@@ -42,56 +53,106 @@ BaseCfg.val_ratio = DEFAULT_VAL_RATIO
 BaseCfg.random_seed = 42
 
 # ---------------------------------------------------------------------------
-# MRI training configuration (Tasks 1 & 2 — dual-head V-Net)
+# MRI Stage 1 training configuration (coarse LA localisation)
 # ---------------------------------------------------------------------------
+# Stage 1 model sees the full volume downsampled to MRI_STAGE1_SHAPE (144×144×44)
+# and produces a binary LA segmentation used only to locate the LA centroid.
 
-MRI_TrainCfg = deepcopy(BaseCfg)
+MRI_Stage1_TrainCfg = deepcopy(BaseCfg)
 
-MRI_TrainCfg.task = "mri"
+MRI_Stage1_TrainCfg.task = "mri"
+MRI_Stage1_TrainCfg.stage = 1
 
-# Volume shape after crop + resize
-MRI_TrainCfg.patch_shape = MRI_PATCH_SHAPE  # (H, W, D) — stored in RAM at this shape
+# Volume shape after resampling to canonical then downsampling to Stage 1 resolution
+MRI_Stage1_TrainCfg.canonical_shape = MRI_CANONICAL_SHAPE  # (576, 576, 44)
+MRI_Stage1_TrainCfg.patch_shape = MRI_STAGE1_SHAPE         # (144, 144, 44)
 
-# Training patch: crop H×W to this size during training to reduce GPU memory
-# The cached volume stays at MRI_PATCH_SHAPE; the crop happens in __getitem__
-MRI_TrainCfg.train_crop_hw = 128  # 128×128×D per training sample (vs 256×256 full)
+# No HW sub-crop during training: Stage 1 input is already small
+MRI_Stage1_TrainCfg.train_crop_hw = 0
 
 # Training duration and batch
-MRI_TrainCfg.n_epochs = 150
-MRI_TrainCfg.batch_size = 1          # 16 GB GPU: 128×128 crop with AMP fits comfortably
-MRI_TrainCfg.use_amp = True           # automatic mixed precision (fp16 forward/backward)
-MRI_TrainCfg.accumulate_grad_batches = 2  # gradient accumulation → effective batch = 2
+MRI_Stage1_TrainCfg.n_epochs = 100
+MRI_Stage1_TrainCfg.batch_size = 4         # small input → larger batch fits fine
+MRI_Stage1_TrainCfg.use_amp = True
+MRI_Stage1_TrainCfg.accumulate_grad_batches = 1
 
 # Optimizer
-MRI_TrainCfg.optimizer = "adamw"
-MRI_TrainCfg.betas = (0.9, 0.999)
-MRI_TrainCfg.decay = 1e-2
-MRI_TrainCfg.learning_rate = 3e-4
-MRI_TrainCfg.lr = MRI_TrainCfg.learning_rate
+MRI_Stage1_TrainCfg.optimizer = "adamw"
+MRI_Stage1_TrainCfg.betas = (0.9, 0.999)
+MRI_Stage1_TrainCfg.decay = 1e-2
+MRI_Stage1_TrainCfg.learning_rate = 3e-4
+MRI_Stage1_TrainCfg.lr = MRI_Stage1_TrainCfg.learning_rate
 
 # Cosine annealing schedule
-MRI_TrainCfg.lr_scheduler = "cosine"
-MRI_TrainCfg.lr_min = 1e-6
+MRI_Stage1_TrainCfg.lr_scheduler = "cosine"
+MRI_Stage1_TrainCfg.lr_min = 1e-6
 
-# Augmentation probability (applied per-sample in __getitem__)
-MRI_TrainCfg.aug_prob = 0.5
+# Augmentation
+MRI_Stage1_TrainCfg.aug_prob = 0.5
 
-# Multi-task loss weights:
-#   la_dice       -- Dice loss on the LA cavity head (all 190 samples)
-#   scar_dice     -- Dice loss on the scar head (Task 1 samples only)
-#   scar_boundary -- boundary / surface loss on the scar prediction
-#   scar_focal    -- focal loss on scar (class imbalance)
-MRI_TrainCfg.loss_weights = CFG(
+# Loss weights (Stage 1 only predicts binary LA → no scar head)
+MRI_Stage1_TrainCfg.loss_weights = CFG(la_dice=1.0)
+
+# Checkpointing
+MRI_Stage1_TrainCfg.keep_checkpoint_max = 3
+MRI_Stage1_TrainCfg.log_step = 10
+MRI_Stage1_TrainCfg.debug = False
+
+# ---------------------------------------------------------------------------
+# MRI Stage 2 training configuration (fine LA + scar segmentation)
+# ---------------------------------------------------------------------------
+# Stage 2 model operates on a fixed-size crop centred on the GT LA centroid
+# (+ random jitter during training to match Stage 1 prediction uncertainty).
+
+MRI_Stage2_TrainCfg = deepcopy(BaseCfg)
+
+MRI_Stage2_TrainCfg.task = "mri"
+MRI_Stage2_TrainCfg.stage = 2
+
+# Volume shape: canonical → crop centred on LA centroid
+MRI_Stage2_TrainCfg.canonical_shape = MRI_CANONICAL_SHAPE    # (576, 576, 44)
+MRI_Stage2_TrainCfg.cache_shape = MRI_STAGE2_CACHE_SHAPE     # (320, 320, 44) generous cache
+MRI_Stage2_TrainCfg.patch_shape = MRI_STAGE2_CROP_SHAPE      # (256, 256, 44) model input
+MRI_Stage2_TrainCfg.centroid_jitter = MRI_STAGE2_CENTROID_JITTER  # (32, 32, 0)
+
+# Training patch: optional further HW sub-crop to reduce GPU memory
+MRI_Stage2_TrainCfg.train_crop_hw = 128  # 128×128×44 per sample with AMP on 16 GB GPU
+
+# Training duration and batch
+MRI_Stage2_TrainCfg.n_epochs = 150
+MRI_Stage2_TrainCfg.batch_size = 1
+MRI_Stage2_TrainCfg.use_amp = True
+MRI_Stage2_TrainCfg.accumulate_grad_batches = 2  # effective batch = 2
+
+# Optimizer
+MRI_Stage2_TrainCfg.optimizer = "adamw"
+MRI_Stage2_TrainCfg.betas = (0.9, 0.999)
+MRI_Stage2_TrainCfg.decay = 1e-2
+MRI_Stage2_TrainCfg.learning_rate = 3e-4
+MRI_Stage2_TrainCfg.lr = MRI_Stage2_TrainCfg.learning_rate
+
+# Cosine annealing schedule
+MRI_Stage2_TrainCfg.lr_scheduler = "cosine"
+MRI_Stage2_TrainCfg.lr_min = 1e-6
+
+# Augmentation
+MRI_Stage2_TrainCfg.aug_prob = 0.5
+
+# Multi-task loss weights (same as before)
+MRI_Stage2_TrainCfg.loss_weights = CFG(
     la_dice=1.0,
     scar_dice=2.0,
-    scar_boundary=0.0,   # disabled by default (costly scipy EDT); enable for fine-tuning
+    scar_boundary=0.0,
     scar_focal=0.5,
 )
 
 # Checkpointing
-MRI_TrainCfg.keep_checkpoint_max = 5
-MRI_TrainCfg.log_step = 10
-MRI_TrainCfg.debug = False
+MRI_Stage2_TrainCfg.keep_checkpoint_max = 3
+MRI_Stage2_TrainCfg.log_step = 10
+MRI_Stage2_TrainCfg.debug = False
+
+# Backward-compatibility alias
+MRI_TrainCfg = MRI_Stage2_TrainCfg
 
 # ---------------------------------------------------------------------------
 # CT training configuration (Task 3 — CPS semi-supervised UNet3D)
@@ -136,7 +197,7 @@ CT_TrainCfg.loss_weights = CFG(
 )
 
 # Checkpointing
-CT_TrainCfg.keep_checkpoint_max = 5
+CT_TrainCfg.keep_checkpoint_max = 3
 CT_TrainCfg.log_step = 10
 CT_TrainCfg.debug = False
 
@@ -145,6 +206,27 @@ CT_TrainCfg.debug = False
 # ---------------------------------------------------------------------------
 
 ModelCfg = CFG()
+
+# -- Single-head V-Net for MRI Stage 1 (coarse LA localisation) -------------
+
+ModelCfg.vnet_stage1 = CFG(
+    in_channels=1,
+    num_classes=2,   # binary: background + LA cavity
+    norm="instance",
+    activation="mish",
+    input_conv=CFG(channels=16, kernel_size=5),
+    down_conv=CFG(
+        channels=[32, 64, 128, 256],
+        kernel_size=[3, 3, 3, 3],
+        dropout=[0.0, 0.0, 0.3, 0.3],
+    ),
+    up_conv=CFG(
+        channels=[128, 64, 32, 16],
+        kernel_size=[3, 3, 3, 3],
+        dropout=[0.0, 0.0, 0.0, 0.0],
+    ),
+    output_conv=CFG(kernel_size=1),
+)
 
 # -- Dual-head V-Net for MRI (Tasks 1 & 2) ----------------------------------
 

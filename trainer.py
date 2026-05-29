@@ -21,12 +21,21 @@ from torch_ecg.components.trainer import BaseTrainer
 from torch_ecg.utils.misc import str2bool
 from tqdm.auto import tqdm
 
-from cfg import CT_TrainCfg, ModelCfg, MRI_TrainCfg
-from dataset import CARE2026_CT_Dataset, CARE2026_MRI_Dataset, collate_fn_ct, collate_fn_mri
-from models import CARE2026_CT_Model, CARE2026_MRI_Model
+from cfg import CT_TrainCfg, ModelCfg, MRI_Stage1_TrainCfg, MRI_Stage2_TrainCfg, MRI_TrainCfg
+from dataset import (
+    CARE2026_CT_Dataset,
+    CARE2026_MRI_Stage1_Dataset,
+    CARE2026_MRI_Stage2_Dataset,
+    collate_fn_ct,
+    collate_fn_mri,
+    collate_fn_mri_stage1,
+)
+from models import CARE2026_CT_Model, CARE2026_MRI_Stage1_Model, CARE2026_MRI_Stage2_Model
 
 __all__ = [
-    "CARE2026_MRI_Trainer",
+    "CARE2026_MRI_Stage1_Trainer",
+    "CARE2026_MRI_Stage2_Trainer",
+    "CARE2026_MRI_Trainer",          # alias for Stage2
     "CARE2026_CT_Trainer",
 ]
 
@@ -234,10 +243,10 @@ class _BaseCARE2026Trainer(BaseTrainer):
             pbar.update(n_samples)
 
 
-class CARE2026_MRI_Trainer(_BaseCARE2026Trainer):
-    """Trainer for MRI Tasks 1 & 2 (LA cavity + scar)."""
+class CARE2026_MRI_Stage1_Trainer(_BaseCARE2026Trainer):
+    """Trainer for MRI Stage 1 coarse LA localisation."""
 
-    __name__ = "CARE2026_MRI_Trainer"
+    __name__ = "CARE2026_MRI_Stage1_Trainer"
 
     def __init__(
         self,
@@ -248,13 +257,123 @@ class CARE2026_MRI_Trainer(_BaseCARE2026Trainer):
         lazy: bool = True,
         **kwargs: Any,
     ) -> None:
-        tc = CFG(deepcopy(MRI_TrainCfg))
+        tc = CFG(deepcopy(MRI_Stage1_TrainCfg))
+        tc.update(deepcopy(train_config))
+        tc.classes = ["la_cavity"]
+        tc.monitor = tc.get("monitor", "la_dice")
+        super().__init__(
+            model=model,
+            dataset_cls=CARE2026_MRI_Stage1_Dataset,
+            collate_fn=collate_fn_mri_stage1,
+            model_config=model_config,
+            train_config=tc,
+            device=device,
+            lazy=lazy,
+            **kwargs,
+        )
+
+    @property
+    def save_prefix(self) -> str:
+        model_name = getattr(self._model, "__name__", self._model.__class__.__name__)
+        return f"{model_name}-mri1"
+
+    def extra_log_suffix(self) -> str:
+        return f"mri1_{self.train_config.optimizer}"
+
+    def _setup_dataloaders(
+        self,
+        train_dataset=None,
+        val_dataset=None,
+    ) -> None:
+        num_workers = 1 if self.device == torch.device("cpu") else 4
+        db_dir = self.train_config.db_dir
+        if train_dataset is None:
+            train_dataset = CARE2026_MRI_Stage1_Dataset(
+                db_dir=db_dir,
+                config=self.train_config,
+                training=True,
+                val_ratio=float(self.train_config.get("val_ratio", 0.1)),
+                random_seed=int(self.train_config.get("random_seed", 42)),
+            )
+        if val_dataset is None:
+            val_dataset = CARE2026_MRI_Stage1_Dataset(
+                db_dir=db_dir,
+                config=self.train_config,
+                training=False,
+                val_ratio=float(self.train_config.get("val_ratio", 0.1)),
+                random_seed=int(self.train_config.get("random_seed", 42)),
+            )
+        self.train_loader = DataLoader(
+            dataset=train_dataset,
+            batch_size=self.batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            pin_memory=True,
+            drop_last=False,
+            collate_fn=collate_fn_mri_stage1,
+        )
+        self.val_loader = DataLoader(
+            dataset=val_dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=True,
+            drop_last=False,
+            collate_fn=collate_fn_mri_stage1,
+        )
+        self.val_train_loader = None
+
+    def run_one_step(self, input_tensors: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        return self.model(
+            img=input_tensors["image"],
+            labels={"la_mask": input_tensors["la_mask"].long()},
+        )
+
+    @torch.no_grad()
+    def evaluate(self, data_loader: DataLoader) -> Dict[str, float]:
+        original_state = self.model.training
+        self.model.eval()
+        la_dices: List[float] = []
+        with tqdm(
+            total=len(data_loader.dataset),
+            desc="Evaluation (Stage1)",
+            unit="vol",
+            dynamic_ncols=True,
+            mininterval=1.0,
+            leave=False,
+        ) as pbar:
+            for input_tensors in data_loader:
+                out = self.model(img=input_tensors["image"])
+                pred_la = out["la_mask"].detach().cpu().numpy()
+                gt_la = input_tensors["la_mask"].numpy().astype(np.uint8)
+                for i in range(pred_la.shape[0]):
+                    la_dices.append(_binary_dice(pred_la[i], gt_la[i]))
+                pbar.update(pred_la.shape[0])
+        self.model.train(original_state)
+        return {"la_dice": float(np.mean(la_dices)) if la_dices else 0.0}
+
+
+class CARE2026_MRI_Stage2_Trainer(_BaseCARE2026Trainer):
+    """Trainer for MRI Tasks 1 & 2 Stage 2 (LA cavity + scar)."""
+
+    __name__ = "CARE2026_MRI_Stage2_Trainer"
+
+    def __init__(
+        self,
+        model: nn.Module,
+        model_config: dict,
+        train_config: dict,
+        device: Optional[torch.device] = None,
+        lazy: bool = True,
+        **kwargs: Any,
+    ) -> None:
+        tc = CFG(deepcopy(MRI_Stage2_TrainCfg))
         tc.update(deepcopy(train_config))
         tc.classes = ["la_cavity", "la_scar"]
         tc.monitor = tc.get("monitor", "la_dice")
         super().__init__(
             model=model,
-            dataset_cls=CARE2026_MRI_Dataset,
+            dataset_cls=CARE2026_MRI_Stage2_Dataset,
             collate_fn=collate_fn_mri,
             model_config=model_config,
             train_config=tc,
@@ -266,10 +385,10 @@ class CARE2026_MRI_Trainer(_BaseCARE2026Trainer):
     @property
     def save_prefix(self) -> str:
         model_name = getattr(self._model, "__name__", self._model.__class__.__name__)
-        return f"{model_name}-mri"
+        return f"{model_name}-mri2"
 
     def extra_log_suffix(self) -> str:
-        return f"mri_{self.train_config.optimizer}"
+        return f"mri2_{self.train_config.optimizer}"
 
     def _setup_dataloaders(
         self,
@@ -279,7 +398,7 @@ class CARE2026_MRI_Trainer(_BaseCARE2026Trainer):
         num_workers = 1 if self.device == torch.device("cpu") else 4
         db_dir = self.train_config.db_dir
         if train_dataset is None:
-            train_dataset = CARE2026_MRI_Dataset(
+            train_dataset = CARE2026_MRI_Stage2_Dataset(
                 db_dir=db_dir,
                 config=self.train_config,
                 training=True,
@@ -287,7 +406,7 @@ class CARE2026_MRI_Trainer(_BaseCARE2026Trainer):
                 random_seed=int(self.train_config.get("random_seed", 42)),
             )
         if val_dataset is None:
-            val_dataset = CARE2026_MRI_Dataset(
+            val_dataset = CARE2026_MRI_Stage2_Dataset(
                 db_dir=db_dir,
                 config=self.train_config,
                 training=False,
@@ -366,6 +485,10 @@ class CARE2026_MRI_Trainer(_BaseCARE2026Trainer):
             "scar_acc": float(np.mean(scar_accs)) if scar_accs else 0.0,
             "scar_sen": float(np.mean(scar_sens)) if scar_sens else 0.0,
         }
+
+
+# Backward-compatibility alias
+CARE2026_MRI_Trainer = CARE2026_MRI_Stage2_Trainer
 
 
 class CARE2026_CT_Trainer(_BaseCARE2026Trainer):
@@ -513,6 +636,13 @@ def get_args(**kwargs: Any) -> CFG:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--task", choices=["mri", "ct"], required=True)
+    parser.add_argument(
+        "--stage",
+        type=int,
+        choices=[1, 2],
+        default=2,
+        help="MRI pipeline stage: 1 = coarse LA localisation, 2 = fine segmentation (default).",
+    )
     parser.add_argument("--db-dir", dest="db_dir", required=True)
     parser.add_argument("--backbone", default="vnet", choices=["vnet", "nested_vnet"])
     parser.add_argument("-b", "--batch-size", type=int, default=None, dest="batch_size")
@@ -534,11 +664,23 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if args.task == "mri":
-        train_config = CFG(deepcopy(MRI_TrainCfg))
-        train_config.update(args)
-        model_config = deepcopy(ModelCfg)
-        model = CARE2026_MRI_Model(config=model_config, train_config=train_config, backbone=args.backbone)
-        trainer_cls = CARE2026_MRI_Trainer
+        stage = int(args.get("stage", 2))
+        if stage == 1:
+            train_config = CFG(deepcopy(MRI_Stage1_TrainCfg))
+            train_config.update(args)
+            model_config = deepcopy(ModelCfg)
+            model = CARE2026_MRI_Stage1_Model(config=model_config, train_config=train_config)
+            trainer_cls = CARE2026_MRI_Stage1_Trainer
+        else:
+            train_config = CFG(deepcopy(MRI_Stage2_TrainCfg))
+            train_config.update(args)
+            model_config = deepcopy(ModelCfg)
+            model = CARE2026_MRI_Stage2_Model(
+                config=model_config,
+                train_config=train_config,
+                backbone=args.get("backbone", "vnet"),
+            )
+            trainer_cls = CARE2026_MRI_Stage2_Trainer
     else:
         train_config = CFG(deepcopy(CT_TrainCfg))
         train_config.update(args)
