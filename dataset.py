@@ -155,13 +155,13 @@ class CARE2026_MRI_Stage1_Dataset(Dataset, ReprMixin):
                 image = CARE2026_MRI.resample_data(image, self._canonical_shape)
                 la_mask = CARE2026_MRI.resample_ann(la_mask, self._canonical_shape)
 
+                # 1.5. CLAHE on the full canonical image (before any downsampling)
+                if self.config.get("apply_mclahe", False):
+                    image = _mclahe(image)
+
                 # 2. Downsample to Stage 1 shape
                 image = CARE2026_MRI.resample_data(image, self._stage1_shape)
                 la_mask = CARE2026_MRI.resample_ann(la_mask, self._stage1_shape)
-
-                # 2.5. CLAHE (optional contrast enhancement)
-                if self.config.get("apply_mclahe", False):
-                    image = _mclahe(image)
 
                 # 3. Z-score normalise
                 mean, std = float(image.mean()), float(image.std())
@@ -296,6 +296,10 @@ class CARE2026_MRI_Stage2_Dataset(Dataset, ReprMixin):
                 else:
                     scar_mask = np.zeros_like(la_mask)
 
+                # 1.5. CLAHE on the full canonical image (before centroid crop)
+                if self.config.get("apply_mclahe", False):
+                    image = _mclahe(image)
+
                 # 2. Find LA centroid in canonical space
                 cx, cy, cz = self._centroid(la_mask)
 
@@ -307,10 +311,6 @@ class CARE2026_MRI_Stage2_Dataset(Dataset, ReprMixin):
                     centroid=(cx, cy, cz),
                     crop_shape=self._cache_shape,
                 )
-
-                # 3.5. CLAHE (optional contrast enhancement)
-                if self.config.get("apply_mclahe", False):
-                    img_cache = _mclahe(img_cache)
 
                 # 4. Z-score normalise the image cache
                 mean, std = float(img_cache.mean()), float(img_cache.std())
