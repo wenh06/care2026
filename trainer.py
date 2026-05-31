@@ -650,6 +650,7 @@ def get_args(**kwargs: Any) -> CFG:
     parser.add_argument("--use-amp", type=str2bool, default=None, dest="use_amp")
     parser.add_argument("--epochs", type=int, default=None, dest="n_epochs")
     parser.add_argument("--debug", type=str2bool, default=False, dest="debug")
+    parser.add_argument("--mclahe", type=str2bool, default=None, dest="apply_mclahe", help="Enable MCLAHE preprocessing")
     args = {k: v for k, v in vars(parser.parse_args()).items() if v is not None}
     cfg.update(args)
     return CFG(cfg)

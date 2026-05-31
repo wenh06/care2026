@@ -272,7 +272,7 @@ def predict_mri_two_stage(
     stage2_model: torch.nn.Module,
     device: Optional[torch.device] = None,
     use_tta: bool = True,
-    apply_mclahe: bool = False,
+    apply_mclahe: Optional[bool] = None,
     canonical_shape: Tuple[int, int, int] = MRI_CANONICAL_SHAPE,
     stage1_shape: Tuple[int, int, int] = MRI_STAGE1_SHAPE,
     stage2_crop_shape: Tuple[int, int, int] = MRI_STAGE2_CROP_SHAPE,
@@ -307,10 +307,10 @@ def predict_mri_two_stage(
         Inference device.  Defaults to the Stage-1 model's current device.
     use_tta : bool, default True
         Whether to apply 8-fold flip TTA for both stages.
-    apply_mclahe : bool, default False
+    apply_mclahe : bool or None, default None
         Apply MCLAHE contrast enhancement to ``img_canonical`` before
-        Stage-1 and Stage-2 inference. Enable when models were trained
-        with ``apply_mclahe=True``.
+        Stage-1 and Stage-2 inference.  When ``None`` (default), the
+        setting is auto-detected from ``stage2_model.train_config``.
     canonical_shape : (H, W, D)
         Target shape for initial resampling.  Must match ``MRI_CANONICAL_SHAPE``.
     stage1_shape : (H, W, D)
@@ -326,6 +326,11 @@ def predict_mri_two_stage(
     """
     if device is None:
         device = next(stage1_model.parameters()).device
+
+    # Auto-detect apply_mclahe from the model's saved train_config
+    if apply_mclahe is None:
+        tc = getattr(stage2_model, "train_config", None)
+        apply_mclahe = bool(tc.get("apply_mclahe", False)) if tc is not None else False
 
     # ── Load & record original shape ──────────────────────────────────────
     nii = nib.load(str(img_path))
