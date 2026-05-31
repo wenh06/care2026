@@ -131,12 +131,12 @@ class CARE2026_MRI_Stage1_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
     def train_config(self) -> CFG:
         return self.__train_config
 
-    def save(self, path, **kwargs) -> None:
+    def save(self, path, **kwargs):
         """Override CkptMixin.save to prevent decimal suffixes from being treated as file extensions."""
         p = Path(str(path))
         name = re.sub(r"(?<=\d)\.(?=\d)", "_", p.name)
         path = str(p.parent / name)
-        super().save(path=path, **kwargs)
+        return super().save(path=path, **kwargs)
 
 
 class CARE2026_MRI_Stage2_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
@@ -289,7 +289,7 @@ class CARE2026_MRI_Stage2_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
     def train_config(self) -> CFG:
         return self.__train_config
 
-    def save(self, path, **kwargs) -> None:
+    def save(self, path, **kwargs):
         """Override CkptMixin.save to prevent decimal suffixes from being treated as file extensions.
 
         e.g. ``...epochloss_0.17121_metric_0.91`` → saves as
@@ -299,7 +299,7 @@ class CARE2026_MRI_Stage2_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
         p = Path(str(path))
         name = re.sub(r"(?<=\d)\.(?=\d)", "_", p.name)
         path = str(p.parent / name)
-        super().save(path=path, **kwargs)
+        return super().save(path=path, **kwargs)
 
 
 # Backward-compatibility alias
@@ -419,9 +419,9 @@ class CARE2026_CT_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
     def train_config(self) -> CFG:
         return self.__train_config
 
-    def save(self, path, **kwargs) -> None:
+    def save(self, path, **kwargs):
         """Override CkptMixin.save to prevent decimal suffixes from being treated as file extensions."""
         p = Path(str(path))
         name = re.sub(r"(?<=\d)\.(?=\d)", "_", p.name)
         path = str(p.parent / name)
-        super().save(path=path, **kwargs)
+        return super().save(path=path, **kwargs)

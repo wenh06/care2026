@@ -308,7 +308,7 @@ class CARE2026_MRI_Stage1_Trainer(_BaseCARE2026Trainer):
             batch_size=self.batch_size,
             shuffle=True,
             num_workers=num_workers,
-            pin_memory=True,
+            pin_memory=False,  # PyTorch ≥2.9 deprecated Tensor.pin_memory(device); negligible benefit for large 3-D volumes
             drop_last=False,
             collate_fn=collate_fn_mri_stage1,
         )
@@ -317,7 +317,7 @@ class CARE2026_MRI_Stage1_Trainer(_BaseCARE2026Trainer):
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=num_workers,
-            pin_memory=True,
+            pin_memory=False,
             drop_last=False,
             collate_fn=collate_fn_mri_stage1,
         )
@@ -419,7 +419,7 @@ class CARE2026_MRI_Stage2_Trainer(_BaseCARE2026Trainer):
             batch_size=self.batch_size,
             shuffle=True,
             num_workers=num_workers,
-            pin_memory=True,
+            pin_memory=False,  # PyTorch ≥2.9 deprecated Tensor.pin_memory(device); negligible benefit for large 3-D volumes
             drop_last=False,
             collate_fn=collate_fn_mri,
         )
@@ -428,7 +428,7 @@ class CARE2026_MRI_Stage2_Trainer(_BaseCARE2026Trainer):
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=num_workers,
-            pin_memory=True,
+            pin_memory=False,
             drop_last=False,
             collate_fn=collate_fn_mri,
         )
@@ -559,7 +559,7 @@ class CARE2026_CT_Trainer(_BaseCARE2026Trainer):
             batch_size=self.batch_size,
             shuffle=True,
             num_workers=num_workers,
-            pin_memory=True,
+            pin_memory=False,  # PyTorch ≥2.9 deprecated Tensor.pin_memory(device); negligible benefit for large 3-D volumes
             drop_last=False,
             collate_fn=collate_fn_ct,
         )
@@ -568,7 +568,7 @@ class CARE2026_CT_Trainer(_BaseCARE2026Trainer):
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=num_workers,
-            pin_memory=True,
+            pin_memory=False,
             drop_last=False,
             collate_fn=collate_fn_ct,
         )
