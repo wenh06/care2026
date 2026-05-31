@@ -7,7 +7,7 @@ Conventions:
 - activation: "relu", "leaky_relu", "mish", "elu", "prelu"
 """
 
-from typing import List, Literal, Optional, Union
+from typing import List, Literal, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -16,8 +16,11 @@ __all__ = [
     "ConvNormAct",
     "ResBlock3D",
     "DownBlock3D",
-    "UpBlock3D",
+    "ECAGate3D",
+    "WindowedMHSA3D",
+    "BottleneckTransformer3D",
     "NestedUpBlock3D",
+    "UpBlock3D",
 ]
 
 NormType = Literal["batch", "instance", "none"]
@@ -154,7 +157,197 @@ class DownBlock3D(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if any(dim < 2 for dim in x.shape[2:]):
+            pad = []
+            for dim in reversed(x.shape[2:]):
+                pad.extend([0, max(0, 2 - dim)])
+            x = nn.functional.pad(x, pad)
         return self.block(self.down(x))
+
+
+class ECAGate3D(nn.Module):
+    """Efficient Channel Attention gate for 3-D feature maps (ECA-Net).
+
+    Computes per-channel attention weights via global-average-pooling
+    followed by a 1-D convolution of kernel size *k* (auto-sized from
+    ``channels``). Adds negligible parameters compared to SE blocks.
+
+    Reference
+    ---------
+    Wang et al., ECA-Net: Efficient channel attention for deep
+    convolutional neural networks. CVPR 2020.
+
+    Parameters
+    ----------
+    channels : int
+        Number of input / output channels.
+    gamma : int, default 2
+    b : int, default 1
+        ECA hyper-parameters for automatic kernel sizing:
+        k = ⌈log2(C) / γ + b / γ⌉, rounded up to nearest odd number.
+    """
+
+    def __init__(self, channels: int, gamma: int = 2, b: int = 1) -> None:
+        super().__init__()
+        import math
+
+        t = int(abs((math.log2(channels) + b) / gamma))
+        k = t if t % 2 else t + 1
+        self.gap = nn.AdaptiveAvgPool3d(1)
+        self.conv = nn.Conv1d(1, 1, kernel_size=k, padding=k // 2, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Gate *x* with channel-wise attention weights."""
+        # (B, C, H, W, D) → (B, C, 1, 1, 1)
+        y = self.gap(x)
+        # (B, C, 1, 1, 1) → (B, 1, C) for 1-D conv
+        y = self.conv(y.squeeze(-1).squeeze(-1).transpose(-1, -2))
+        # (B, 1, C) → (B, C, 1, 1, 1)
+        y = self.sigmoid(y).transpose(-1, -2).unsqueeze(-1).unsqueeze(-1)
+        return x * y.expand_as(x)
+
+
+class WindowedMHSA3D(nn.Module):
+    """Multi-head self-attention within non-overlapping 3-D windows.
+
+    The input volume is partitioned into windows of ``window_size``
+    (zero-padded if necessary). Full MHSA is applied within each
+    window independently, then the results are reassembled.
+
+    With the typical VNet bottleneck shapes (32×32×5 at Stage 2,
+    18×18×5 at Stage 1) and window_size=(8,8,5) the attention matrix
+    is only 320×320 per head—well within memory budget.
+
+    Parameters
+    ----------
+    channels : int
+    num_heads : int, default 8
+    window_size : (wH, wW, wD), default (8, 8, 5)
+    dropout : float, default 0.0
+    """
+
+    def __init__(
+        self,
+        channels: int,
+        num_heads: int = 8,
+        window_size: Tuple[int, int, int] = (8, 8, 5),
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        assert channels % num_heads == 0, "channels must be divisible by num_heads"
+        self.window_size = window_size
+        self.num_heads = num_heads
+        self.head_dim = channels // num_heads
+        self.scale = self.head_dim**-0.5
+
+        self.norm = nn.LayerNorm(channels)
+        self.qkv = nn.Linear(channels, 3 * channels, bias=False)
+        self.proj = nn.Linear(channels, channels, bias=False)
+        self.attn_drop = nn.Dropout(dropout)
+        self.proj_drop = nn.Dropout(dropout)
+
+    @staticmethod
+    def _partition(x: torch.Tensor, ws: Tuple[int, int, int]) -> torch.Tensor:
+        """(B, H, W, D, C) → (nW·B, wH·wW·wD, C)."""
+        B, H, W, D, C = x.shape
+        wH, wW, wD = ws
+        x = x.view(B, H // wH, wH, W // wW, wW, D // wD, wD, C)
+        x = x.permute(0, 1, 3, 5, 2, 4, 6, 7).contiguous()
+        return x.view(-1, wH * wW * wD, C)
+
+    @staticmethod
+    def _unpartition(windows: torch.Tensor, ws: Tuple[int, int, int], shape: Tuple[int, int, int]) -> torch.Tensor:
+        """(nW·B, wH·wW·wD, C) → (B, H, W, D, C)."""
+        H, W, D = shape
+        wH, wW, wD = ws
+        C = windows.shape[-1]
+        B = windows.shape[0] // ((H // wH) * (W // wW) * (D // wD))
+        x = windows.view(B, H // wH, W // wW, D // wD, wH, wW, wD, C)
+        return x.permute(0, 1, 4, 2, 5, 3, 6, 7).contiguous().view(B, H, W, D, C)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """(B, C, H, W, D) → (B, C, H, W, D)."""
+        _, C, H, W, D = x.shape
+        wH, wW, wD = self.window_size
+
+        # Pad so each spatial dim is divisible by its window size
+        pH = (wH - H % wH) % wH
+        pW = (wW - W % wW) % wW
+        pD = (wD - D % wD) % wD
+        if pH or pW or pD:
+            x = torch.nn.functional.pad(x, (0, pD, 0, pW, 0, pH))
+        _, _, Hp, Wp, Dp = x.shape
+
+        # (B, C, H, W, D) → (B, H, W, D, C)
+        x_in = x.permute(0, 2, 3, 4, 1)
+        shortcut = x_in
+        x_in = self.norm(x_in)
+
+        wins = self._partition(x_in, (wH, wW, wD))  # (nW·B, N, C)
+        N = wH * wW * wD
+        qkv = self.qkv(wins).reshape(-1, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv.unbind(0)
+
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        attn = attn.softmax(dim=-1)
+        attn = self.attn_drop(attn)
+
+        out = (attn @ v).transpose(1, 2).reshape(-1, N, C)
+        out = self.proj_drop(self.proj(out))
+
+        x_out = self._unpartition(out, (wH, wW, wD), (Hp, Wp, Dp))
+        x_out = x_out + shortcut
+
+        if pH or pW or pD:
+            x_out = x_out[:, :H, :W, :D, :]
+
+        return x_out.permute(0, 4, 1, 2, 3).contiguous()
+
+
+class BottleneckTransformer3D(nn.Module):
+    """Windowed self-attention + feed-forward block for the VNet bottleneck.
+
+    Stacks one :class:`WindowedMHSA3D` and one position-wise FFN (both with
+    pre-norm and residual connection), replacing or augmenting the deepest
+    convolutional block.
+
+    Parameters
+    ----------
+    channels : int
+    num_heads : int, default 8
+    window_size : (wH, wW, wD), default (8, 8, 5)
+    mlp_ratio : float, default 4.0
+    dropout : float, default 0.0
+    """
+
+    def __init__(
+        self,
+        channels: int,
+        num_heads: int = 8,
+        window_size: Tuple[int, int, int] = (8, 8, 5),
+        mlp_ratio: float = 4.0,
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        self.attn = WindowedMHSA3D(channels, num_heads, window_size, dropout)
+        mlp_dim = int(channels * mlp_ratio)
+        self.norm = nn.LayerNorm(channels)
+        self.ffn = nn.Sequential(
+            nn.Linear(channels, mlp_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(mlp_dim, channels),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """(B, C, H, W, D) → (B, C, H, W, D)."""
+        x = self.attn(x)
+        # FFN in channel-last layout
+        x_in = x.permute(0, 2, 3, 4, 1)  # (B, H, W, D, C)
+        x_in = x_in + self.ffn(self.norm(x_in))
+        return x_in.permute(0, 4, 1, 2, 3).contiguous()
 
 
 class NestedUpBlock3D(nn.Module):
@@ -187,6 +380,7 @@ class NestedUpBlock3D(nn.Module):
         norm: NormType = "instance",
         activation: ActType = "mish",
         dropout: float = 0.0,
+        use_eca: bool = False,
     ) -> None:
         super().__init__()
         half = out_channels // 2
@@ -213,6 +407,7 @@ class NestedUpBlock3D(nn.Module):
             activation=activation,
             dropout=dropout,
         )
+        self.eca: nn.Module = ECAGate3D(total_skip_channels) if use_eca else nn.Identity()
 
     def forward(self, x: torch.Tensor, skips: List[torch.Tensor]) -> torch.Tensor:
         """
@@ -223,7 +418,8 @@ class NestedUpBlock3D(nn.Module):
         """
         x_up = self.up_act(self.up_bn(self.up(x)))
         skip_cat = torch.cat(skips, dim=1)
-        # Align spatial dimensions (odd input sizes may cause ±1 mismatch)
+        skip_cat = self.eca(skip_cat)
+        # Align spatial dimensions
         if x_up.shape[2:] != skip_cat.shape[2:]:
             diffs = [s - x_up.shape[i + 2] for i, s in enumerate(skip_cat.shape[2:])]
             pad = []
@@ -259,6 +455,7 @@ class UpBlock3D(nn.Module):
         norm: NormType = "instance",
         activation: ActType = "mish",
         dropout: float = 0.0,
+        use_eca: bool = False,
     ) -> None:
         super().__init__()
         self.up = nn.ConvTranspose3d(in_channels, in_channels, 2, stride=2, bias=False)
@@ -270,9 +467,11 @@ class UpBlock3D(nn.Module):
             activation=activation,
             dropout=dropout,
         )
+        self.eca: nn.Module = ECAGate3D(skip_channels) if use_eca else nn.Identity()
 
     def forward(self, x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
         x = self.up(x)
+        skip = self.eca(skip)
         # pad x if spatial sizes don't match exactly (can happen with odd input dims)
         if x.shape[2:] != skip.shape[2:]:
             diffs = [s - x.shape[i + 2] for i, s in enumerate(skip.shape[2:])]

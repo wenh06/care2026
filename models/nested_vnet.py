@@ -19,7 +19,7 @@ import torch.nn as nn
 from torch_ecg.cfg import CFG
 from torch_ecg.utils import SizeMixin
 
-from .layers import NestedUpBlock3D
+from .layers import BottleneckTransformer3D, NestedUpBlock3D
 from .vnet import _SegEncoder3D
 
 __all__ = ["DualHeadNestedVNet"]
@@ -62,6 +62,7 @@ class _NestedDecoder(nn.Module):
         activation: str,
         num_classes: int,
         deep_supervision: bool = True,
+        use_eca: bool = False,
     ) -> None:
         super().__init__()
         n_levels = len(enc_channels) - 1
@@ -104,6 +105,7 @@ class _NestedDecoder(nn.Module):
                         norm=norm,
                         activation=activation,
                         dropout=up_conv.dropout[ks_idx],
+                        use_eca=use_eca,
                     )
                 )
                 in_ch = out_ch
@@ -189,6 +191,8 @@ class DualHeadNestedVNet(nn.Module, SizeMixin):
         ),
         output_conv=CFG(kernel_size=1),
         deep_supervision=True,
+        use_eca_skip=False,
+        bottleneck_transformer=None,
         heads=CFG(
             la=CFG(out_channels=2),
             scar=CFG(out_channels=2),
@@ -205,19 +209,50 @@ class DualHeadNestedVNet(nn.Module, SizeMixin):
         norm = self.__config.norm
         act = self.__config.activation
 
+        bt_cfg = self.__config.get("bottleneck_transformer", None)
+        if bt_cfg:
+            bottleneck_transformer = BottleneckTransformer3D(
+                channels=self.__config.down_conv.channels[-1],
+                num_heads=bt_cfg.get("num_heads", 8),
+                window_size=tuple(bt_cfg.get("window_size", [8, 8, 5])),
+                mlp_ratio=float(bt_cfg.get("mlp_ratio", 4.0)),
+                dropout=float(bt_cfg.get("dropout", 0.0)),
+            )
+        else:
+            bottleneck_transformer = None
+
+        use_eca = bool(self.__config.get("use_eca_skip", False))
+
         self.encoder = _SegEncoder3D(
             in_channels=self.__config.in_channels,
             norm=norm,
             activation=act,
             input_conv=self.__config.input_conv,
             down_conv=self.__config.down_conv,
+            bottleneck_transformer=bottleneck_transformer,
         )
         enc_ch = self.encoder._enc_channels
         up_conv = self.__config.up_conv
         ds = self.__config.deep_supervision
 
-        self.la_decoder = _NestedDecoder(enc_ch, up_conv, norm, act, self.__config.heads.la.out_channels, ds)
-        self.scar_decoder = _NestedDecoder(enc_ch, up_conv, norm, act, self.__config.heads.scar.out_channels, ds)
+        self.la_decoder = _NestedDecoder(
+            enc_ch,
+            up_conv,
+            norm,
+            act,
+            self.__config.heads.la.out_channels,
+            ds,
+            use_eca=use_eca,
+        )
+        self.scar_decoder = _NestedDecoder(
+            enc_ch,
+            up_conv,
+            norm,
+            act,
+            self.__config.heads.scar.out_channels,
+            ds,
+            use_eca=use_eca,
+        )
 
     def forward(self, x: torch.Tensor) -> Tuple[
         Union[torch.Tensor, List[torch.Tensor]],

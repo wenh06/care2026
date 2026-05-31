@@ -17,7 +17,7 @@ import torch.nn as nn
 from torch_ecg.cfg import CFG
 from torch_ecg.utils import SizeMixin
 
-from .layers import ConvNormAct, DownBlock3D, UpBlock3D
+from .layers import BottleneckTransformer3D, ConvNormAct, DownBlock3D, UpBlock3D
 
 __all__ = ["DualHeadVNet", "VNet"]
 
@@ -36,6 +36,7 @@ class _SegEncoder3D(nn.Module):
         activation: str,
         input_conv: CFG,
         down_conv: CFG,
+        bottleneck_transformer: Optional[nn.Module] = None,
     ) -> None:
         super().__init__()
         ic, dc = input_conv, down_conv
@@ -55,12 +56,15 @@ class _SegEncoder3D(nn.Module):
             ]
         )
         self._enc_channels: List[int] = [ic.channels] + list(dc.channels)
+        self.bottleneck_transformer: nn.Module = bottleneck_transformer or nn.Identity()
 
     def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
         """Return list of skip tensors [stem_out, down0_out, ..., bottleneck_out]."""
         skips = [self.stem(x)]
         for block in self.down_blocks:
             skips.append(block(skips[-1]))
+        # Apply bottleneck transformer in-place on the deepest feature map
+        skips[-1] = self.bottleneck_transformer(skips[-1])
         return skips
 
 
@@ -69,6 +73,7 @@ def _make_decoder(
     up_conv: CFG,
     norm: str,
     activation: str,
+    use_eca: bool = False,
 ) -> nn.ModuleList:
     """Build a ModuleList of UpBlock3D for one decoder."""
     blocks = []
@@ -84,6 +89,7 @@ def _make_decoder(
                 norm=norm,
                 activation=activation,
                 dropout=up_conv.dropout[i],
+                use_eca=use_eca,
             )
         )
     return nn.ModuleList(blocks)
@@ -127,6 +133,8 @@ class DualHeadVNet(nn.Module, SizeMixin):
             dropout=[0.0, 0.0, 0.0, 0.0],
         ),
         output_conv=CFG(kernel_size=1),
+        use_eca_skip=False,
+        bottleneck_transformer=None,
         heads=CFG(
             la=CFG(out_channels=2),
             scar=CFG(out_channels=2),
@@ -143,20 +151,35 @@ class DualHeadVNet(nn.Module, SizeMixin):
         norm = self.__config.norm
         act = self.__config.activation
 
+        bt_cfg = self.__config.get("bottleneck_transformer", None)
+        if bt_cfg:
+            bottleneck_transformer = BottleneckTransformer3D(
+                channels=self.__config.down_conv.channels[-1],
+                num_heads=bt_cfg.get("num_heads", 8),
+                window_size=tuple(bt_cfg.get("window_size", [8, 8, 5])),
+                mlp_ratio=float(bt_cfg.get("mlp_ratio", 4.0)),
+                dropout=float(bt_cfg.get("dropout", 0.0)),
+            )
+        else:
+            bottleneck_transformer = None
+
+        use_eca = bool(self.__config.get("use_eca_skip", False))
+
         self.encoder = _SegEncoder3D(
             in_channels=self.__config.in_channels,
             norm=norm,
             activation=act,
             input_conv=self.__config.input_conv,
             down_conv=self.__config.down_conv,
+            bottleneck_transformer=bottleneck_transformer,
         )
+        enc_ch = self.encoder._enc_channels
+        up_conv = self.__config.up_conv
 
-        self.la_up_blocks = _make_decoder(self.encoder._enc_channels, self.__config.up_conv, norm, act)
-        self.scar_up_blocks = _make_decoder(self.encoder._enc_channels, self.__config.up_conv, norm, act)
-
-        uc = self.__config.up_conv
-        self.la_out = nn.Conv3d(uc.channels[-1], self.__config.heads.la.out_channels, kernel_size=1)
-        self.scar_out = nn.Conv3d(uc.channels[-1], self.__config.heads.scar.out_channels, kernel_size=1)
+        self.la_up_blocks = _make_decoder(enc_ch, up_conv, norm, act, use_eca=use_eca)
+        self.scar_up_blocks = _make_decoder(enc_ch, up_conv, norm, act, use_eca=use_eca)
+        self.la_out = nn.Conv3d(up_conv.channels[-1], self.__config.heads.la.out_channels, kernel_size=1)
+        self.scar_out = nn.Conv3d(up_conv.channels[-1], self.__config.heads.scar.out_channels, kernel_size=1)
 
     # ------------------------------------------------------------------
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -234,6 +257,7 @@ class VNet(nn.Module, SizeMixin):
             dropout=[0.0, 0.0, 0.0, 0.0],
         ),
         output_conv=CFG(kernel_size=1),
+        bottleneck_transformer=None,
     )
 
     def __init__(self, config: Optional[CFG] = None) -> None:
@@ -246,12 +270,25 @@ class VNet(nn.Module, SizeMixin):
         norm = self.__config.norm
         act = self.__config.activation
 
+        bt_cfg = self.__config.get("bottleneck_transformer", None)
+        if bt_cfg:
+            bottleneck_transformer = BottleneckTransformer3D(
+                channels=self.__config.down_conv.channels[-1],
+                num_heads=bt_cfg.get("num_heads", 8),
+                window_size=tuple(bt_cfg.get("window_size", [8, 8, 5])),
+                mlp_ratio=float(bt_cfg.get("mlp_ratio", 4.0)),
+                dropout=float(bt_cfg.get("dropout", 0.0)),
+            )
+        else:
+            bottleneck_transformer = None
+
         self.encoder = _SegEncoder3D(
             in_channels=self.__config.in_channels,
             norm=norm,
             activation=act,
             input_conv=self.__config.input_conv,
             down_conv=self.__config.down_conv,
+            bottleneck_transformer=bottleneck_transformer,
         )
         self.up_blocks = _make_decoder(self.encoder._enc_channels, self.__config.up_conv, norm, act)
         self.out_conv = nn.Conv3d(self.__config.up_conv.channels[-1], self.__config.num_classes, kernel_size=1)

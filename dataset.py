@@ -33,6 +33,7 @@ from const import (
     MRI_STAGE2_CROP_SHAPE,
 )
 from data_reader import CARE2026_CT, CARE2026_MRI
+from utils.mclahe import mclahe as _mclahe
 
 __all__ = [
     "CARE2026_MRI_Stage1_Dataset",
@@ -157,6 +158,10 @@ class CARE2026_MRI_Stage1_Dataset(Dataset, ReprMixin):
                 # 2. Downsample to Stage 1 shape
                 image = CARE2026_MRI.resample_data(image, self._stage1_shape)
                 la_mask = CARE2026_MRI.resample_ann(la_mask, self._stage1_shape)
+
+                # 2.5. CLAHE (optional contrast enhancement)
+                if self.config.get("apply_mclahe", False):
+                    image = _mclahe(image)
 
                 # 3. Z-score normalise
                 mean, std = float(image.mean()), float(image.std())
@@ -295,7 +300,6 @@ class CARE2026_MRI_Stage2_Dataset(Dataset, ReprMixin):
                 cx, cy, cz = self._centroid(la_mask)
 
                 # 3. Crop generous cache region around centroid
-                cH, cW, cD = self._cache_shape
                 img_cache, la_cache, scar_cache = _centroid_crop(
                     image,
                     la_mask,
@@ -303,6 +307,10 @@ class CARE2026_MRI_Stage2_Dataset(Dataset, ReprMixin):
                     centroid=(cx, cy, cz),
                     crop_shape=self._cache_shape,
                 )
+
+                # 3.5. CLAHE (optional contrast enhancement)
+                if self.config.get("apply_mclahe", False):
+                    img_cache = _mclahe(img_cache)
 
                 # 4. Z-score normalise the image cache
                 mean, std = float(img_cache.mean()), float(img_cache.std())

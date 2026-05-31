@@ -98,6 +98,9 @@ MRI_Stage1_TrainCfg.keep_checkpoint_max = 3
 MRI_Stage1_TrainCfg.log_step = 10
 MRI_Stage1_TrainCfg.debug = False
 
+# CLAHE preprocessing (disabled by default; enable for ablation)
+MRI_Stage1_TrainCfg.apply_mclahe = False
+
 # ---------------------------------------------------------------------------
 # MRI Stage 2 training configuration (fine LA + scar segmentation)
 # ---------------------------------------------------------------------------
@@ -150,6 +153,9 @@ MRI_Stage2_TrainCfg.loss_weights = CFG(
 MRI_Stage2_TrainCfg.keep_checkpoint_max = 3
 MRI_Stage2_TrainCfg.log_step = 10
 MRI_Stage2_TrainCfg.debug = False
+
+# CLAHE preprocessing (disabled by default; enable for ablation)
+MRI_Stage2_TrainCfg.apply_mclahe = False
 
 # Backward-compatibility alias
 MRI_TrainCfg = MRI_Stage2_TrainCfg
@@ -226,6 +232,7 @@ ModelCfg.vnet_stage1 = CFG(
         dropout=[0.0, 0.0, 0.0, 0.0],
     ),
     output_conv=CFG(kernel_size=1),
+    bottleneck_transformer=None,
 )
 
 # -- Dual-head V-Net for MRI (Tasks 1 & 2) ----------------------------------
@@ -247,6 +254,8 @@ ModelCfg.vnet = CFG(
         dropout=[0.0, 0.0, 0.0, 0.0],
     ),
     output_conv=CFG(kernel_size=1),
+    use_eca_skip=False,
+    bottleneck_transformer=None,
     # Two output heads: LA cavity (binary) and LA scar (binary)
     heads=CFG(
         la=CFG(out_channels=2),  # 2-class: background + LA cavity
@@ -273,6 +282,8 @@ ModelCfg.nested_vnet = CFG(
     ),
     output_conv=CFG(kernel_size=1),
     deep_supervision=True,
+    use_eca_skip=False,
+    bottleneck_transformer=None,
     heads=CFG(
         la=CFG(out_channels=2),
         scar=CFG(out_channels=2),
@@ -298,4 +309,5 @@ ModelCfg.vnet_ct = CFG(
         dropout=[0.0, 0.0, 0.0, 0.0],
     ),
     output_conv=CFG(kernel_size=1),
+    bottleneck_transformer=None,
 )

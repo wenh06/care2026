@@ -25,6 +25,7 @@ import nibabel as nib
 import numpy as np
 import torch
 import torch.nn.functional as F
+from scipy.ndimage import label as _nd_label
 
 from const import (
     CT_HU_MAX,
@@ -38,12 +39,16 @@ from const import (
 )
 from data_reader import CARE2026_CT, CARE2026_MRI
 from outputs import CARE2026Outputs
+from utils.mclahe import mclahe as _mclahe
 
 __all__ = [
     "predict_mri_two_stage",
     "predict_mri",  # deprecated shim
     "predict_ct",
     "sliding_window_inference",
+    "keep_largest_component",
+    "postprocess_mri_masks",
+    "postprocess_ct_mask",
 ]
 
 # Axes used for TTA flip combinations (spatial axes of a 5-D (B,C,H,W,D) tensor)
@@ -87,6 +92,89 @@ def _resample_mask(mask: np.ndarray, target_shape: Sequence[int]) -> np.ndarray:
     t = torch.from_numpy(mask.astype(np.float32)).unsqueeze(0).unsqueeze(0)
     out = F.interpolate(t, size=tuple(target_shape), mode="nearest")
     return out.squeeze().numpy().astype(np.uint8)
+
+
+def keep_largest_component(mask: np.ndarray) -> np.ndarray:
+    """Keep only the largest connected component of a binary mask.
+
+    Parameters
+    ----------
+    mask : np.ndarray
+        Binary (0/1) integer array of any shape.
+
+    Returns
+    -------
+    np.ndarray
+        Same shape/dtype as *mask* with all but the largest connected
+        component zeroed out.  Returns *mask* unchanged if it is
+        all-zero or contains exactly one component.
+    """
+    if mask.max() == 0:
+        return mask
+    labeled, n_comp = _nd_label(mask)
+    if n_comp == 1:
+        return mask
+    # bincount index 0 is background; shift by 1
+    sizes = np.bincount(labeled.ravel())[1:]
+    largest_label = int(sizes.argmax()) + 1
+    return (labeled == largest_label).astype(mask.dtype)
+
+
+def postprocess_mri_masks(la_mask: np.ndarray, scar_mask: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Post-process MRI segmentation outputs.
+
+    Steps applied:
+
+    1. **LA cavity**: keep largest connected component (the LA is a single
+       connected structure; stray voxels indicate leakage).
+    2. **Scar**: intersect with the (post-processed) LA cavity mask so that
+       predicted scar outside the LA is discarded.  We deliberately do *not*
+       apply largest-component filtering to the scar itself because scar can
+       appear as multiple disconnected lesion patches.
+
+    Parameters
+    ----------
+    la_mask, scar_mask : np.ndarray
+        Binary (0/1) uint8 arrays in the same voxel space.
+
+    Returns
+    -------
+    la_mask_clean, scar_mask_clean : np.ndarray
+    """
+    la_clean = keep_largest_component(la_mask)
+    # Scar must lie inside the LA cavity
+    scar_clean = (scar_mask.astype(bool) & la_clean.astype(bool)).astype(scar_mask.dtype)
+    return la_clean, scar_clean
+
+
+def postprocess_ct_mask(ct_mask: np.ndarray, n_classes: int) -> np.ndarray:
+    """Post-process CT multi-class segmentation output.
+
+    For each foreground class independently, keep only the largest connected
+    component (each cardiac structure is topologically a single body).
+
+    Parameters
+    ----------
+    ct_mask : np.ndarray
+        Integer array with values in ``[0, n_classes)``.
+    n_classes : int
+        Total number of classes including background (class 0).
+
+    Returns
+    -------
+    np.ndarray
+        Same shape/dtype as *ct_mask*.
+    """
+    out = ct_mask.copy()
+    for cls in range(1, n_classes):
+        binary = (ct_mask == cls).astype(np.uint8)
+        if binary.max() == 0:
+            continue
+        cleaned = keep_largest_component(binary)
+        # Zero out voxels that were removed
+        out[ct_mask == cls] = 0
+        out[cleaned == 1] = cls
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +272,7 @@ def predict_mri_two_stage(
     stage2_model: torch.nn.Module,
     device: Optional[torch.device] = None,
     use_tta: bool = True,
+    apply_mclahe: bool = False,
     canonical_shape: Tuple[int, int, int] = MRI_CANONICAL_SHAPE,
     stage1_shape: Tuple[int, int, int] = MRI_STAGE1_SHAPE,
     stage2_crop_shape: Tuple[int, int, int] = MRI_STAGE2_CROP_SHAPE,
@@ -218,6 +307,10 @@ def predict_mri_two_stage(
         Inference device.  Defaults to the Stage-1 model's current device.
     use_tta : bool, default True
         Whether to apply 8-fold flip TTA for both stages.
+    apply_mclahe : bool, default False
+        Apply MCLAHE contrast enhancement to ``img_canonical`` before
+        Stage-1 and Stage-2 inference. Enable when models were trained
+        with ``apply_mclahe=True``.
     canonical_shape : (H, W, D)
         Target shape for initial resampling.  Must match ``MRI_CANONICAL_SHAPE``.
     stage1_shape : (H, W, D)
@@ -241,6 +334,8 @@ def predict_mri_two_stage(
 
     # ── Resample to canonical space ───────────────────────────────────────
     img_canonical = _resample_3d(image_raw, canonical_shape)  # (cH, cW, cD)
+    if apply_mclahe:
+        img_canonical = _mclahe(img_canonical)
 
     # ── Stage 1: coarse LA localisation ──────────────────────────────────
     img_s1 = _resample_3d(img_canonical, stage1_shape)
@@ -315,6 +410,10 @@ def predict_mri_two_stage(
     # ── Resample canonical masks back to original voxel space ─────────────
     la_out = _resample_mask(la_canonical, orig_shape)
     scar_out = _resample_mask(scar_canonical, orig_shape)
+
+    # ── Post-processing ────────────────────────────────────────────────────
+    # Keep largest LA connected component; constrain scar to lie inside LA
+    la_out, scar_out = postprocess_mri_masks(la_out, scar_out)
 
     return CARE2026Outputs(
         task="mri",
@@ -605,6 +704,9 @@ def predict_ct(
 
     # Resample prediction back to original voxel space
     pred_orig = _resample_mask(pred_iso, orig_shape)
+
+    # ── Post-processing ────────────────────────────────────────────────────
+    pred_orig = postprocess_ct_mask(pred_orig, CT_NUM_CLASSES)
 
     return CARE2026Outputs(
         task="ct",
