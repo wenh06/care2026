@@ -155,23 +155,16 @@ def _slice_view_interactive(
                 color = palette.get(cls_id, "white")
 
                 if is_filled:
-                    # Filled overlay with transparency
+                    # Filled overlay: single contourf with optional hatch pattern.
+                    # (Two separate contourf calls would overwrite each other.)
                     ax.contourf(
                         mask_slice,
                         levels=[0.5, 1],
                         colors=[color],
                         alpha=0.25,
                         antialiased=True,
+                        hatches=["//"] if use_hatch else [],
                     )
-                    # Hatch pattern on top (no fill, just diagonal lines)
-                    if use_hatch:
-                        ax.contourf(
-                            mask_slice,
-                            levels=[0.5, 1],
-                            colors="none",
-                            hatches=["//"],
-                            alpha=1.0,
-                        )
                     legend_handle = mpatches.Patch(
                         facecolor=color,
                         alpha=0.5,
@@ -261,9 +254,14 @@ def _slice_view_static(
             mask_slice = mask[..., sl]
             color = palette.get(cls_id, "white")
             if is_filled:
-                ax.contourf(mask_slice, levels=[0.5, 1], colors=[color], alpha=0.25, antialiased=True)
-                if use_hatch:
-                    ax.contourf(mask_slice, levels=[0.5, 1], colors="none", hatches=["//"], alpha=1.0)
+                ax.contourf(
+                    mask_slice,
+                    levels=[0.5, 1],
+                    colors=[color],
+                    alpha=0.25,
+                    antialiased=True,
+                    hatches=["//"] if use_hatch else [],
+                )
             else:
                 ax.contour(mask_slice, levels=[0.5], colors=[color], linewidths=1)
 
@@ -403,9 +401,14 @@ def view_prediction(
                         continue
                     color = palette.get(cls_id, "white")
                     if is_filled:
-                        ax.contourf(mask_slice, levels=[0.5, 1], colors=[color], alpha=0.25, antialiased=True)
-                        if use_hatch:
-                            ax.contourf(mask_slice, levels=[0.5, 1], colors="none", hatches=["//"], alpha=1.0)
+                        ax.contourf(
+                            mask_slice,
+                            levels=[0.5, 1],
+                            colors=[color],
+                            alpha=0.25,
+                            antialiased=True,
+                            hatches=["//"] if use_hatch else [],
+                        )
                     else:
                         ax.contour(mask_slice, levels=[0.5], colors=[color], linewidths=1.5)
 
@@ -452,9 +455,14 @@ def view_prediction(
                     continue
                 color = palette.get(cls_id, "white")
                 if is_filled:
-                    ax.contourf(mask_slice, levels=[0.5, 1], colors=[color], alpha=0.25, antialiased=True)
-                    if use_hatch:
-                        ax.contourf(mask_slice, levels=[0.5, 1], colors="none", hatches=["//"], alpha=1.0)
+                    ax.contourf(
+                        mask_slice,
+                        levels=[0.5, 1],
+                        colors=[color],
+                        alpha=0.25,
+                        antialiased=True,
+                        hatches=["//"] if use_hatch else [],
+                    )
                 else:
                     ax.contour(mask_slice, levels=[0.5], colors=[color], linewidths=1)
 
