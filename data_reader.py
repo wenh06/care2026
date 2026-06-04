@@ -27,9 +27,14 @@ Task 3 (multi-structure, CT)::
         label_XXXX.nii.gz        -- multi-class mask (0/1/2/3), only available for train_1..train_50
 """
 
+from __future__ import annotations
+
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Sequence, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Sequence, Tuple, Union
+
+if TYPE_CHECKING:
+    from matplotlib.colors import ListedColormap
 
 import nibabel as nib
 import numpy as np
@@ -42,7 +47,279 @@ from torch_ecg.utils.misc import add_docstring
 __all__ = [
     "CARE2026_MRI",
     "CARE2026_CT",
+    "view_prediction",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Shared visualisation helpers (notebook-friendly)
+# ---------------------------------------------------------------------------
+
+
+def _is_notebook() -> bool:
+    """Return True when running inside a Jupyter notebook / IPython kernel."""
+    try:
+        from IPython import get_ipython
+
+        if get_ipython() is not None:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _build_seg_cmap(palette: Dict[int, str], n_classes: int) -> ListedColormap:
+    """Build a discrete colormap from a class-id→colour palette."""
+    from matplotlib.colors import ListedColormap
+
+    colors = [palette.get(i, (0, 0, 0, 0)) for i in range(n_classes)]
+    return ListedColormap(colors)
+
+
+def _slice_view_interactive(
+    image: np.ndarray,
+    masks: Optional[Dict[int, np.ndarray]] = None,
+    palette: Optional[Dict[int, str]] = None,
+    title: str = "",
+    figsize: Tuple[int, int] = (8, 8),
+) -> None:
+    """Interactive single-panel slice viewer using ipywidgets.
+
+    Parameters
+    ----------
+    image : (H, W, D) float32 or uint8 array
+    masks : dict of ``label → (H, W, D) uint8 array``, optional
+        Binary masks to overlay.  Each mask is displayed as a contour
+        with the colour from *palette*.
+    palette : dict of ``class_id → colour``, optional
+    title : str
+    figsize : (int, int)
+    """
+    import matplotlib.pyplot as plt
+    from ipywidgets import IntSlider, interact
+
+    if palette is None:
+        palette = {}
+
+    n_slices = image.shape[-1]
+    mid = n_slices // 2
+
+    def _plot(slice_idx: int = mid):
+        fig, ax = plt.subplots(figsize=figsize)
+        ax.clear()
+        ax.imshow(image[..., slice_idx], cmap="gray", origin="lower")
+        if masks:
+            for cls_id, mask in masks.items():
+                if mask.max() == 0:
+                    continue
+                color = palette.get(cls_id, "white")
+                ax.contour(mask[..., slice_idx], levels=[0.5], colors=[color], linewidths=1.5)
+        ax.set_title(f"{title}  (slice {slice_idx + 1}/{n_slices})")
+        ax.axis("off")
+        fig.tight_layout()
+        plt.show()
+
+    interact(_plot, slice_idx=IntSlider(min=0, max=n_slices - 1, step=1, value=mid, description="Slice"))
+
+
+def _slice_view_static(
+    image: np.ndarray,
+    masks: Optional[Dict[int, np.ndarray]] = None,
+    palette: Optional[Dict[int, str]] = None,
+    channels: Optional[List[int]] = None,
+    title: str = "",
+    max_cols: int = 4,
+) -> None:
+    """Static multi-slice grid view (fallback when not in a notebook)."""
+    import matplotlib.pyplot as plt
+
+    n_slices = image.shape[-1]
+    if channels is None:
+        channels = list(range(n_slices))
+    if palette is None:
+        palette = {}
+
+    n = len(channels)
+    n_rows = int(np.ceil(n / max_cols))
+    n_cols = min(max_cols, n)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 5 * n_rows))
+    axes_flat = np.array(axes).ravel() if n > 1 else [axes]
+    plt.subplots_adjust(wspace=0.05, hspace=0.1)
+
+    for ax_idx, sl in enumerate(channels):
+        axes_flat[ax_idx].set_axis_off()
+        axes_flat[ax_idx].imshow(image[..., sl], cmap="gray", origin="lower")
+        axes_flat[ax_idx].set_title(f"Slice {sl}")
+        if masks:
+            for cls_id, mask in masks.items():
+                if mask.max() == 0:
+                    continue
+                color = palette.get(cls_id, "white")
+                axes_flat[ax_idx].contour(mask[..., sl], levels=[0.5], colors=[color], linewidths=1)
+
+    for ax_idx in range(n, len(axes_flat)):
+        axes_flat[ax_idx].set_visible(False)
+    fig.suptitle(title)
+    plt.show()
+
+
+def view_prediction(
+    image: Union[str, Path, np.ndarray],
+    prediction: Union[str, Path, np.ndarray],
+    ground_truth: Optional[Union[str, Path, np.ndarray]] = None,
+    *,
+    class_map: Optional[Dict[int, str]] = None,
+    palette: Optional[Dict[int, str]] = None,
+    slice_idx: Optional[int] = None,
+) -> None:
+    """Visualise prediction results alongside the original image (and optional GT).
+
+    Designed for Jupyter notebooks — displays an interactive slider-based
+    slice viewer.  Falls back to a static grid when run from a script.
+
+    Parameters
+    ----------
+    image : path-like or (H, W, D) numpy array
+        Original 3-D volume.
+    prediction : path-like or (H, W, D) numpy array
+        Predicted segmentation mask (binary or multi-class integer).
+    ground_truth : path-like or (H, W, D) numpy array, optional
+        Ground-truth segmentation mask for comparison.
+    class_map : dict of ``int → str``, optional
+        Class-id to class-name mapping (e.g. ``{0: "bg", 1: "LA"}``).
+    palette : dict of ``int → colour``, optional
+        Class-id to colour mapping.  Auto-generated if not provided.
+    slice_idx : int, optional
+        Initial slice to display (default: middle slice).
+
+    Examples
+    --------
+    In a Jupyter notebook::
+
+        from data_reader import view_prediction
+        view_prediction("enhanced.nii.gz", "la_predict.nii.gz", "atriumSegImgMO.nii.gz")
+
+    Or side-by-side without GT::
+
+        view_prediction("enhanced.nii.gz", "la_predict.nii.gz")
+    """
+    import matplotlib.pyplot as plt
+
+    # -- helpers ---------------------------------------------------------------
+    def _load(path_or_arr, dtype=np.float32):
+        if isinstance(path_or_arr, (str, Path)):
+            return nib.load(str(path_or_arr)).get_fdata().astype(dtype)
+        return path_or_arr.astype(dtype) if hasattr(path_or_arr, "astype") else path_or_arr
+
+    def _load_mask(path_or_arr):
+        if isinstance(path_or_arr, (str, Path)):
+            return nib.load(str(path_or_arr)).get_fdata().astype(np.uint8)
+        return path_or_arr.astype(np.uint8)
+
+    # -- load data -------------------------------------------------------------
+    img = _load(image)
+    pred = _load_mask(prediction)
+    gt = _load_mask(ground_truth) if ground_truth is not None else None
+
+    # -- build palette and class map -------------------------------------------
+    all_ids = sorted(set(np.unique(pred)) | (set(np.unique(gt)) if gt is not None else set()))
+    all_ids.discard(0)
+
+    if class_map is None:
+        class_map = {i: f"Class {i}" for i in all_ids}
+    if palette is None:
+        default_colors = ["#FF4444", "#4488FF", "#44FF44", "#FFAA00", "#FF44FF", "#00FFFF"]
+        palette = {i: default_colors[(i - 1) % len(default_colors)] for i in all_ids}
+        palette[0] = (0, 0, 0, 0)
+
+    # -- build panel layout ----------------------------------------------------
+    n_panels = 2 if gt is None else 3
+    n_slices = img.shape[-1]
+    mid = slice_idx if slice_idx is not None else n_slices // 2
+
+    if _is_notebook():
+        from ipywidgets import IntSlider, interact
+
+        def _plot(sl: int = mid):
+            fig, axes = plt.subplots(1, n_panels, figsize=(6 * n_panels, 6))
+            if n_panels == 1:
+                axes = [axes]
+
+            axes[0].imshow(img[..., sl], cmap="gray", origin="lower")
+            axes[0].set_title(f"Image  (slice {sl + 1}/{n_slices})")
+            axes[0].axis("off")
+
+            if gt is not None:
+                gt_idx = 1
+                axes[gt_idx].imshow(img[..., sl], cmap="gray", origin="lower")
+                for cls_id in all_ids:
+                    if cls_id in gt:
+                        mask_slice = (gt[..., sl] == cls_id).astype(np.uint8)
+                        if mask_slice.max() > 0:
+                            color = palette.get(cls_id, "white")
+                            axes[gt_idx].contour(mask_slice, levels=[0.5], colors=[color], linewidths=1.5)
+                axes[gt_idx].set_title("Ground Truth")
+                axes[gt_idx].axis("off")
+                pred_idx = 2
+            else:
+                pred_idx = 1
+
+            axes[pred_idx].imshow(img[..., sl], cmap="gray", origin="lower")
+            for cls_id in all_ids:
+                if cls_id in pred:
+                    mask_slice = (pred[..., sl] == cls_id).astype(np.uint8)
+                    if mask_slice.max() > 0:
+                        color = palette.get(cls_id, "white")
+                        axes[pred_idx].contour(mask_slice, levels=[0.5], colors=[color], linewidths=1.5)
+            axes[pred_idx].set_title("Prediction")
+            axes[pred_idx].axis("off")
+
+            fig.tight_layout()
+            plt.show()
+
+        interact(_plot, sl=IntSlider(min=0, max=n_slices - 1, step=1, value=mid, description="Slice"))
+    else:
+        # Static fallback: show 6 evenly-spaced slices
+        step = max(1, n_slices // 6)
+        slices = list(range(0, n_slices, step))[:6]
+        fig, axes = plt.subplots(n_panels, len(slices), figsize=(4 * len(slices), 4 * n_panels))
+        if axes.ndim == 1:
+            axes = axes[:, np.newaxis]
+
+        for col, sl in enumerate(slices):
+            axes[0, col].imshow(img[..., sl], cmap="gray", origin="lower")
+            axes[0, col].set_title(f"Slice {sl}")
+            axes[0, col].axis("off")
+
+            if gt is not None:
+                axes[1, col].imshow(img[..., sl], cmap="gray", origin="lower")
+                for cls_id in all_ids:
+                    if cls_id in gt:
+                        mask_slice = (gt[..., sl] == cls_id).astype(np.uint8)
+                        if mask_slice.max() > 0:
+                            color = palette.get(cls_id, "white")
+                            axes[1, col].contour(mask_slice, levels=[0.5], colors=[color], linewidths=1)
+                axes[1, col].axis("off")
+                pred_row = 2
+            else:
+                pred_row = 1
+
+            axes[pred_row, col].imshow(img[..., sl], cmap="gray", origin="lower")
+            for cls_id in all_ids:
+                if cls_id in pred:
+                    mask_slice = (pred[..., sl] == cls_id).astype(np.uint8)
+                    if mask_slice.max() > 0:
+                        color = palette.get(cls_id, "white")
+                        axes[pred_row, col].contour(mask_slice, levels=[0.5], colors=[color], linewidths=1)
+            axes[pred_row, col].axis("off")
+
+        axes[0, 0].set_ylabel("Image", fontsize=12)
+        if gt is not None:
+            axes[1, 0].set_ylabel("GT", fontsize=12)
+        axes[pred_row, 0].set_ylabel("Prediction", fontsize=12)
+        fig.tight_layout()
+        plt.show()
+
 
 # ---------------------------------------------------------------------------
 # Database metadata
@@ -158,6 +435,11 @@ class CARE2026_MRI(_DataBase):
     __task2_class_map__: Dict[int, str] = {
         0: "background",
         1: "left atrium",
+    }
+    __palette__: Dict[int, str] = {
+        0: (0, 0, 0, 0),  # background — transparent
+        1: "#00FFFF",  # LA cavity — cyan
+        2: "#FF4444",  # LA scar — red
     }
     __default_crop_pad__: List[int] = [7, 7, 3]
 
@@ -511,19 +793,24 @@ class CARE2026_MRI(_DataBase):
         crop: bool = False,
         crop_pad: Optional[Union[int, Sequence[int]]] = None,
         data: Optional[np.ndarray] = None,
+        interactive: Optional[bool] = None,
     ) -> None:
         """Visualise slices of the LGE-MRI, optionally overlaid with the annotation.
+
+        In Jupyter notebooks the default is an interactive slider-based view
+        (one slice at a time).  Outside notebooks the default is a static
+        grid of all (or selected) slices.
 
         Parameters
         ----------
         rec : str or int
             Record name or integer index.
         channels : int or sequence of int, optional
-            Slice indices (along the last/z axis) to display.  If *None*, all slices.
+            Slice indices to display (static mode only).  If *None*, all slices.
         with_ann : bool, default True
-            Overlay the annotation on the image.
+            Overlay the annotation contours on the image.
         orthoview : bool, default False
-            Use nibabel's orthoview instead of a matplotlib grid.
+            Use nibabel's orthoview (ignores most other arguments).
         output_shape : sequence of int, optional
             Resample to this shape before displaying.
         crop : bool, default False
@@ -532,10 +819,11 @@ class CARE2026_MRI(_DataBase):
             Bounding-box padding (only used when *crop* is True).
         data : numpy.ndarray, optional
             Pre-loaded image array; avoids re-reading from disk.
+        interactive : bool, optional
+            Force interactive (``True``) or static (``False``) mode.
+            Defaults to auto-detection based on the runtime environment.
 
         """
-        import matplotlib.pyplot as plt
-
         rec = self._resolve_rec(rec)
         if data is None:
             if crop:
@@ -547,32 +835,39 @@ class CARE2026_MRI(_DataBase):
             nib.load(str(self.get_data_path(rec))).orthoview()
             return
 
+        # Build mask dict for overlay (keys = class IDs matching __palette__)
+        masks: Dict[int, np.ndarray] = {}
+        title = f"MRI — {rec}"
         if with_ann:
-            seg = (
+            ann = (
                 self.load_ann_cropped(rec, pad=crop_pad, output_shape=output_shape)
                 if crop
                 else self.load_ann(rec, output_shape=output_shape)
             )
+            if self.task == 1:
+                # Task 1: ann = scar mask; also load LA cavity for context
+                masks[2] = (ann > 0).astype(np.uint8)  # scar → red
+                try:
+                    la = self.load_la_ann(rec, output_shape=output_shape)
+                    if crop:
+                        (x0, x1), (y0, y1), (z0, z1) = self.load_ann_box(rec, pad=crop_pad)
+                        la = la[x0:x1, y0:y1, z0:z1]
+                    masks[1] = la.astype(np.uint8)  # LA → cyan
+                except Exception:
+                    pass
+            else:
+                # Task 2: ann = LA cavity mask
+                masks[1] = ann.astype(np.uint8)  # LA → cyan
+            title += " + annotation"
+
+        # Choose interactive vs static
+        if interactive is None:
+            interactive = _is_notebook()
+
+        if interactive:
+            _slice_view_interactive(data, masks, self.__palette__, title=title)
         else:
-            seg = np.zeros(data.shape[:3], dtype=np.uint8)
-
-        if channels is None:
-            channels = list(range(data.shape[-1]))
-        elif isinstance(channels, int):
-            channels = [channels]
-
-        n = len(channels)
-        fig_rows = int(np.ceil(n / 4))
-        fig, axes = plt.subplots(fig_rows, min(4, n), figsize=(20, fig_rows * 5))
-        plt.subplots_adjust(wspace=0.1, hspace=0.1)
-        axes_flat = np.array(axes).ravel() if n > 1 else [axes]
-
-        for ax_idx, sl in enumerate(channels):
-            axes_flat[ax_idx].set_axis_off()
-            axes_flat[ax_idx].imshow(data[..., sl], cmap="gray")
-            axes_flat[ax_idx].set_title(f"Slice {sl}")
-            axes_flat[ax_idx].imshow(seg[..., sl], cmap="hot", alpha=0.3, vmin=0, vmax=1)
-        plt.show()
+            _slice_view_static(data, masks, self.__palette__, channels=channels, title=title)
 
     # ------------------------------------------------------------------
     # Properties
@@ -665,6 +960,12 @@ class CARE2026_CT(_DataBase):
         1: "left atrium",
         2: "pulmonary veins",
         3: "left atrial appendage",
+    }
+    __palette__: Dict[int, str] = {
+        0: (0, 0, 0, 0),  # background — transparent
+        1: "#FF4444",  # left atrium — red
+        2: "#4488FF",  # pulmonary veins — blue
+        3: "#44FF44",  # left atrial appendage — green
     }
     __default_crop_pad__: List[int] = [5, 5, 5]
 
@@ -939,6 +1240,78 @@ class CARE2026_CT(_DataBase):
         if output_shape is not None:
             cropped = self.resample_ann(cropped, output_shape)
         return cropped
+
+    # ------------------------------------------------------------------
+    # Visualisation
+    # ------------------------------------------------------------------
+
+    def view_data(
+        self,
+        rec: Union[str, int],
+        channels: Optional[Union[int, Sequence[int]]] = None,
+        with_ann: bool = True,
+        output_shape: Optional[Sequence[int]] = None,
+        crop: bool = False,
+        crop_pad: Optional[Union[int, Sequence[int]]] = None,
+        data: Optional[np.ndarray] = None,
+        interactive: Optional[bool] = None,
+    ) -> None:
+        """Visualise slices of the CT volume with multi-class annotation overlay.
+
+        In Jupyter notebooks the default is an interactive slider-based view.
+        Outside notebooks the default is a static grid.
+
+        Parameters
+        ----------
+        rec : str or int
+            Record name or integer index.
+        channels : int or sequence of int, optional
+            Slice indices to display (static mode only).
+        with_ann : bool, default True
+            Overlay the segmentation contours on the image.
+        output_shape : sequence of int, optional
+            Resample to this shape before displaying.
+        crop : bool, default False
+            Crop to the foreground bounding box before displaying.
+        crop_pad : int or sequence of int, optional
+            Bounding-box padding (only used when *crop* is True).
+        data : numpy.ndarray, optional
+            Pre-loaded image array; avoids re-reading from disk.
+        interactive : bool, optional
+            Force interactive (``True``) or static (``False``) mode.
+
+        """
+        rec = self._resolve_rec(rec)
+        if data is None:
+            if crop:
+                data = self.load_data_cropped(rec, pad=crop_pad, output_shape=output_shape)
+            else:
+                data = self.load_data(rec, output_shape=output_shape)
+
+        masks: Dict[int, np.ndarray] = {}
+        title = f"CT — {rec}"
+        if with_ann:
+            try:
+                ann = (
+                    self.load_ann_cropped(rec, pad=crop_pad, output_shape=output_shape)
+                    if crop
+                    else self.load_ann(rec, output_shape=output_shape)
+                )
+            except FileNotFoundError:
+                ann = np.zeros(data.shape[:3], dtype=np.uint8)
+            for cls_id in [1, 2, 3]:
+                m = (ann == cls_id).astype(np.uint8)
+                if m.max() > 0:
+                    masks[cls_id] = m
+            title += " + annotation"
+
+        if interactive is None:
+            interactive = _is_notebook()
+
+        if interactive:
+            _slice_view_interactive(data, masks, self.__palette__, title=title)
+        else:
+            _slice_view_static(data, masks, self.__palette__, channels=channels, title=title)
 
     # ------------------------------------------------------------------
     # Properties
