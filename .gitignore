@@ -19,6 +19,8 @@ tmp/
 # Jupyter Notebook
 .ipynb_checkpoints/
 *-checkpoint.ipynb
+*.ipynb
+!results.ipynb
 
 # Distribution / packaging
 *.manifest

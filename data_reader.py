@@ -80,57 +80,106 @@ def _slice_view_interactive(
     image: np.ndarray,
     masks: Optional[Dict[int, np.ndarray]] = None,
     palette: Optional[Dict[int, str]] = None,
+    class_names: Optional[Dict[int, str]] = None,
     title: str = "",
     figsize: Tuple[int, int] = (8, 8),
 ) -> None:
-    """Interactive single-panel slice viewer using ipywidgets.
+    """Interactive single-panel slice viewer with checkboxes and legend.
+
+    In Jupyter notebooks, displays:
+    - An integer slider to scrub through z-slices.
+    - One checkbox per label class to toggle contour overlay.
+    - A colour legend.
 
     Parameters
     ----------
     image : (H, W, D) float32 or uint8 array
-    masks : dict of ``label → (H, W, D) uint8 array``, optional
-        Binary masks to overlay.  Each mask is displayed as a contour
-        with the colour from *palette*.
+    masks : dict of ``class_id → (H, W, D) uint8 array``, optional
     palette : dict of ``class_id → colour``, optional
+    class_names : dict of ``class_id → str``, optional
+        Human-readable names for the legend and checkbox labels.
     title : str
     figsize : (int, int)
     """
+    import matplotlib.patches as mpatches
     import matplotlib.pyplot as plt
-    from ipywidgets import IntSlider, interact
+    from IPython.display import display
+    from ipywidgets import Checkbox, HBox, IntSlider, Output, VBox, interactive_output
 
     if palette is None:
         palette = {}
+    if class_names is None:
+        class_names = {}
+    if masks is None:
+        masks = {}
 
     n_slices = image.shape[-1]
     mid = n_slices // 2
+    mask_ids = sorted(masks.keys())  # stable checkbox / legend order
 
-    def _plot(slice_idx: int = mid):
-        fig, ax = plt.subplots(figsize=figsize)
-        ax.clear()
-        ax.imshow(image[..., slice_idx], cmap="gray", origin="lower")
-        if masks:
-            for cls_id, mask in masks.items():
+    # -- widgets ---------------------------------------------------------------
+    slider = IntSlider(min=0, max=n_slices - 1, step=1, value=mid, description="Slice")
+    show_cbs: Dict[int, Checkbox] = {}
+    for cls_id in mask_ids:
+        label = class_names.get(cls_id, f"Class {cls_id}")
+        show_cbs[cls_id] = Checkbox(value=True, description=label, indent=False)
+
+    out = Output()
+
+    # -- plot function ---------------------------------------------------------
+    def _plot(slice_idx: int, **show: bool) -> None:
+        with out:
+            out.clear_output(wait=True)
+            fig, ax = plt.subplots(figsize=figsize)
+            ax.imshow(image[..., slice_idx], cmap="gray", origin="lower")
+
+            legend_handles = []
+            for cls_id in mask_ids:
+                if not show.get(str(cls_id), True):
+                    continue
+                mask = masks[cls_id]
                 if mask.max() == 0:
                     continue
                 color = palette.get(cls_id, "white")
                 ax.contour(mask[..., slice_idx], levels=[0.5], colors=[color], linewidths=1.5)
-        ax.set_title(f"{title}  (slice {slice_idx + 1}/{n_slices})")
-        ax.axis("off")
-        fig.tight_layout()
-        plt.show()
+                legend_handles.append(
+                    mpatches.Patch(
+                        color=color,
+                        label=class_names.get(cls_id, f"Class {cls_id}"),
+                    )
+                )
 
-    interact(_plot, slice_idx=IntSlider(min=0, max=n_slices - 1, step=1, value=mid, description="Slice"))
+            if legend_handles:
+                ax.legend(handles=legend_handles, loc="upper right", framealpha=0.7, fontsize="small")
+
+            ax.set_title(f"{title}  (slice {slice_idx + 1}/{n_slices})")
+            ax.axis("off")
+            fig.tight_layout()
+            plt.show()
+
+    # -- wire widgets ----------------------------------------------------------
+    controls: Dict = {"slice_idx": slider}
+    controls.update({str(cls_id): cb for cls_id, cb in show_cbs.items()})
+
+    checkbox_row = HBox(list(show_cbs.values()))
+    ui = VBox([slider, checkbox_row, out])
+    display(ui)
+
+    # Hold a reference so the widget isn't garbage-collected
+    _plot._widget = interactive_output(_plot, controls)
 
 
 def _slice_view_static(
     image: np.ndarray,
     masks: Optional[Dict[int, np.ndarray]] = None,
     palette: Optional[Dict[int, str]] = None,
+    class_names: Optional[Dict[int, str]] = None,
     channels: Optional[List[int]] = None,
     title: str = "",
     max_cols: int = 4,
 ) -> None:
     """Static multi-slice grid view (fallback when not in a notebook)."""
+    import matplotlib.patches as mpatches
     import matplotlib.pyplot as plt
 
     n_slices = image.shape[-1]
@@ -138,6 +187,12 @@ def _slice_view_static(
         channels = list(range(n_slices))
     if palette is None:
         palette = {}
+    if class_names is None:
+        class_names = {}
+    if masks is None:
+        masks = {}
+
+    mask_ids = sorted(masks.keys())
 
     n = len(channels)
     n_rows = int(np.ceil(n / max_cols))
@@ -150,12 +205,27 @@ def _slice_view_static(
         axes_flat[ax_idx].set_axis_off()
         axes_flat[ax_idx].imshow(image[..., sl], cmap="gray", origin="lower")
         axes_flat[ax_idx].set_title(f"Slice {sl}")
-        if masks:
-            for cls_id, mask in masks.items():
-                if mask.max() == 0:
-                    continue
-                color = palette.get(cls_id, "white")
-                axes_flat[ax_idx].contour(mask[..., sl], levels=[0.5], colors=[color], linewidths=1)
+        for cls_id in mask_ids:
+            mask = masks[cls_id]
+            if mask.max() == 0:
+                continue
+            color = palette.get(cls_id, "white")
+            axes_flat[ax_idx].contour(mask[..., sl], levels=[0.5], colors=[color], linewidths=1)
+
+    # Shared legend on the last visible axis
+    legend_handles = []
+    for cls_id in mask_ids:
+        if masks[cls_id].max() > 0:
+            legend_handles.append(
+                mpatches.Patch(
+                    color=palette.get(cls_id, "white"),
+                    label=class_names.get(cls_id, f"Class {cls_id}"),
+                )
+            )
+    if legend_handles:
+        axes_flat[min(n - 1, len(axes_flat) - 1)].legend(
+            handles=legend_handles, loc="upper right", framealpha=0.7, fontsize="small"
+        )
 
     for ax_idx in range(n, len(axes_flat)):
         axes_flat[ax_idx].set_visible(False)
@@ -203,6 +273,7 @@ def view_prediction(
 
         view_prediction("enhanced.nii.gz", "la_predict.nii.gz")
     """
+    import matplotlib.patches as mpatches
     import matplotlib.pyplot as plt
 
     # -- helpers ---------------------------------------------------------------
@@ -249,6 +320,10 @@ def view_prediction(
             axes[0].set_title(f"Image  (slice {sl + 1}/{n_slices})")
             axes[0].axis("off")
 
+            legend_handles = [
+                mpatches.Patch(color=palette.get(c, "white"), label=class_map.get(c, f"Class {c}")) for c in all_ids
+            ]
+
             if gt is not None:
                 gt_idx = 1
                 axes[gt_idx].imshow(img[..., sl], cmap="gray", origin="lower")
@@ -260,6 +335,8 @@ def view_prediction(
                             axes[gt_idx].contour(mask_slice, levels=[0.5], colors=[color], linewidths=1.5)
                 axes[gt_idx].set_title("Ground Truth")
                 axes[gt_idx].axis("off")
+                if legend_handles:
+                    axes[gt_idx].legend(handles=legend_handles, loc="upper right", framealpha=0.7, fontsize="x-small")
                 pred_idx = 2
             else:
                 pred_idx = 1
@@ -273,6 +350,8 @@ def view_prediction(
                         axes[pred_idx].contour(mask_slice, levels=[0.5], colors=[color], linewidths=1.5)
             axes[pred_idx].set_title("Prediction")
             axes[pred_idx].axis("off")
+            if legend_handles:
+                axes[pred_idx].legend(handles=legend_handles, loc="upper right", framealpha=0.7, fontsize="x-small")
 
             fig.tight_layout()
             plt.show()
@@ -317,6 +396,12 @@ def view_prediction(
         if gt is not None:
             axes[1, 0].set_ylabel("GT", fontsize=12)
         axes[pred_row, 0].set_ylabel("Prediction", fontsize=12)
+
+        # Shared legend
+        legend_handles = [mpatches.Patch(color=palette.get(c, "white"), label=class_map.get(c, f"Class {c}")) for c in all_ids]
+        if legend_handles:
+            axes[-1, -1].legend(handles=legend_handles, loc="upper right", framealpha=0.7, fontsize="x-small")
+
         fig.tight_layout()
         plt.show()
 
@@ -860,14 +945,20 @@ class CARE2026_MRI(_DataBase):
                 masks[1] = ann.astype(np.uint8)  # LA → cyan
             title += " + annotation"
 
+        # Human-readable names matching the palette keys used above
+        if self.task == 1:
+            _class_names = {1: "LA cavity", 2: "LA scar"}
+        else:
+            _class_names = {1: "LA cavity"}
+
         # Choose interactive vs static
         if interactive is None:
             interactive = _is_notebook()
 
         if interactive:
-            _slice_view_interactive(data, masks, self.__palette__, title=title)
+            _slice_view_interactive(data, masks, self.__palette__, _class_names, title=title)
         else:
-            _slice_view_static(data, masks, self.__palette__, channels=channels, title=title)
+            _slice_view_static(data, masks, self.__palette__, _class_names, channels=channels, title=title)
 
     # ------------------------------------------------------------------
     # Properties
@@ -1305,13 +1396,15 @@ class CARE2026_CT(_DataBase):
                     masks[cls_id] = m
             title += " + annotation"
 
+        _class_names = {1: "left atrium", 2: "pulmonary veins", 3: "left atrial appendage"}
+
         if interactive is None:
             interactive = _is_notebook()
 
         if interactive:
-            _slice_view_interactive(data, masks, self.__palette__, title=title)
+            _slice_view_interactive(data, masks, self.__palette__, _class_names, title=title)
         else:
-            _slice_view_static(data, masks, self.__palette__, channels=channels, title=title)
+            _slice_view_static(data, masks, self.__palette__, _class_names, channels=channels, title=title)
 
     # ------------------------------------------------------------------
     # Properties
