@@ -67,6 +67,27 @@ def _ct_image_name(record_id: str) -> str:
     return f"{num:04d}.nii.gz"
 
 
+def _print_model_config(model: torch.nn.Module, name: str, ckpt_path: Path) -> None:
+    """Log key preprocessing/architecture config from a loaded checkpoint.
+
+    Call **after** ``model.train_config.update(aux_config)`` so the
+    train_config reflects what was actually used during training.
+    """
+    tc = model.train_config
+    print(f"[{name}] {ckpt_path.name}")
+    print(f"  apply_mclahe : {tc.get('apply_mclahe', False)}")
+    print(f"  backbone     : {tc.get('backbone', 'vnet')}")
+    print(f"  task / stage : {tc.get('task', '?')} / {tc.get('stage', '?')}")
+    print(f"  epochs       : {tc.get('n_epochs', '?')}")
+    # Detect norm type from the encoder stem
+    try:
+        norm_layer = model.backbone.encoder.stem[1]
+        norm_type = type(norm_layer).__name__
+    except Exception:
+        norm_type = "?"
+    print(f"  encoder norm : {norm_type}")
+
+
 # ---------------------------------------------------------------------------
 # Per-task inference runners
 # ---------------------------------------------------------------------------
@@ -356,6 +377,15 @@ if __name__ == "__main__":
     tasks = [int(t.strip()) for t in args.tasks.split(",")]
     model_dir = Path(args.model_dir).expanduser().resolve()
 
+    print("Inference config:")
+    print(f"  input_dir  : {input_dir}")
+    print(f"  output_dir : {output_dir}")
+    print(f"  tasks      : {tasks}")
+    print(f"  device     : {args.device}")
+    print(f"  TTA        : {args.tta}")
+    print(f"  run_name   : {run_name}")
+    print()
+
     mri_stage1_model, mri_stage2_model, ct_model = None, None, None
 
     if 1 in tasks or 2 in tasks:
@@ -366,9 +396,10 @@ if __name__ == "__main__":
             if candidates:
                 ckpt1 = candidates[-1]
         if ckpt1.exists():
-            mri_stage1_model = CARE2026_MRI_Stage1_Model.from_checkpoint(str(ckpt1), device=device)[0]
+            mri_stage1_model, aux1 = CARE2026_MRI_Stage1_Model.from_checkpoint(str(ckpt1), device=device)
+            mri_stage1_model.train_config.update(aux1)
             mri_stage1_model = mri_stage1_model.to(device).eval()
-            print(f"Loaded MRI Stage-1 model from: {ckpt1.name}")
+            _print_model_config(mri_stage1_model, "MRI Stage-1", ckpt1)
         else:
             warnings.warn(f"MRI Stage-1 checkpoint not found in {model_dir}. Tasks 1 & 2 will be skipped.")
 
@@ -379,9 +410,10 @@ if __name__ == "__main__":
             if candidates:
                 ckpt2 = candidates[-1]
         if ckpt2.exists():
-            mri_stage2_model = CARE2026_MRI_Stage2_Model.from_checkpoint(str(ckpt2), device=device)[0]
+            mri_stage2_model, aux2 = CARE2026_MRI_Stage2_Model.from_checkpoint(str(ckpt2), device=device)
+            mri_stage2_model.train_config.update(aux2)
             mri_stage2_model = mri_stage2_model.to(device).eval()
-            print(f"Loaded MRI Stage-2 model from: {ckpt2.name}")
+            _print_model_config(mri_stage2_model, "MRI Stage-2", ckpt2)
         else:
             warnings.warn(f"MRI Stage-2 checkpoint not found in {model_dir}. Tasks 1 & 2 will be skipped.")
 
@@ -392,9 +424,10 @@ if __name__ == "__main__":
             if candidates:
                 ct_ckpt = candidates[-1]
         if ct_ckpt.exists():
-            ct_model = CARE2026_CT_Model.from_checkpoint(str(ct_ckpt), device=device)[0]
+            ct_model, aux_ct = CARE2026_CT_Model.from_checkpoint(str(ct_ckpt), device=device)
+            ct_model.train_config.update(aux_ct)
             ct_model = ct_model.to(device).eval()
-            print(f"Loaded CT model from: {ct_ckpt.name}")
+            _print_model_config(ct_model, "CT", ct_ckpt)
         else:
             warnings.warn(f"CT model checkpoint not found in {model_dir}. Task 3 will be skipped.")
 
