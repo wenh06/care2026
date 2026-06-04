@@ -84,11 +84,14 @@ def _slice_view_interactive(
     title: str = "",
     figsize: Tuple[int, int] = (8, 8),
 ) -> None:
-    """Interactive single-panel slice viewer with checkboxes and legend.
+    """Interactive single-panel slice viewer with checkboxes, overlay mode,
+    and legend.
 
     In Jupyter notebooks, displays:
     - An integer slider to scrub through z-slices.
-    - One checkbox per label class to toggle contour overlay.
+    - One checkbox per label class to toggle overlay on/off.
+    - A dropdown to select overlay style: contour, filled (transparent),
+      or filled+hatch (transparent + diagonal line texture).
     - A colour legend.
 
     Parameters
@@ -104,7 +107,7 @@ def _slice_view_interactive(
     import matplotlib.patches as mpatches
     import matplotlib.pyplot as plt
     from IPython.display import display
-    from ipywidgets import Checkbox, HBox, IntSlider, Output, VBox, interactive_output
+    from ipywidgets import Checkbox, Dropdown, HBox, IntSlider, Output, VBox, interactive_output
 
     if palette is None:
         palette = {}
@@ -119,6 +122,11 @@ def _slice_view_interactive(
 
     # -- widgets ---------------------------------------------------------------
     slider = IntSlider(min=0, max=n_slices - 1, step=1, value=mid, description="Slice")
+    overlay_dd = Dropdown(
+        options=["contour", "filled", "filled+hatch"],
+        value="filled+hatch",
+        description="Overlay:",
+    )
     show_cbs: Dict[int, Checkbox] = {}
     for cls_id in mask_ids:
         label = class_names.get(cls_id, f"Class {cls_id}")
@@ -127,11 +135,14 @@ def _slice_view_interactive(
     out = Output()
 
     # -- plot function ---------------------------------------------------------
-    def _plot(slice_idx: int, **show: bool) -> None:
+    def _plot(slice_idx: int, overlay_mode: str, **show: bool) -> None:
         with out:
             out.clear_output(wait=True)
             fig, ax = plt.subplots(figsize=figsize)
             ax.imshow(image[..., slice_idx], cmap="gray", origin="lower")
+
+            is_filled = overlay_mode.startswith("filled")
+            use_hatch = overlay_mode == "filled+hatch"
 
             legend_handles = []
             for cls_id in mask_ids:
@@ -140,14 +151,42 @@ def _slice_view_interactive(
                 mask = masks[cls_id]
                 if mask.max() == 0:
                     continue
+                mask_slice = mask[..., slice_idx]
                 color = palette.get(cls_id, "white")
-                ax.contour(mask[..., slice_idx], levels=[0.5], colors=[color], linewidths=1.5)
-                legend_handles.append(
-                    mpatches.Patch(
+
+                if is_filled:
+                    # Filled overlay with transparency
+                    ax.contourf(
+                        mask_slice,
+                        levels=[0.5, 1],
+                        colors=[color],
+                        alpha=0.25,
+                        antialiased=True,
+                    )
+                    # Hatch pattern on top (no fill, just diagonal lines)
+                    if use_hatch:
+                        ax.contourf(
+                            mask_slice,
+                            levels=[0.5, 1],
+                            colors="none",
+                            hatches=["//"],
+                            alpha=1.0,
+                        )
+                    legend_handle = mpatches.Patch(
+                        facecolor=color,
+                        alpha=0.5,
+                        edgecolor=color,
+                        label=class_names.get(cls_id, f"Class {cls_id}"),
+                    )
+                else:
+                    # Contour-only mode
+                    ax.contour(mask_slice, levels=[0.5], colors=[color], linewidths=1.5)
+                    legend_handle = mpatches.Patch(
                         color=color,
                         label=class_names.get(cls_id, f"Class {cls_id}"),
                     )
-                )
+
+                legend_handles.append(legend_handle)
 
             if legend_handles:
                 ax.legend(handles=legend_handles, loc="upper right", framealpha=0.7, fontsize="small")
@@ -158,11 +197,11 @@ def _slice_view_interactive(
             plt.show()
 
     # -- wire widgets ----------------------------------------------------------
-    controls: Dict = {"slice_idx": slider}
+    controls: Dict = {"slice_idx": slider, "overlay_mode": overlay_dd}
     controls.update({str(cls_id): cb for cls_id, cb in show_cbs.items()})
 
     checkbox_row = HBox(list(show_cbs.values()))
-    ui = VBox([slider, checkbox_row, out])
+    ui = VBox([slider, overlay_dd, checkbox_row, out])
     display(ui)
 
     # Hold a reference so the widget isn't garbage-collected
@@ -176,9 +215,16 @@ def _slice_view_static(
     class_names: Optional[Dict[int, str]] = None,
     channels: Optional[List[int]] = None,
     title: str = "",
+    overlay_mode: str = "contour",
     max_cols: int = 4,
 ) -> None:
-    """Static multi-slice grid view (fallback when not in a notebook)."""
+    """Static multi-slice grid view (fallback when not in a notebook).
+
+    Parameters
+    ----------
+    overlay_mode : str, default "contour"
+        ``"contour"``, ``"filled"``, or ``"filled+hatch"``.
+    """
     import matplotlib.patches as mpatches
     import matplotlib.pyplot as plt
 
@@ -193,6 +239,8 @@ def _slice_view_static(
         masks = {}
 
     mask_ids = sorted(masks.keys())
+    is_filled = overlay_mode.startswith("filled")
+    use_hatch = overlay_mode == "filled+hatch"
 
     n = len(channels)
     n_rows = int(np.ceil(n / max_cols))
@@ -202,23 +250,33 @@ def _slice_view_static(
     plt.subplots_adjust(wspace=0.05, hspace=0.1)
 
     for ax_idx, sl in enumerate(channels):
-        axes_flat[ax_idx].set_axis_off()
-        axes_flat[ax_idx].imshow(image[..., sl], cmap="gray", origin="lower")
-        axes_flat[ax_idx].set_title(f"Slice {sl}")
+        ax = axes_flat[ax_idx]
+        ax.set_axis_off()
+        ax.imshow(image[..., sl], cmap="gray", origin="lower")
+        ax.set_title(f"Slice {sl}")
         for cls_id in mask_ids:
             mask = masks[cls_id]
             if mask.max() == 0:
                 continue
+            mask_slice = mask[..., sl]
             color = palette.get(cls_id, "white")
-            axes_flat[ax_idx].contour(mask[..., sl], levels=[0.5], colors=[color], linewidths=1)
+            if is_filled:
+                ax.contourf(mask_slice, levels=[0.5, 1], colors=[color], alpha=0.25, antialiased=True)
+                if use_hatch:
+                    ax.contourf(mask_slice, levels=[0.5, 1], colors="none", hatches=["//"], alpha=1.0)
+            else:
+                ax.contour(mask_slice, levels=[0.5], colors=[color], linewidths=1)
 
     # Shared legend on the last visible axis
     legend_handles = []
     for cls_id in mask_ids:
         if masks[cls_id].max() > 0:
+            color = palette.get(cls_id, "white")
             legend_handles.append(
                 mpatches.Patch(
-                    color=palette.get(cls_id, "white"),
+                    facecolor=color if is_filled else "none",
+                    alpha=0.5 if is_filled else 1.0,
+                    edgecolor=color,
                     label=class_names.get(cls_id, f"Class {cls_id}"),
                 )
             )
@@ -238,6 +296,7 @@ def view_prediction(
     prediction: Union[str, Path, np.ndarray],
     ground_truth: Optional[Union[str, Path, np.ndarray]] = None,
     *,
+    overlay_mode: str = "filled+hatch",
     class_map: Optional[Dict[int, str]] = None,
     palette: Optional[Dict[int, str]] = None,
     slice_idx: Optional[int] = None,
@@ -309,30 +368,51 @@ def view_prediction(
     mid = slice_idx if slice_idx is not None else n_slices // 2
 
     if _is_notebook():
-        from ipywidgets import IntSlider, interact
+        from ipywidgets import Dropdown, IntSlider, interact
 
-        def _plot(sl: int = mid):
+        def _plot(sl: int = mid, overlay_mode: str = "filled+hatch"):
             fig, axes = plt.subplots(1, n_panels, figsize=(6 * n_panels, 6))
             if n_panels == 1:
                 axes = [axes]
+
+            is_filled = overlay_mode.startswith("filled")
+            use_hatch = overlay_mode == "filled+hatch"
 
             axes[0].imshow(img[..., sl], cmap="gray", origin="lower")
             axes[0].set_title(f"Image  (slice {sl + 1}/{n_slices})")
             axes[0].axis("off")
 
-            legend_handles = [
-                mpatches.Patch(color=palette.get(c, "white"), label=class_map.get(c, f"Class {c}")) for c in all_ids
-            ]
+            legend_handles = []
+            for c in all_ids:
+                if is_filled:
+                    legend_handles.append(
+                        mpatches.Patch(
+                            facecolor=palette.get(c, "white"),
+                            alpha=0.5,
+                            edgecolor=palette.get(c, "white"),
+                            label=class_map.get(c, f"Class {c}"),
+                        )
+                    )
+                else:
+                    legend_handles.append(mpatches.Patch(color=palette.get(c, "white"), label=class_map.get(c, f"Class {c}")))
+
+            def _draw_mask(ax, mask_vol, cls_ids):
+                for cls_id in cls_ids:
+                    mask_slice = (mask_vol[..., sl] == cls_id).astype(np.uint8)
+                    if mask_slice.max() == 0:
+                        continue
+                    color = palette.get(cls_id, "white")
+                    if is_filled:
+                        ax.contourf(mask_slice, levels=[0.5, 1], colors=[color], alpha=0.25, antialiased=True)
+                        if use_hatch:
+                            ax.contourf(mask_slice, levels=[0.5, 1], colors="none", hatches=["//"], alpha=1.0)
+                    else:
+                        ax.contour(mask_slice, levels=[0.5], colors=[color], linewidths=1.5)
 
             if gt is not None:
                 gt_idx = 1
                 axes[gt_idx].imshow(img[..., sl], cmap="gray", origin="lower")
-                for cls_id in all_ids:
-                    if cls_id in gt:
-                        mask_slice = (gt[..., sl] == cls_id).astype(np.uint8)
-                        if mask_slice.max() > 0:
-                            color = palette.get(cls_id, "white")
-                            axes[gt_idx].contour(mask_slice, levels=[0.5], colors=[color], linewidths=1.5)
+                _draw_mask(axes[gt_idx], gt, all_ids)
                 axes[gt_idx].set_title("Ground Truth")
                 axes[gt_idx].axis("off")
                 if legend_handles:
@@ -342,12 +422,7 @@ def view_prediction(
                 pred_idx = 1
 
             axes[pred_idx].imshow(img[..., sl], cmap="gray", origin="lower")
-            for cls_id in all_ids:
-                if cls_id in pred:
-                    mask_slice = (pred[..., sl] == cls_id).astype(np.uint8)
-                    if mask_slice.max() > 0:
-                        color = palette.get(cls_id, "white")
-                        axes[pred_idx].contour(mask_slice, levels=[0.5], colors=[color], linewidths=1.5)
+            _draw_mask(axes[pred_idx], pred, all_ids)
             axes[pred_idx].set_title("Prediction")
             axes[pred_idx].axis("off")
             if legend_handles:
@@ -356,9 +431,33 @@ def view_prediction(
             fig.tight_layout()
             plt.show()
 
-        interact(_plot, sl=IntSlider(min=0, max=n_slices - 1, step=1, value=mid, description="Slice"))
+        interact(
+            _plot,
+            sl=IntSlider(min=0, max=n_slices - 1, step=1, value=mid, description="Slice"),
+            overlay_mode=Dropdown(
+                options=["contour", "filled", "filled+hatch"],
+                value="filled+hatch",
+                description="Overlay",
+            ),
+        )
     else:
         # Static fallback: show 6 evenly-spaced slices
+        is_filled = overlay_mode.startswith("filled")
+        use_hatch = overlay_mode == "filled+hatch"
+
+        def _draw_static(ax, mask_vol):
+            for cls_id in all_ids:
+                mask_slice = (mask_vol[..., sl] == cls_id).astype(np.uint8)
+                if mask_slice.max() == 0:
+                    continue
+                color = palette.get(cls_id, "white")
+                if is_filled:
+                    ax.contourf(mask_slice, levels=[0.5, 1], colors=[color], alpha=0.25, antialiased=True)
+                    if use_hatch:
+                        ax.contourf(mask_slice, levels=[0.5, 1], colors="none", hatches=["//"], alpha=1.0)
+                else:
+                    ax.contour(mask_slice, levels=[0.5], colors=[color], linewidths=1)
+
         step = max(1, n_slices // 6)
         slices = list(range(0, n_slices, step))[:6]
         fig, axes = plt.subplots(n_panels, len(slices), figsize=(4 * len(slices), 4 * n_panels))
@@ -372,24 +471,15 @@ def view_prediction(
 
             if gt is not None:
                 axes[1, col].imshow(img[..., sl], cmap="gray", origin="lower")
-                for cls_id in all_ids:
-                    if cls_id in gt:
-                        mask_slice = (gt[..., sl] == cls_id).astype(np.uint8)
-                        if mask_slice.max() > 0:
-                            color = palette.get(cls_id, "white")
-                            axes[1, col].contour(mask_slice, levels=[0.5], colors=[color], linewidths=1)
+                _draw_static(axes[1, col], gt)
                 axes[1, col].axis("off")
                 pred_row = 2
             else:
                 pred_row = 1
 
             axes[pred_row, col].imshow(img[..., sl], cmap="gray", origin="lower")
-            for cls_id in all_ids:
-                if cls_id in pred:
-                    mask_slice = (pred[..., sl] == cls_id).astype(np.uint8)
-                    if mask_slice.max() > 0:
-                        color = palette.get(cls_id, "white")
-                        axes[pred_row, col].contour(mask_slice, levels=[0.5], colors=[color], linewidths=1)
+            _draw_static(axes[pred_row, col], pred)
+            axes[pred_row, col].axis("off")
             axes[pred_row, col].axis("off")
 
         axes[0, 0].set_ylabel("Image", fontsize=12)
@@ -879,6 +969,7 @@ class CARE2026_MRI(_DataBase):
         crop_pad: Optional[Union[int, Sequence[int]]] = None,
         data: Optional[np.ndarray] = None,
         interactive: Optional[bool] = None,
+        overlay_mode: str = "filled+hatch",
     ) -> None:
         """Visualise slices of the LGE-MRI, optionally overlaid with the annotation.
 
@@ -907,6 +998,10 @@ class CARE2026_MRI(_DataBase):
         interactive : bool, optional
             Force interactive (``True``) or static (``False``) mode.
             Defaults to auto-detection based on the runtime environment.
+        overlay_mode : str, default ``"filled+hatch"``
+            Overlay style: ``"contour"``, ``"filled"``, or ``"filled+hatch"``.
+            In interactive mode this is controlled by a dropdown; this value
+            sets the initial selection.
 
         """
         rec = self._resolve_rec(rec)
@@ -958,7 +1053,9 @@ class CARE2026_MRI(_DataBase):
         if interactive:
             _slice_view_interactive(data, masks, self.__palette__, _class_names, title=title)
         else:
-            _slice_view_static(data, masks, self.__palette__, _class_names, channels=channels, title=title)
+            _slice_view_static(
+                data, masks, self.__palette__, _class_names, channels=channels, title=title, overlay_mode=overlay_mode
+            )
 
     # ------------------------------------------------------------------
     # Properties
@@ -1346,6 +1443,7 @@ class CARE2026_CT(_DataBase):
         crop_pad: Optional[Union[int, Sequence[int]]] = None,
         data: Optional[np.ndarray] = None,
         interactive: Optional[bool] = None,
+        overlay_mode: str = "filled+hatch",
     ) -> None:
         """Visualise slices of the CT volume with multi-class annotation overlay.
 
@@ -1370,6 +1468,9 @@ class CARE2026_CT(_DataBase):
             Pre-loaded image array; avoids re-reading from disk.
         interactive : bool, optional
             Force interactive (``True``) or static (``False``) mode.
+        overlay_mode : str, default ``"filled+hatch"``
+            Overlay style.  In interactive mode this is controlled by a
+            dropdown; this value sets the initial selection.
 
         """
         rec = self._resolve_rec(rec)
@@ -1404,7 +1505,9 @@ class CARE2026_CT(_DataBase):
         if interactive:
             _slice_view_interactive(data, masks, self.__palette__, _class_names, title=title)
         else:
-            _slice_view_static(data, masks, self.__palette__, _class_names, channels=channels, title=title)
+            _slice_view_static(
+                data, masks, self.__palette__, _class_names, channels=channels, title=title, overlay_mode=overlay_mode
+            )
 
     # ------------------------------------------------------------------
     # Properties
