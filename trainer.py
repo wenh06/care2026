@@ -158,7 +158,11 @@ class _BaseCARE2026Trainer(BaseTrainer):
             self.train_config.lr_scheduler = "none"
             return
 
-        total_steps = max(1, self.n_epochs * max(1, len(self.train_loader)))
+        # Gradient accumulation means the optimizer (and scheduler) step only
+        # every ``accum_steps`` batches.  Compute total scheduler steps correctly.
+        batches_per_epoch = max(1, len(self.train_loader))
+        steps_per_epoch = max(1, (batches_per_epoch + self._accum_steps - 1) // self._accum_steps)
+        total_steps = max(1, self.n_epochs * steps_per_epoch)
         if scheduler in {"cosine", "cosine_annealing", "cosineannealing"}:
             self.train_config.lr_scheduler = "cosine"
             self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -660,7 +664,8 @@ if __name__ == "__main__":
     # Prevent CUDA memory fragmentation (critical for large 3-D volumes)
     import os as _os
 
-    _os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
+    if "PYTORCH_ALLOC_CONF" not in _os.environ:
+        _os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
     args = get_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
