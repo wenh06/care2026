@@ -350,8 +350,9 @@ def view_prediction(
     gt = _load_mask(ground_truth) if ground_truth is not None else None
 
     # -- build palette and class map -------------------------------------------
-    all_ids = sorted(set(np.unique(pred)) | (set(np.unique(gt)) if gt is not None else set()))
-    all_ids.discard(0)
+    all_ids_set = set(np.unique(pred)) | (set(np.unique(gt)) if gt is not None else set())
+    all_ids_set.discard(0)
+    all_ids = sorted(all_ids_set)
 
     if class_map is None:
         class_map = {i: f"Class {i}" for i in all_ids}
