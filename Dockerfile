@@ -57,5 +57,5 @@ RUN python post_docker_build.py
 RUN du -sh $INPUT_DIR
 RUN du -sh $MODEL_CACHE_DIR
 
-CMD ["predict.py"]
+CMD ["pipeline.py"]
 ENTRYPOINT ["python3"]

@@ -74,35 +74,48 @@ Data are provided in NIfTI format:
 <details>
 <summary>Click to view the details</summary>
 
-- [README.md](README.md): this file, project documentation.
-- [cfg.py](cfg.py): centralized configuration for all tasks (BaseCfg, TrainCfg, ModelCfg).
-- [const.py](const.py): constant definitions, including URLs for downloading trained model weights.
-- [data_reader.py](data_reader.py): data reader covering LGE-MRI and CT, including file listing, data loading, and modality-specific preprocessing.
-- [dataset.py](dataset.py): PyTorch `Dataset` classes for all three tasks.
-- [Dockerfile](Dockerfile): Docker image definition for challenge submission (base: `pytorch/pytorch:2.9.1-cuda12.8-cudnn9-runtime`).
-- [evaluate-results](evaluate-results): records of evaluation results on the validation set.
-- [outputs.py](outputs.py): output dataclass containers for model predictions.
-- [pipeline.py](pipeline.py): inference pipeline (coarse-to-fine for MRI tasks; direct for CT), serving as the entry point for submission.
-- [post_docker_build.py](post_docker_build.py): downloads and caches our own trained model weights into the Docker image at build time.
-- [predict.py](predict.py): command line interface for the submission (entry point for the Docker `ENTRYPOINT`).
+- [README.md](README.md): this file — project overview, task definitions, data layout, and module descriptions.
+- [ROADMAP.md](ROADMAP.md): development roadmap covering approach design, phased implementation plan, MBAS2024 insights, experiment matrix, and next steps.
+- [cfg.py](cfg.py): centralized configuration objects (`BaseCfg`, `MRI_Stage1_TrainCfg`, `MRI_Stage2_TrainCfg`, `CT_TrainCfg`, `ModelCfg`) via `torch_ecg.cfg.CFG`. Covers optimiser, scheduler, loss weights, CPS ramp-up, and architecture hyper-parameters.
+- [const.py](const.py): shared project-wide constants — MRI/CT spatial shapes and spacings, class maps, dataset size counts, cache directory paths, and a `REMOTE_MODELS` placeholder for cloud-hosted checkpoint URLs.
+- [data_reader.py](data_reader.py): NIfTI data reader classes (`CARE2026_MRI`, `CARE2026_CT`) built on `torch_ecg` — file listing, label loading, LA bounding-box extraction, resampling, HU windowing, and cropped data access.
+- [dataset.py](dataset.py): PyTorch `Dataset` classes for all three tasks (`CARE2026_MRI_Stage1_Dataset`, `CARE2026_MRI_Stage2_Dataset`, `CARE2026_CT_Dataset`) with RAM caching, on-the-fly augmentation, foreground-biased patch sampling, and CLAHE support.
+- [Dockerfile](Dockerfile): Docker image definition for challenge submission (base: `pytorch/pytorch:2.9.1-cuda12.8-cudnn9-runtime`). Entry point: `python3 pipeline.py`.
+- [outputs.py](outputs.py): `CARE2026Outputs` dataclass container for model predictions with `save_as_nifti()` (challenge-compliant directory layout) and `package_submission()` (submission zip creation).
+- [pipeline.py](pipeline.py): high-level inference orchestration (`run_task1/2/3_inference`, `run_all_tasks`) plus the **unified CLI** for model loading, inference, and submission packaging. Serves as the Docker `ENTRYPOINT`.
+- [predict.py](predict.py): core volume-level inference functions — `predict_mri_two_stage()` (two-stage coarse-to-fine MRI pipeline), `predict_ct()` (sliding-window CT inference), 8-fold flip TTA, and post-processing utilities (`keep_largest_component`, `postprocess_mri_masks`, `postprocess_ct_mask`).
+- [post_docker_build.py](post_docker_build.py): downloads and caches trained model weights into the Docker image at build time (executed during `docker build`).
+- [trainer.py](trainer.py): three trainer classes (`CARE2026_MRI_Stage1_Trainer`, `CARE2026_MRI_Stage2_Trainer`, `CARE2026_CT_Trainer`) with AMP, gradient accumulation, cosine/poly LR, and a CLI for launching training runs.
 - [requirements.txt](requirements.txt): full requirements for local development.
 - [requirements-docker.txt](requirements-docker.txt): requirements for the Docker image (torch pre-installed in base image).
 - [requirements-no-torch.txt](requirements-no-torch.txt): requirements excluding all torch-related packages.
-- [trainer.py](trainer.py): trainer class supporting single-task and multi-task training.
-- [train_models.ipynb](train_models.ipynb): notebook for interactive model training and experimentation.
 
 </details>
 
+### Top-level directories
+
+- [checkpoints](checkpoints): trained model weights (`.safetensors`). Canonical names: `mri_stage1_model.safetensors`, `mri_stage2_model.safetensors`, `ct_model.safetensors`; also contains epoch snapshots for rollback.
+- [log](log): training logs (`.txt` + `.csv` metrics from `torch_ecg` trainers) and TensorBoard event files.
+- [evaluate-results](evaluate-results): output directory for local validation-set evaluation metrics.
+- [results](results): local prediction outputs and submission zip archives.
+
 ### Folders (Modules)
 
-- [models](models): model architecture definitions.
-  - [vnet.py](models/vnet.py): 3D VNet for volumetric segmentation.
-  - [nested_vnet.py](models/nested_vnet.py): Nested (UNet++-style) 3D VNet.
-  - [layers.py](models/layers.py): shared building blocks (convolution blocks, attention modules, etc.).
-  - [loss/](models/loss): custom loss functions — region-based (Dice, Tversky, Focal Dice), boundary-aware, distribution-based, and compound losses.
+- [models](models): model architecture definitions and high-level wrappers.
+  - [`__init__.py`](models/__init__.py): model wrapper classes — `CARE2026_MRI_Stage1_Model` (VNet for coarse LA localisation), `CARE2026_MRI_Stage2_Model` (DualHeadVNet or DualHeadNestedVNet for LA + scar), `CARE2026_CT_Model` (twin VNets for CPS semi-supervised learning). All wrappers compute loss inside `forward()` and support checkpoint save/load.
+  - [vnet.py](models/vnet.py): 3D V-Net backbone — `VNet` (single-decoder, multi-class) and `DualHeadVNet` (shared encoder + two independent decoders for LA cavity and scar). Supports optional `BottleneckTransformer3D` at the bottleneck and `ECAGate3D` on skip connections.
+  - [nested_vnet.py](models/nested_vnet.py): UNet++-style `DualHeadNestedVNet` with dense skip connections, deep supervision at multiple decoder resolutions, and dual heads for LA cavity + scar.
+  - [layers.py](models/layers.py): shared 3-D building blocks — `ConvNormAct`, `ResBlock3D`, `DownBlock3D`, `UpBlock3D`, `NestedUpBlock3D`, `ECAGate3D` (efficient channel attention), `WindowedMHSA3D` (windowed multi-head self-attention), `BottleneckTransformer3D` (Swin-style transformer block).
+  - [loss/](models/loss): custom loss functions for all three tasks.
+    - [`__init__.py`](models/loss/__init__.py): task-level compound loss wrappers — `Stage1MRILoss` (binary DiceCE), `MRILoss` (LA DiceCE + scar Tversky/Focal/Boundary), `CTLoss` (supervised DiceCE + CPS consistency CE).
+    - [dice_loss.py](models/loss/dice_loss.py): `SoftDiceLoss`, `DiceCELoss`, `TverskyLoss`, `FocalTverskyLoss`.
+    - [boundary_loss.py](models/loss/boundary_loss.py): `BoundaryLoss` (signed distance map), `HausdorffDTLoss` (distance-transform HD), `HausdorffERLoss` (GPU morphological erosion HD).
+    - [compound_loss.py](models/loss/compound_loss.py): `DiceFocalLoss`, `DiceBoundaryLoss`, `DiceTopKLoss`.
+    - [distribution_loss.py](models/loss/distribution_loss.py): `FocalLoss` (multi-class), `TopKCELoss`.
+    - [region_loss.py](models/loss/region_loss.py): `IoULoss`, `GeneralizedDiceLoss`, `LovaszSoftmaxLoss`.
 - [utils](utils): utility functions.
-  - [scoring_metrics.py](utils/scoring_metrics.py): evaluation metrics for all three tasks (DSC, HD, G-DSC, ACC, SEN).
-  - [mclahe.py](utils/mclahe.py): Multidimensional Contrast Limited Adaptive Histogram Equalization (MCLAHE) for LGE-MRI contrast enhancement.
+  - [scoring_metrics.py](utils/scoring_metrics.py): evaluation metrics specification for all three tasks (G-DSC, ACC, SEN for Task 1; DSC, HD for Tasks 2 & 3). Metric computation is inline in `trainer.py`.
+  - [mclahe.py](utils/mclahe.py): Multi-dimensional Contrast Limited Adaptive Histogram Equalization (MCLAHE) for LGE-MRI contrast enhancement, via TensorFlow 1.x compatibility mode.
 
 ## Deep learning models for medical image studies
 

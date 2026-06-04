@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import warnings
+from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Union
 
@@ -272,8 +273,6 @@ def run_all_tasks(
 
 
 if __name__ == "__main__":
-    import warnings as _warnings
-
     from torch_ecg.utils.misc import str2bool
 
     from cfg import BaseCfg
@@ -281,16 +280,30 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="CARE2026 Left Atrium — end-to-end inference + submission packaging")
     parser.add_argument(
+        "--input_dir",
+        type=str,
+        default="/input",
+        help="Validation data root (contains task1/, task2/, task3/ sub-directories).",
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="/output",
+        help="Output directory for prediction NIfTI files.",
+    )
+    parser.add_argument(
         "--val_data_root",
         type=str,
-        default=str(BaseCfg.db_dir or "/input"),
-        help="Root directory containing task1/, task2/, task3/ sub-directories.",
+        default=None,
+        dest="input_dir_override",
+        help="Deprecated alias for --input_dir.",
     )
     parser.add_argument(
         "--results_dir",
         type=str,
-        default=str(BaseCfg.results_dir),
-        help="Output directory for prediction NIfTI files.",
+        default=None,
+        dest="output_dir_override",
+        help="Deprecated alias for --output_dir.",
     )
     parser.add_argument(
         "--model_dir",
@@ -318,11 +331,26 @@ if __name__ == "__main__":
         default=True,
         help="Whether to create a submission zip after inference.",
     )
+    parser.add_argument(
+        "--run_name",
+        type=str,
+        default=None,
+        help="Sub-directory name appended to --output_dir (default: auto-generated timestamp).",
+    )
     args = parser.parse_args()
+
+    # Resolve --input_dir / --output_dir, with backward compatibility for
+    # the deprecated --val_data_root / --results_dir flags.
+    input_dir = args.input_dir_override if args.input_dir_override is not None else args.input_dir
+    output_dir = args.output_dir_override if args.output_dir_override is not None else args.output_dir
+
+    # Append run name sub-directory (default: timestamped)
+    run_name = args.run_name if args.run_name else datetime.now().strftime("run_%Y%m%d_%H%M%S")
+    output_dir = str(Path(output_dir) / run_name)
 
     if "cuda" in args.device and not torch.cuda.is_available():
         args.device = "cpu"
-        _warnings.warn("CUDA not available. Falling back to CPU.")
+        warnings.warn("CUDA not available. Falling back to CPU.")
     device = torch.device(args.device)
 
     tasks = [int(t.strip()) for t in args.tasks.split(",")]
@@ -331,7 +359,7 @@ if __name__ == "__main__":
     mri_stage1_model, mri_stage2_model, ct_model = None, None, None
 
     if 1 in tasks or 2 in tasks:
-        # Stage-1: discover latest BestModel_*-mri1*.safetensors
+        # Stage-1: try canonical name first, then fall back to BestModel_* glob
         ckpt1 = model_dir / "mri_stage1_model.safetensors"
         if not ckpt1.exists():
             candidates = sorted(model_dir.glob("BestModel_*-mri1*.safetensors"), key=lambda p: p.stat().st_mtime)
@@ -342,9 +370,9 @@ if __name__ == "__main__":
             mri_stage1_model = mri_stage1_model.to(device).eval()
             print(f"Loaded MRI Stage-1 model from: {ckpt1.name}")
         else:
-            _warnings.warn(f"MRI Stage-1 checkpoint not found in {model_dir}. Tasks 1 & 2 will be skipped.")
+            warnings.warn(f"MRI Stage-1 checkpoint not found in {model_dir}. Tasks 1 & 2 will be skipped.")
 
-        # Stage-2: discover latest BestModel_*-mri2*.safetensors
+        # Stage-2: try canonical name first, then fall back to BestModel_* glob
         ckpt2 = model_dir / "mri_stage2_model.safetensors"
         if not ckpt2.exists():
             candidates = sorted(model_dir.glob("BestModel_*-mri2*.safetensors"), key=lambda p: p.stat().st_mtime)
@@ -355,7 +383,7 @@ if __name__ == "__main__":
             mri_stage2_model = mri_stage2_model.to(device).eval()
             print(f"Loaded MRI Stage-2 model from: {ckpt2.name}")
         else:
-            _warnings.warn(f"MRI Stage-2 checkpoint not found in {model_dir}. Tasks 1 & 2 will be skipped.")
+            warnings.warn(f"MRI Stage-2 checkpoint not found in {model_dir}. Tasks 1 & 2 will be skipped.")
 
     if 3 in tasks:
         ct_ckpt = model_dir / "ct_model.safetensors"
@@ -368,14 +396,14 @@ if __name__ == "__main__":
             ct_model = ct_model.to(device).eval()
             print(f"Loaded CT model from: {ct_ckpt.name}")
         else:
-            _warnings.warn(f"CT model checkpoint not found in {model_dir}. Task 3 will be skipped.")
+            warnings.warn(f"CT model checkpoint not found in {model_dir}. Task 3 will be skipped.")
 
     run_all_tasks(
         mri_stage1_model=mri_stage1_model,
         mri_stage2_model=mri_stage2_model,
         ct_model=ct_model,
-        val_data_root=args.val_data_root,
-        results_dir=args.results_dir,
+        val_data_root=input_dir,
+        results_dir=output_dir,
         device=device,
         use_tta=args.tta,
         tasks=tasks,
@@ -383,7 +411,7 @@ if __name__ == "__main__":
 
     if args.package:
         zip_path = package_submission(
-            results_dir=args.results_dir,
+            results_dir=output_dir,
             team_name=args.team_name,
         )
         print(f"Submission zip created: {zip_path}")

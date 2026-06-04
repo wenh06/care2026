@@ -16,7 +16,6 @@ Both functions support test-time augmentation (TTA) via axis-flip averaging.
 
 from __future__ import annotations
 
-import argparse
 import warnings
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple, Union
@@ -719,68 +718,3 @@ def predict_ct(
         source_affine=nii.affine,
         source_header=nii.header,
     )
-
-
-# ---------------------------------------------------------------------------
-# CLI entry point (Docker container)
-# ---------------------------------------------------------------------------
-
-
-if __name__ == "__main__":
-    from torch_ecg.utils.misc import str2bool
-
-    from cfg import BaseCfg
-    from models import CARE2026_CT_Model, CARE2026_MRI_Stage1_Model, CARE2026_MRI_Stage2_Model
-    from pipeline import run_task1_inference, run_task2_inference, run_task3_inference
-
-    parser = argparse.ArgumentParser(description="CARE2026 Left Atrium Challenge — inference CLI")
-    parser.add_argument(
-        "--input_dir", type=str, default="/input", help="Validation data root (contains task1/, task2/, task3/)"
-    )
-    parser.add_argument("--output_dir", type=str, default="/output", help="Results output directory")
-    parser.add_argument("--model_dir", type=str, default=str(BaseCfg.model_dir), help="Directory of model checkpoints")
-    parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--tta", type=str2bool, default=True)
-    parser.add_argument("--tasks", type=str, default="1,2,3", help="Comma-separated list of tasks to run, e.g. '1,2,3'")
-    args = parser.parse_args()
-
-    if "cuda" in args.device and not torch.cuda.is_available():
-        args.device = "cpu"
-        warnings.warn("CUDA not available. Falling back to CPU.")
-    device = torch.device(args.device)
-
-    tasks = [int(t.strip()) for t in args.tasks.split(",")]
-    input_dir = Path(args.input_dir).expanduser().resolve()
-    output_dir = Path(args.output_dir).expanduser().resolve()
-    model_dir = Path(args.model_dir).expanduser().resolve()
-
-    mri_stage1_model, mri_stage2_model, ct_model = None, None, None
-
-    if 1 in tasks or 2 in tasks:
-        ckpt1 = model_dir / "mri_stage1_model.safetensors"
-        ckpt2 = model_dir / "mri_stage2_model.safetensors"
-        if ckpt1.exists():
-            mri_stage1_model = CARE2026_MRI_Stage1_Model.from_checkpoint(str(ckpt1), device=device)[0]
-            mri_stage1_model = mri_stage1_model.to(device).eval()
-        else:
-            warnings.warn(f"MRI Stage-1 checkpoint not found: {ckpt1}")
-        if ckpt2.exists():
-            mri_stage2_model = CARE2026_MRI_Stage2_Model.from_checkpoint(str(ckpt2), device=device)[0]
-            mri_stage2_model = mri_stage2_model.to(device).eval()
-        else:
-            warnings.warn(f"MRI Stage-2 checkpoint not found: {ckpt2}")
-
-    if 3 in tasks:
-        ct_ckpt = model_dir / "ct_model.safetensors"
-        if ct_ckpt.exists():
-            ct_model = CARE2026_CT_Model.from_checkpoint(str(ct_ckpt), device=device)[0]
-            ct_model = ct_model.to(device).eval()
-        else:
-            warnings.warn(f"CT checkpoint not found: {ct_ckpt}")
-
-    if 1 in tasks and mri_stage1_model is not None and mri_stage2_model is not None:
-        run_task1_inference(mri_stage1_model, mri_stage2_model, input_dir, output_dir, device=device, use_tta=args.tta)
-    if 2 in tasks and mri_stage1_model is not None and mri_stage2_model is not None:
-        run_task2_inference(mri_stage1_model, mri_stage2_model, input_dir, output_dir, device=device, use_tta=args.tta)
-    if 3 in tasks and ct_model is not None:
-        run_task3_inference(ct_model, input_dir, output_dir, device=device, use_tta=args.tta)

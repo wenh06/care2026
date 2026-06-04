@@ -257,27 +257,30 @@ python trainer.py --task ct --db-dir <data_root> --epochs 200
 
 ## Phase 5 — Prediction & Post-processing ✅
 
-`predict.py`:
+`predict.py` (core volume-level inference library):
 - **`predict_mri_two_stage(img_path, stage1_model, stage2_model, ...)`** — true two-stage inference:
   1. Load NIfTI → resample to `MRI_CANONICAL_SHAPE` (576×576×44).
   2. Downsample canonical → `MRI_STAGE1_SHAPE` (144×144×44) → z-score → Stage-1 VNet → binary LA prob map → upsample to canonical → LA centroid.
   3. Crop `MRI_STAGE2_CROP_SHAPE` (256×256×44) centred on centroid (zero-pad if near boundary).
   4. z-score → Stage-2 DualHeadVNet → LA + scar prob maps.
   5. Strip padding → place back in canonical → resample canonical masks to original shape + affine.
-- **CT inference**: sliding window `128³` patches, stride `64³`, Gaussian overlap weighting, soft-vote argmax.
+- **CT inference** (`predict_ct`): sliding window `128³` patches, stride `64³`, Gaussian overlap weighting, soft-vote argmax.
 - **TTA**: 8-fold flip averaging (all `{H, W, D}` axis combinations) for both stages / CT.
+- **Post-processing**: `keep_largest_component`, `postprocess_mri_masks` (scar constrained within LA cavity), `postprocess_ct_mask` (per-class largest component).
+- **CLAHE**: auto-detected from `stage2_model.train_config.apply_mclahe`; applied to the canonical image before Stage 1 downsample and Stage 2 crop.
 
 `outputs.py`:
 - `CARE2026Outputs` dataclass: `la_mask`, `scar_mask`, `ct_mask` + `source_affine` / `source_header`.
 - `save_as_nifti(output_dir, record_id, task_num)`: writes `<task_dirname>/<record_id>/<record_id>_pred.nii.gz` with original affine.
 - `package_submission(results_dir, team_name)`: creates challenge-compliant `CARE-Leftatrium-<team>.zip`.
 
-`pipeline.py`:
+`pipeline.py` (high-level orchestration + **unified CLI**):
 - `run_task1_inference(stage1_model, stage2_model, ...)` / `run_task2_inference(...)`: per-task validation runners using `predict_mri_two_stage`.
 - `run_task3_inference(ct_model, ...)`: CT validation runner.
 - `run_all_tasks(mri_stage1_model, mri_stage2_model, ct_model, ...)`: convenience wrapper; `None` models safely skipped.
-- Auto-discovers `BestModel_*-mri1*.safetensors` / `BestModel_*-mri2*.safetensors` from checkpoint dir.
-- CLI: `python pipeline.py --val_data_root ... --results_dir ... --team_name ...`.
+- Auto-discovers checkpoints (tries canonical names `mri_stage1_model.safetensors` etc., falls back to `BestModel_*` / `CARE2026_*` glob).
+- CLI: `python pipeline.py --input_dir ... --output_dir ... --model_dir ... --tasks 1,2 [--run_name ...] [--team_name ...] [--package ...]`.
+- Output is written to `<output_dir>/<run_name>/` (default run name is timestamped `run_YYYYMMDD_HHMMSS`).
 
 **Validation data confirmed** (already on disk at `/Data1/wenh06/CARE2026-LeftAtrium/`):
 - Task 1: 10 records (`val_1..val_10`), `enhanced.nii.gz`.
@@ -288,7 +291,7 @@ python trainer.py --task ct --db-dir <data_root> --epochs 200
 
 ## Phase 6 — Training Runs 🏃
 
-### 6.1 MRI Stage 1 — Coarse LA Localiser — ⏳ Ready to train
+### 6.1 MRI Stage 1 — Coarse LA Localiser — ✅ Done
 
 ```bash
 PYTORCH_ALLOC_CONF=expandable_segments:True \
@@ -297,9 +300,11 @@ PYTORCH_ALLOC_CONF=expandable_segments:True \
   2>&1 | tee log/mri1_train.log
 ```
 
-Input: 144×144×44, batch_size=4.  Expected: fast (< 30 min for 100 epochs), la_dice > 0.85.
+Input: 144×144×44, batch_size=4.  Trained to epoch 100; checkpoint at `checkpoints/mri_stage1_model.safetensors`.
 
-### 6.2 MRI Stage 2 — Fine LA + Scar Segmenter — ⏳ Pending Stage 1
+**CLAHE variant** also trained: `log/mri1_mclahe_train.log`, same architecture but with MCLAHE preprocessing enabled.
+
+### 6.2 MRI Stage 2 — Fine LA + Scar Segmenter — ✅ Done
 
 ```bash
 PYTORCH_ALLOC_CONF=expandable_segments:True \
@@ -308,9 +313,9 @@ PYTORCH_ALLOC_CONF=expandable_segments:True \
   2>&1 | tee log/mri2_train.log
 ```
 
-Input: 256×256×44, batch_size=1, AMP, grad_accum=2.
+Input: 256×256×44, batch_size=1, AMP, grad_accum=2.  Trained to epoch 149; checkpoint at `checkpoints/mri_stage2_model.safetensors`.  Epoch snapshots 147–149 also retained at `checkpoints/CARE2026_MRI_Stage2_Model-mri2_epoch*`.
 
-**Historical note:** An earlier (now deprecated) single-model run reached `la_dice ≈ 0.91` at epoch 146 (checkpoint `BestModel_CARE2026_MRI_Model-mri146_*`).  The two-stage pipeline should match or exceed this; Stage 2 benefits from the centroid-cropped inputs that already cut out most background.
+**CLAHE variant** also trained: `log/mri2_mclahe_train.log`.
 
 ### 6.3 CT Baseline (Task 3) — ⏳ Not started
 
@@ -323,13 +328,24 @@ PYTORCH_ALLOC_CONF=expandable_segments:True \
 
 ### 6.4 Validation & Submission
 
-After Stage 1 + Stage 2 training:
+After Stage 1 + Stage 2 training (MRI models ready; CT pending):
 
 ```bash
+# MRI only (Tasks 1 & 2):
 python pipeline.py \
-  --val_data_root /Data1/wenh06/CARE2026-LeftAtrium \
-  --results_dir results/ --team_name REVENGER
-# Zip CARE-Leftatrium-REVENGER.zip and upload to:
+  --input_dir /Data1/wenh06/CARE2026-LeftAtrium \
+  --output_dir /Data1/wenh06/CARE2026-LeftAtrium/output \
+  --model_dir checkpoints/ \
+  --tasks 1,2
+
+# Full submission (all three tasks, once CT is trained):
+python pipeline.py \
+  --input_dir /Data1/wenh06/CARE2026-LeftAtrium \
+  --output_dir /Data1/wenh06/CARE2026-LeftAtrium/output \
+  --model_dir checkpoints/ \
+  --tasks 1,2,3
+
+# Upload CARE-Leftatrium-REVENGER.zip to:
 # http://zmic.org.cn/care_2026/eval/login?track=leftatrium
 ```
 
@@ -355,61 +371,62 @@ Local metrics to track:
 
 ### Experiments from MBAS2024 insights
 
-| Experiment | Goal | Priority |
-|------------|------|----------|
-| **Extend MRI training: 150 → 400 epochs** | Close epoch-count gap vs. winning teams (1000 epochs) | 🔴 High |
-| **CLAHE preprocessing** — enable `utils/mclahe.py` in MRI dataset | Improve low-SNR scar boundary accuracy | 🔴 High |
-| **Connected-component post-processing** — keep largest component per class | Eliminate segmentation leakage | 🔴 High |
-| **Test-time augmentation (TTA)** — flip + 90° rotations, average logits | Low-cost accuracy boost; especially useful for Task 2 domain generalisation | 🔴 High |
-| **5-fold CV + ensemble** — train 5 folds, ensemble predictions | Expected +1–2 pp DSC; mandatory for final submission | 🟡 Medium (Phase 8) |
-| **SGD + polynomial LR for MRI** (vs. AdamW) | Winning teams used SGD lr=0.01; compare convergence | 🟡 Medium |
-| **Slice-position encoding** — append z-coordinate channel to input | Help model handle hard superior/inferior slices | 🟡 Medium |
-| **Test-time BN/IN adaptation** — update norm stats on test volume | Domain-shift mitigation for Task 2 unseen centers | 🟡 Medium |
-| **UMamba backbone** — replace VNet encoder with Mamba SSM | Near-ResUNet accuracy, more efficient; possible Task 2 alternative | 🟢 Low |
-| **Shape-constrained regularisation** — atlas-based prior or topology loss | Anatomy-aware design; reduce leakage at vascular junctions | 🟢 Low |
+| Experiment | Goal | Priority | Status |
+|------------|------|----------|--------|
+| **Extend MRI training: 150 → 400 epochs** | Close epoch-count gap vs. winning teams (1000 epochs) | 🔴 High | ⏳ |
+| **CLAHE preprocessing** — enable `utils/mclahe.py` in MRI dataset | Improve low-SNR scar boundary accuracy | 🔴 High | ✅ Done (auto-detected in predict; `--mclahe` flag in trainer) |
+| **Connected-component post-processing** — keep largest component per class | Eliminate segmentation leakage | 🔴 High | ✅ Done (`keep_largest_component`, `postprocess_mri_masks`, `postprocess_ct_mask` in `predict.py`) |
+| **Test-time augmentation (TTA)** — flip + 90° rotations, average logits | Low-cost accuracy boost; especially useful for Task 2 domain generalisation | 🔴 High | ✅ Done (8-fold flip TTA in `predict.py`; toggle via `--tta` flag) |
+| **5-fold CV + ensemble** — train 5 folds, ensemble predictions | Expected +1–2 pp DSC; mandatory for final submission | 🟡 Medium (Phase 8) | ⏳ |
+| **SGD + polynomial LR for MRI** (vs. AdamW) | Winning teams used SGD lr=0.01; compare convergence | 🟡 Medium | ⏳ (CT uses SGD+poly; MRI still AdamW+cosine) |
+| **Slice-position encoding** — append z-coordinate channel to input | Help model handle hard superior/inferior slices | 🟡 Medium | ⏳ |
+| **Test-time BN/IN adaptation** — update norm stats on test volume | Domain-shift mitigation for Task 2 unseen centers | 🟡 Medium | ⏳ |
+| **UMamba backbone** — replace VNet encoder with Mamba SSM | Near-ResUNet accuracy, more efficient; possible Task 2 alternative | 🟢 Low | ⏳ |
+| **Shape-constrained regularisation** — atlas-based prior or topology loss | Anatomy-aware design; reduce leakage at vascular junctions | 🟢 Low | ⏳ |
 
 ---
 
-## Phase 8 — Challenge Submission Pipeline ⏳
+## Phase 8 — Challenge Submission Pipeline 🔄
 
-- [ ] Implement `post_docker_build.py`: cache trained weights from cloud storage.
-- [ ] Verify Docker build (`docker-test.yml`) passes with `status: pre`.
+- [x] Implement `post_docker_build.py`: cache trained weights from cloud storage (stub ready; needs cloud URLs).
+- [x] Set up Docker CI (`docker-test.yml` with `status: pre`).
 - [ ] Run full training (MRI: ≥ 400 epochs, CT: ≥ 400 epochs); save best checkpoints.
-  - Development runs: 150/200 epochs; final submission runs: 400+ epochs with 5-fold CV.
+  - Development runs: MRI Stage 1 (100 epochs) ✅, MRI Stage 2 (150 epochs) ✅; CT (200 epochs) ⏳.
+  - Final submission runs: 400+ epochs with 5-fold CV.
 - [ ] End-to-end inference smoke test inside Docker container.
+- [ ] Submit MRI validation predictions (Tasks 1 & 2) to official evaluation platform.
 - [ ] Set `status: alpha` in `docker-test.yml`; enable dataset download step.
-- [ ] Submit to official evaluation platform.
+- [ ] Train CT model and submit Task 3 predictions.
 - [ ] Set `status: final` for final submission.
 
 ---
 
 ## Immediate Next Steps
 
-1. **Train MRI Stage 1** (coarse LA localiser, ~30 min):
+1. ~~**Train MRI Stage 1**~~ ✅ Done — checkpoint: `checkpoints/mri_stage1_model.safetensors` (also CLAHE variant trained).
+2. ~~**Train MRI Stage 2**~~ ✅ Done — checkpoint: `checkpoints/mri_stage2_model.safetensors` (also CLAHE variant trained; epoch snapshots 147–149 retained).
+3. **Run MRI validation inference** (Tasks 1 & 2) — this is the current step:
    ```bash
-   PYTORCH_ALLOC_CONF=expandable_segments:True \
-     python trainer.py --task mri --stage 1 \
-     --db-dir /Data1/wenh06/CARE2026-LeftAtrium --epochs 100 \
-     2>&1 | tee log/mri1_train.log
-   ```
-2. **Train MRI Stage 2** (fine LA + scar segmenter, ~90 min):
-   ```bash
-   PYTORCH_ALLOC_CONF=expandable_segments:True \
-     python trainer.py --task mri --stage 2 \
-     --db-dir /Data1/wenh06/CARE2026-LeftAtrium --epochs 150 \
-     2>&1 | tee log/mri2_train.log
-   ```
-3. **Submit validation** (Tasks 1 & 2) once both stages are trained:
-   ```bash
-   python pipeline.py --val_data_root /Data1/wenh06/CARE2026-LeftAtrium \
-     --results_dir results/ --team_name REVENGER
+   python pipeline.py \
+     --input_dir /Data1/wenh06/CARE2026-LeftAtrium \
+     --output_dir /Data1/wenh06/CARE2026-LeftAtrium/output \
+     --model_dir checkpoints/ \
+     --tasks 1,2
    # Upload CARE-Leftatrium-REVENGER.zip to http://zmic.org.cn/care_2026/eval
    ```
-4. **Train CT model** (Task 3) in parallel or after MRI submission.
-5. **MRI post-processing**: constrain scar mask to within predicted LA cavity; connected-component cleanup (keep largest component per class).
-6. **CT post-processing**: largest connected component per class; optional morphological closing for LAA.
-7. **CLAHE ablation**: wire `utils/mclahe.py` into the MRI dataset and compare vs. z-score baseline.
+4. **Train CT model** (Task 3):
+   ```bash
+   PYTORCH_ALLOC_CONF=expandable_segments:True \
+     python trainer.py --task ct \
+     --db-dir /Data1/wenh06/CARE2026-LeftAtrium --epochs 200 \
+     2>&1 | tee log/ct_train.log
+   ```
+5. ~~**MRI post-processing**~~ ✅ Done — `postprocess_mri_masks()` (scar constrained within LA cavity; largest connected component).
+6. ~~**CT post-processing**~~ ✅ Done — `postprocess_ct_mask()` (per-class largest connected component).
+7. ~~**CLAHE ablation**~~ ✅ Done — MCLAHE wired into dataset (config flag `apply_mclahe`); auto-detected at inference time.
 8. **5-fold CV + ensemble** (Phase 8): train 5 folds, ensemble predictions for final submission.
+9. **Extend MRI training epochs** (400+): evaluate whether extended training closes the gap toward winning-team performance.
+10. **SGD + poly LR for MRI**: test whether SGD (as used by top MBAS2024 teams) outperforms AdamW+cosine for MRI tasks.
 
 ---
 
