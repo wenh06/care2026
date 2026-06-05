@@ -120,7 +120,7 @@ class ScarLoss(nn.Module):
 
         from scipy.ndimage import distance_transform_edt
 
-        total = torch.tensor(0.0, device=scar_logits.device)
+        total = scar_logits.sum() * 0.0
         n = 0
         sigma_px = max(1.0, self.sigma_mm / min(spacing[:2]))
         for b in range(scar_logits.shape[0]):
