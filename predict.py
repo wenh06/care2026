@@ -319,8 +319,15 @@ def predict_mri_two_stage(
         device = next(stage1_model.parameters()).device
 
     if apply_mclahe is None:
-        tc = getattr(stage2_model, "train_config", None)
-        apply_mclahe = bool(tc.get("apply_mclahe", False)) if tc is not None else False
+        s1_mclahe = bool(getattr(stage1_model, "train_config", {}).get("apply_mclahe", False))
+        s2_mclahe = bool(getattr(stage2_model, "train_config", {}).get("apply_mclahe", False))
+        if s1_mclahe != s2_mclahe:
+            raise ValueError(
+                f"Stage 1 and Stage 2 models disagree on apply_mclahe: "
+                f"Stage 1={s1_mclahe}, Stage 2={s2_mclahe}. "
+                "Both models must be trained with the same CLAHE setting."
+            )
+        apply_mclahe = s2_mclahe
 
     # ── Load & canonical ───────────────────────────────────────────────────
     nii = nib.load(str(img_path))
