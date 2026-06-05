@@ -541,6 +541,7 @@ class CARE2026_MRI_Stage2_Trainer(_BaseCARE2026Trainer):
                 training=True,
                 val_ratio=float(self.train_config.get("val_ratio", 0.1)),
                 random_seed=int(self.train_config.get("random_seed", 42)),
+                no_scar_proportion=float(self.train_config.get("no_scar_proportion", 0.3)),
             )
         if val_dataset is None:
             val_dataset = CARE2026_MRI_Stage2_Dataset(

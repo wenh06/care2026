@@ -142,6 +142,7 @@ MRI_Stage2_TrainCfg.loss_weights = CFG(
     spatial_sigma_mm=2.0,
 )
 
+MRI_Stage2_TrainCfg.no_scar_proportion = 0.3  # fraction of no-scar (Task 2) records to include as hard negatives
 MRI_Stage2_TrainCfg.keep_checkpoint_max = 3
 MRI_Stage2_TrainCfg.log_step = 10
 MRI_Stage2_TrainCfg.debug = False

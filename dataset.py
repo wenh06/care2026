@@ -233,6 +233,7 @@ class CARE2026_MRI_Stage2_Dataset(Dataset, ReprMixin):
         training: bool = True,
         val_ratio: float = DEFAULT_VAL_RATIO,
         random_seed: int = 42,
+        no_scar_proportion: float = 0.3,
     ) -> None:
         super().__init__()
         self.config = CFG(deepcopy(MRI_Stage2_TrainCfg))
@@ -247,6 +248,19 @@ class CARE2026_MRI_Stage2_Dataset(Dataset, ReprMixin):
 
         idx_train, idx_val = _mri_train_val_split(self._index, val_ratio, random_seed)
         self._indices = idx_train if training else idx_val
+
+        # Subsample no-scar (Task 2) records in the training split.
+        # Scar is only present in Task 1 records (~32 % of all samples).
+        # Including all 130 no-scar samples dilutes the scar signal; we
+        # keep a small fraction as hard negatives to teach the model
+        # what healthy tissue looks like.
+        if training:
+            rng = np.random.default_rng(random_seed)
+            scar_idx = [i for i in self._indices if self._index[i][3]]  # has_scar
+            no_scar_idx = [i for i in self._indices if not self._index[i][3]]
+            n_keep = max(0, int(len(no_scar_idx) * no_scar_proportion))
+            no_scar_kept = sorted(rng.choice(no_scar_idx, size=n_keep, replace=False).tolist()) if n_keep > 0 else []
+            self._indices = scar_idx + no_scar_kept
 
         self._canonical_shape = tuple(self.config.get("canonical_shape", MRI_CANONICAL_SHAPE))
         self._cache_shape = tuple(self.config.get("cache_shape", MRI_STAGE2_CACHE_SHAPE))

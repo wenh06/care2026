@@ -97,6 +97,15 @@ _CARE2026_MRI_INFO = DataBaseInfo(
         (dilation ≈ 2–3 px ≈ 1.25–1.9 mm) rather than the cavity
         itself.  Using the raw (undilated) cavity mask would discard
         ~68 % of true scar voxels.
+
+    Dataset composition (Stage 2 training):
+    ───────────────────────────────────────
+      Task 1: 60 records with LA cavity + scar labels.
+      Task 2: 130 records with LA cavity label only (no scar).
+      Scar prevalence: ~32 % of all 190 MRI records.
+      ``no_scar_proportion`` (default 0.3) controls the fraction of
+      Task-2 records included as hard negatives during Stage 2 training.
+      With the default, ~60 scar + ~35 no-scar ≈ 95 samples per epoch.
     """,
     usage=[
         "LA Scar Quantification",

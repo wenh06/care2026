@@ -112,41 +112,35 @@ class ScarLoss(nn.Module):
         has_scar: torch.Tensor,
         spacing: Tuple[float, float, float] = (0.625, 0.625, 2.5),
     ) -> dict:
-        if not has_scar.any():
-            return {
-                "scar_loss": torch.tensor(0.0, device=scar_logits.device),
-                "total_loss": torch.tensor(0.0, device=scar_logits.device),
-            }
-
         from scipy.ndimage import distance_transform_edt
 
         total = scar_logits.sum() * 0.0
-        n = 0
+        n_pos, n_neg = 0, 0
         sigma_px = max(1.0, self.sigma_mm / min(spacing[:2]))
         for b in range(scar_logits.shape[0]):
-            if not has_scar[b]:
-                continue
-            sl = scar_logits[b : b + 1]
-            st = scar_target[b : b + 1].long()
-            st_np = st.squeeze().cpu().numpy().astype(np.uint8)
-            if st_np.sum() == 0:
-                continue
-            # Spatial weight map
-            d = distance_transform_edt(1 - st_np).astype(np.float32)
-            w_map = 1.0 + self.spatial_w0 * np.exp(-(d**2) / (2 * sigma_px**2))
-            w_t = torch.from_numpy(w_map).to(sl.device).unsqueeze(0)  # (1,H,W,D)
+            sl = scar_logits[b : b + 1]  # (1, 2, H, W, D)
+            if has_scar[b]:
+                st = scar_target[b : b + 1].long()
+                st_np = st.squeeze().cpu().numpy().astype(np.uint8)
+                if st_np.sum() == 0:
+                    continue
+                d = distance_transform_edt(1 - st_np).astype(np.float32)
+                w_map = 1.0 + self.spatial_w0 * np.exp(-(d**2) / (2 * sigma_px**2))
+                w_t = torch.from_numpy(w_map).to(sl.device).unsqueeze(0)  # (1,H,W,D)
+                logp = torch.log_softmax(sl, dim=1)
+                ce_voxel = -logp.gather(1, st.unsqueeze(1)).squeeze(1)
+                weighted_ce = (ce_voxel * w_t).mean()
+                dice = self.dice_loss(sl, st)
+                focal = self.focal_loss(sl, st)
+                total = total + self.w_dice * dice + self.w_focal * focal + self.spatial_w0 * 0.1 * weighted_ce
+                n_pos += 1
+            else:
+                # No-scar sample: push scar probability towards zero everywhere
+                scar_prob = torch.softmax(sl, dim=1)[:, 1]  # (1, H, W, D)
+                total = total + 0.1 * scar_prob.mean()
+                n_neg += 1
 
-            # Weighted CE: CE loss weighted per-voxel by w_map
-            logp = torch.log_softmax(sl, dim=1)  # (1, 2, H, W, D)
-            ce_voxel = -logp.gather(1, st.unsqueeze(1)).squeeze(1)  # (1, H, W, D)
-            weighted_ce = (ce_voxel * w_t).mean()
-
-            dice = self.dice_loss(sl, st)
-            focal = self.focal_loss(sl, st)
-            total += self.w_dice * dice + self.w_focal * focal + self.spatial_w0 * 0.1 * weighted_ce
-            n += 1
-
-        total = total / max(n, 1)
+        total = total / max(n_pos + n_neg, 1)
         return {"scar_loss": total, "total_loss": total}
 
 
