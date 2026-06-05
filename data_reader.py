@@ -48,6 +48,7 @@ __all__ = [
     "CARE2026_MRI",
     "CARE2026_CT",
     "view_prediction",
+    "evaluate_training_sample",
 ]
 
 
@@ -582,6 +583,163 @@ _CARE2026_CT_INFO = DataBaseInfo(
     ],
     doi=[],
 )
+
+
+def evaluate_training_sample(
+    rec: str,
+    stage1_model: torch.nn.Module,
+    stage2_model: torch.nn.Module,
+    db_dir: Union[str, Path],
+    device: Optional[torch.device] = None,
+    use_tta: bool = False,
+) -> Dict[str, float]:
+    """Run two-stage inference on a *training* sample and compare with GT labels.
+
+    Displays a 3-panel interactive view (Image | GT | Prediction) and prints
+    LA cavity and LA scar Dice scores.
+
+    Parameters
+    ----------
+    rec : str
+        Record name, e.g. ``"train_1"`` (Task-1: LA + scar; Task-2: LA only).
+    stage1_model : nn.Module
+        CARE2026_MRI_Stage1_Model in eval mode.
+    stage2_model : nn.Module
+        CARE2026_MRI_Stage2_Model in eval mode.
+    db_dir : path-like
+        Root of the CARE2026 dataset.
+    device : torch.device, optional
+    use_tta : bool, default False
+
+    Returns
+    -------
+    dict
+        ``la_dice``, ``scar_dice`` (NaN if no scar GT).
+
+    Examples
+    --------
+    ::
+
+        from models import CARE2026_MRI_Stage1_Model, CARE2026_MRI_Stage2_Model
+
+        m1, aux1 = CARE2026_MRI_Stage1_Model.from_checkpoint(
+            "checkpoints/mri_stage1_model.safetensors", device="cuda")
+        m1.train_config.update(aux1); m1 = m1.to("cuda").eval()
+
+        m2, aux2 = CARE2026_MRI_Stage2_Model.from_checkpoint(
+            "checkpoints/mri_stage2_model.safetensors", device="cuda")
+        m2.train_config.update(aux2); m2 = m2.to("cuda").eval()
+
+        from data_reader import evaluate_training_sample
+        evaluate_training_sample("train_1", m1, m2,
+                                 db_dir="/Data1/wenh06/CARE2026-LeftAtrium")
+    """
+    import matplotlib.patches as mpatches
+    import matplotlib.pyplot as plt
+    from ipywidgets import Dropdown, IntSlider, interact
+
+    from predict import predict_mri_two_stage
+
+    if device is None:
+        device = next(stage1_model.parameters()).device
+
+    db_dir = Path(db_dir).expanduser().resolve()
+
+    has_scar = False
+    reader = CARE2026_MRI(db_dir=db_dir, task=1, verbose=0)
+    if rec in reader._all_records:
+        img_path = reader.get_data_path(rec)
+        has_scar = reader.get_scar_path(rec) is not None
+    else:
+        reader = CARE2026_MRI(db_dir=db_dir, task=2, verbose=0)
+        img_path = reader.get_data_path(rec)
+
+    gt_la = reader.load_la_ann(rec)
+    gt_scar = reader.load_scar_ann(rec) if has_scar else np.zeros_like(gt_la)
+
+    out = predict_mri_two_stage(img_path, stage1_model, stage2_model, device=device, use_tta=use_tta)
+    pred_la = out.la_mask
+    pred_scar = out.scar_mask
+
+    def _dice(p, g):
+        p, g = p.astype(bool), g.astype(bool)
+        inter = (p & g).sum()
+        return float(2 * inter / (p.sum() + g.sum() + 1e-8))
+
+    la_dice = _dice(pred_la, gt_la)
+    scar_dice = _dice(pred_scar, gt_scar) if has_scar else float("nan")
+
+    print(f"  LA Dice : {la_dice:.4f}")
+    if has_scar:
+        print(f"  Scar Dice: {scar_dice:.4f}  (GT voxels: {gt_scar.sum()}, Pred voxels: {pred_scar.sum()})")
+    else:
+        print("  (no scar GT for Task-2 records)")
+
+    PALETTE = {0: (0, 0, 0, 0), 1: "#00FFFF", 2: "#FF4444"}
+    CLASS_NAMES = {1: "LA cavity", 2: "LA scar"}
+
+    n_slices = pred_la.shape[-1]
+    mid = n_slices // 2
+
+    def _plot(sl: int = mid, overlay_mode: str = "filled+hatch"):
+        is_filled = overlay_mode.startswith("filled")
+        use_hatch = overlay_mode == "filled+hatch"
+
+        fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+        img = nib.load(str(img_path)).get_fdata().astype(np.float32)
+
+        axes[0].imshow(img[..., sl], cmap="gray", origin="lower")
+        axes[0].set_title(f"Image  (slice {sl + 1}/{n_slices})")
+        axes[0].axis("off")
+
+        def _draw(ax, la, scar):
+            for cls_id, mask, c in [(1, la, PALETTE[1]), (2, scar, PALETTE[2])]:
+                if mask.max() == 0:
+                    continue
+                ms = mask[..., sl]
+                if is_filled:
+                    ax.contourf(
+                        ms, levels=[0.5, 1], colors=[c], alpha=0.25, antialiased=True, hatches=["//"] if use_hatch else []
+                    )
+                else:
+                    ax.contour(ms, levels=[0.5], colors=[c], linewidths=1.5)
+
+        axes[1].imshow(img[..., sl], cmap="gray", origin="lower")
+        _draw(axes[1], gt_la, gt_scar)
+        axes[1].set_title("Ground Truth")
+        axes[1].axis("off")
+
+        axes[2].imshow(img[..., sl], cmap="gray", origin="lower")
+        _draw(axes[2], pred_la, pred_scar)
+        axes[2].set_title("Prediction")
+        axes[2].axis("off")
+
+        legend_handles = []
+        for cls_id, c, label in [(1, PALETTE[1], "LA cavity"), (2, PALETTE[2], "LA scar")]:
+            legend_handles.append(
+                mpatches.Patch(facecolor=c, alpha=0.5, edgecolor=c, label=label)
+                if is_filled
+                else mpatches.Patch(color=c, label=label)
+            )
+        axes[2].legend(handles=legend_handles, loc="upper right", framealpha=0.7, fontsize="small")
+
+        fig.tight_layout()
+        plt.show()
+
+    if _is_notebook():
+        interact(
+            _plot,
+            sl=IntSlider(min=0, max=n_slices - 1, step=1, value=mid, description="Slice"),
+            overlay_mode=Dropdown(
+                options=["contour", "filled", "filled+hatch"],
+                value="filled+hatch",
+                description="Overlay",
+            ),
+        )
+    else:
+        _plot()
+
+    return {"la_dice": la_dice, "scar_dice": scar_dice}
 
 
 # ---------------------------------------------------------------------------
