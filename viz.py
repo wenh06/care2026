@@ -19,9 +19,9 @@ import numpy as np
 import torch
 from ipywidgets import Dropdown, IntSlider, interact
 
-from const import MRI_CANONICAL_SHAPE, MRI_STAGE1_SHAPE, MRI_STAGE2_CROP_SHAPE
+from const import MRI_CANONICAL_SHAPE, MRI_STAGE1_SHAPE
 from data_reader import CARE2026_MRI
-from predict import _run_stage1_model, _run_stage2_model, predict_mri_two_stage
+from predict import predict_mri_two_stage
 from utils.mclahe import mclahe as _mclahe
 from utils.viz_utils import _is_notebook
 
@@ -37,12 +37,6 @@ def _binary_dice_metric(pred: np.ndarray, target: np.ndarray) -> float:
     p, g = pred.astype(bool), target.astype(bool)
     inter = (p & g).sum()
     return float(2 * inter / (p.sum() + g.sum() + 1e-8))
-
-
-def _resample_mask_torch(mask: np.ndarray, target_shape) -> np.ndarray:
-    t = torch.from_numpy(mask.astype(np.float32)).unsqueeze(0).unsqueeze(0)
-    out = torch.nn.functional.interpolate(t, size=tuple(target_shape), mode="nearest")
-    return out.squeeze().numpy().astype(np.uint8)
 
 
 def view_prediction(
@@ -382,128 +376,70 @@ def evaluate_stage2(
     device: Optional[torch.device] = None,
     use_gt_centroid: bool = True,
 ) -> Dict[str, float]:
-    """Evaluate Stage 2 (fine LA + scar segmentation) on a training sample.
+    """Evaluate Stage 2 (scar segmentation) on a training sample.
 
-    By default uses the **GT LA centroid** for the Stage-2 crop, isolating
-    Stage-2 performance from Stage-1 localisation errors.  Set
-    ``use_gt_centroid=False`` to run the full two-stage pipeline.
+    Uses the unified :func:`predict_mri_two_stage` pipeline:
+    Stage 1 provides the LA cavity mask for scar constraint; Stage 2
+    predicts scar on a 128×128×44 patch at the centroid.  All
+    post-processing (dilated-cavity scar constraint) is applied at
+    native resolution.
 
     Parameters
     ----------
-    rec : str
-        Training record name, e.g. ``"train_1"``.
-    stage1_model : torch.nn.Module
-        Only used when ``use_gt_centroid=False``.
-    stage2_model : torch.nn.Module
-        CARE2026_MRI_Stage2_Model in eval mode.
-    db_dir : path-like
-        Root of the CARE2026 dataset.
-    device : torch.device, optional
+    rec : str, stage1_model, stage2_model, db_dir, device
     use_gt_centroid : bool, default True
+        If True, use the GT LA centroid (bypasses Stage-1 localisation
+        errors, isolating Stage-2 scar prediction quality).
 
     Returns
     -------
-    dict with ``la_dice``, ``scar_dice`` (NaN if no scar GT).
+    dict with ``la_dice``, ``scar_dice``.
     """
+    import nibabel as nib
 
     if device is None:
         device = next(stage1_model.parameters()).device
 
     db_dir = Path(db_dir).expanduser().resolve()
-    has_scar = False
     reader = CARE2026_MRI(db_dir=db_dir, task=1, verbose=0)
-    if rec in reader._all_records:
-        has_scar = reader.get_scar_path(rec) is not None
-    else:
+    if rec not in reader._all_records:
         reader = CARE2026_MRI(db_dir=db_dir, task=2, verbose=0)
+    has_scar = reader.get_scar_path(rec) is not None
     img_path = reader.get_data_path(rec)
 
     gt_la = reader.load_la_ann(rec)
     gt_scar = reader.load_scar_ann(rec) if has_scar else np.zeros_like(gt_la)
 
-    import nibabel as nib
-
-    apply_mclahe = bool(stage2_model.train_config.get("apply_mclahe", False))
-
-    nii = nib.load(str(img_path))
-    img_native = nii.get_fdata().astype(np.float32)
-    affine = nii.affine
-    header = nii.header
-
-    # Canonical
-    img_canonical = CARE2026_MRI.resample_data(img_native, MRI_CANONICAL_SHAPE)
-    gt_la_can = CARE2026_MRI.resample_ann(gt_la, MRI_CANONICAL_SHAPE)
-
-    if apply_mclahe:
-        img_canonical = _mclahe(img_canonical)
-
+    # Compute GT centroid in canonical space
+    centroid = None
     if use_gt_centroid:
+        nii = nib.load(str(img_path))
+        img_native = nii.get_fdata().astype(np.float32)
+        gt_la_can = CARE2026_MRI.resample_ann(gt_la, MRI_CANONICAL_SHAPE)
         fg = np.argwhere(gt_la_can > 0)
         if len(fg) > 0:
-            cx, cy, cz = tuple(int(fg[:, i].mean()) for i in range(3))
-        else:
-            cx, cy, cz = tuple(s // 2 for s in MRI_CANONICAL_SHAPE)
-    else:
-        img_s1 = CARE2026_MRI.resample_data(img_canonical, MRI_STAGE1_SHAPE)
-        gt_s1 = CARE2026_MRI.resample_ann(gt_la_can, MRI_STAGE1_SHAPE)
-        mean_s1, std_s1 = float(img_s1.mean()), float(img_s1.std())
-        img_s1 = (img_s1 - mean_s1) / (std_s1 + 1e-8)
-        img_t = torch.from_numpy(img_s1).unsqueeze(0).unsqueeze(0).to(device)
-        la_prob = _run_stage1_model(stage1_model, img_t, device)
-        la_mask_s1 = la_prob.argmax(axis=0)
-        la_mask_up = _resample_mask_torch(la_mask_s1, MRI_CANONICAL_SHAPE[:2])
-        fg = np.argwhere(la_mask_up > 0)
-        if len(fg) > 0:
-            cx, cy = int(fg[:, 0].mean()), int(fg[:, 1].mean())
-        else:
-            cx, cy = MRI_CANONICAL_SHAPE[0] // 2, MRI_CANONICAL_SHAPE[1] // 2
-        cz = MRI_CANONICAL_SHAPE[2] // 2
+            centroid = tuple(int(fg[:, i].mean()) for i in range(3))
 
-    # Centroid crop
-    cH, cW, cD = MRI_STAGE2_CROP_SHAPE
-    x0 = int(np.clip(cx - cH // 2, 0, max(MRI_CANONICAL_SHAPE[0] - cH, 0)))
-    y0 = int(np.clip(cy - cW // 2, 0, max(MRI_CANONICAL_SHAPE[1] - cW, 0)))
-    z0 = int(np.clip(cz - cD // 2, 0, max(MRI_CANONICAL_SHAPE[2] - cD, 0)))
+    out = predict_mri_two_stage(img_path, stage1_model, stage2_model, device=device, centroid=centroid)
+    pred_la = out.la_mask
+    pred_scar = out.scar_mask
 
-    img_crop = img_canonical[x0 : x0 + cH, y0 : y0 + cW, z0 : z0 + cD]
-    # Pad to exact shape
-    px = max(0, cH - img_crop.shape[0])
-    py = max(0, cW - img_crop.shape[1])
-    pz = max(0, cD - img_crop.shape[2])
-    if px or py or pz:
-        img_crop = np.pad(img_crop, [(0, px), (0, py), (0, pz)])
-    # z-score
-    mean_c, std_c = float(img_crop.mean()), float(img_crop.std())
-    img_crop = (img_crop - mean_c) / (std_c + 1e-8)
+    la_dice = float(_binary_dice_metric(pred_la, gt_la))
+    scar_dice = float(_binary_dice_metric(pred_scar, gt_scar)) if has_scar else float("nan")
 
-    img_t2 = torch.from_numpy(img_crop).unsqueeze(0).unsqueeze(0).to(device)
-    la_prob, scar_prob = _run_stage2_model(stage2_model, img_t2, device)
-    pred_la_crop = la_prob.argmax(axis=0).astype(np.uint8)
-    pred_scar_crop = scar_prob.argmax(axis=0).astype(np.uint8)
-
-    # Place back in canonical
-    pred_la_can = np.zeros(MRI_CANONICAL_SHAPE, dtype=np.uint8)
-    pred_scar_can = np.zeros(MRI_CANONICAL_SHAPE, dtype=np.uint8)
-    pred_la_can[x0 : x0 + cH, y0 : y0 + cW, z0 : z0 + cD] = pred_la_crop[:cH, :cW, :cD]
-    pred_scar_can[x0 : x0 + cH, y0 : y0 + cW, z0 : z0 + cD] = pred_scar_crop[:cH, :cW, :cD]
-
-    # Resample to native
-    pred_la_native = CARE2026_MRI.resample_ann(pred_la_can, img_native.shape[:3])
-    pred_scar_native = CARE2026_MRI.resample_ann(pred_scar_can, img_native.shape[:3])
-
-    la_dice = float(_binary_dice_metric(pred_la_native, gt_la))
-    scar_dice = float(_binary_dice_metric(pred_scar_native, gt_scar)) if has_scar else float("nan")
-
-    centroid_src = "GT" if use_gt_centroid else "Stage-1 predicted"
+    centroid_src = "GT" if centroid is not None else "Stage-1 predicted"
+    apply_mclahe = bool(stage2_model.train_config.get("apply_mclahe", False))
     print(f"  Centroid       : {centroid_src}")
     print(f"  apply_mclahe   : {apply_mclahe}")
     print(f"  LA Dice        : {la_dice:.4f}")
     if has_scar:
-        print(f"  Scar Dice      : {scar_dice:.4f}  (GT: {gt_scar.sum()}, Pred: {pred_scar_native.sum()})")
+        print(f"  Scar Dice      : {scar_dice:.4f}  (GT: {gt_scar.sum()}, Pred: {pred_scar.sum()})")
     else:
         print("  (no scar GT for Task-2 records)")
 
-    # Interactive
+    # Interactive view
+    nii = nib.load(str(img_path))
+    img_native = nii.get_fdata().astype(np.float32)
     n_slices_native = img_native.shape[-1]
     mid_n = n_slices_native // 2
     PALETTE = {0: (0, 0, 0, 0), 1: "#00FFFF", 2: "#FF4444"}
@@ -512,7 +448,6 @@ def evaluate_stage2(
         is_filled = overlay_mode.startswith("filled")
         use_hatch = overlay_mode == "filled+hatch"
         fig, axes = plt.subplots(1, 3, figsize=(18, 6))
-
         for ax in axes:
             ax.imshow(img_native[..., sl], cmap="gray", origin="lower")
 
@@ -531,12 +466,10 @@ def evaluate_stage2(
         axes[0].set_title(f"Native Image  (slice {sl + 1}/{n_slices_native})")
         _draw(axes[1], gt_la, gt_scar)
         axes[1].set_title("Ground Truth")
-        _draw(axes[2], pred_la_native, pred_scar_native)
+        _draw(axes[2], pred_la, pred_scar)
         axes[2].set_title(f"Prediction ({centroid_src} centroid)")
-
         for ax in axes:
             ax.axis("off")
-
         legend_h = []
         for cls_id, c, label in [(1, PALETTE[1], "LA cavity"), (2, PALETTE[2], "LA scar")]:
             legend_h.append(
