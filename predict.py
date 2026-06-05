@@ -200,7 +200,7 @@ def _run_stage1_model(
     """
     img_tensor = img_tensor.to(device, dtype=torch.float32)
     out = model.forward(img_tensor)
-    la_prob = torch.softmax(out["la_logits"], dim=1).squeeze(0).cpu().numpy()  # (2, H, W, D)
+    la_prob = torch.softmax(out["la_logits"], dim=1).squeeze(0).detach().cpu().numpy()  # (2, H, W, D)
     return la_prob
 
 
@@ -217,8 +217,8 @@ def _run_stage2_model(
     """
     img_tensor = img_tensor.to(device, dtype=torch.float32)
     out = model.forward(img_tensor)
-    la_prob = torch.softmax(out["la_logits"], dim=1).squeeze(0).cpu().numpy()
-    scar_prob = torch.softmax(out["scar_logits"], dim=1).squeeze(0).cpu().numpy()
+    la_prob = torch.softmax(out["la_logits"], dim=1).squeeze(0).detach().cpu().numpy()
+    scar_prob = torch.softmax(out["scar_logits"], dim=1).squeeze(0).detach().cpu().numpy()
     return la_prob, scar_prob
 
 
@@ -612,7 +612,7 @@ def _run_ct_model(
     out = model.forward(patch_tensor)
     # Average the two CPS branches
     prob = torch.softmax((out["logits1"] + out["logits2"]) / 2.0, dim=1)
-    return prob.squeeze(0).cpu().numpy()  # (n_classes, ps, ps, ps)
+    return prob.squeeze(0).detach().cpu().numpy()  # (n_classes, ps, ps, ps)
 
 
 def _ct_tta_model_fn(model: torch.nn.Module, device: torch.device, use_tta: bool):

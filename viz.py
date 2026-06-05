@@ -1,0 +1,712 @@
+"""
+Visualisation and evaluation utilities for the CARE 2026 challenge.
+
+Provides standalone functions for viewing and debugging segmentation
+results in Jupyter notebooks.  The slice-view helpers are also used
+internally by the ``view_data`` methods of :class:`~data_reader.CARE2026_MRI`
+and :class:`~data_reader.CARE2026_CT`.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Dict, Optional, Union
+
+import matplotlib.patches as mpatches
+import matplotlib.pyplot as plt
+import nibabel as nib
+import numpy as np
+import torch
+from ipywidgets import Dropdown, IntSlider, interact
+
+from const import MRI_CANONICAL_SHAPE, MRI_STAGE1_SHAPE, MRI_STAGE2_CROP_SHAPE
+from data_reader import CARE2026_MRI
+from predict import _run_stage1_model, _run_stage2_model, predict_mri_two_stage
+from utils.mclahe import mclahe as _mclahe
+from utils.viz_utils import _is_notebook
+
+__all__ = [
+    "view_prediction",
+    "evaluate_stage1",
+    "evaluate_stage2",
+    "evaluate_training_sample",
+]
+
+
+def _binary_dice_metric(pred: np.ndarray, target: np.ndarray) -> float:
+    p, g = pred.astype(bool), target.astype(bool)
+    inter = (p & g).sum()
+    return float(2 * inter / (p.sum() + g.sum() + 1e-8))
+
+
+def _resample_mask_torch(mask: np.ndarray, target_shape) -> np.ndarray:
+    t = torch.from_numpy(mask.astype(np.float32)).unsqueeze(0).unsqueeze(0)
+    out = torch.nn.functional.interpolate(t, size=tuple(target_shape), mode="nearest")
+    return out.squeeze().numpy().astype(np.uint8)
+
+
+def view_prediction(
+    image: Union[str, Path, np.ndarray],
+    prediction: Union[str, Path, np.ndarray],
+    ground_truth: Optional[Union[str, Path, np.ndarray]] = None,
+    *,
+    overlay_mode: str = "filled+hatch",
+    class_map: Optional[Dict[int, str]] = None,
+    palette: Optional[Dict[int, str]] = None,
+    slice_idx: Optional[int] = None,
+) -> None:
+    """Visualise prediction results alongside the original image (and optional GT).
+
+    Designed for Jupyter notebooks — displays an interactive slider-based
+    slice viewer.  Falls back to a static grid when run from a script.
+
+    Parameters
+    ----------
+    image : path-like or (H, W, D) numpy array
+        Original 3-D volume.
+    prediction : path-like or (H, W, D) numpy array
+        Predicted segmentation mask (binary or multi-class integer).
+    ground_truth : path-like or (H, W, D) numpy array, optional
+        Ground-truth segmentation mask for comparison.
+    class_map : dict of ``int → str``, optional
+        Class-id to class-name mapping (e.g. ``{0: "bg", 1: "LA"}``).
+    palette : dict of ``int → colour``, optional
+        Class-id to colour mapping.  Auto-generated if not provided.
+    slice_idx : int, optional
+        Initial slice to display (default: middle slice).
+
+    Examples
+    --------
+    In a Jupyter notebook::
+
+        from viz import view_prediction
+        view_prediction("enhanced.nii.gz", "la_predict.nii.gz", "atriumSegImgMO.nii.gz")
+
+    Or side-by-side without GT::
+
+        view_prediction("enhanced.nii.gz", "la_predict.nii.gz")
+    """
+
+    # -- helpers ---------------------------------------------------------------
+    def _load(path_or_arr, dtype=np.float32):
+        if isinstance(path_or_arr, (str, Path)):
+            return nib.load(str(path_or_arr)).get_fdata().astype(dtype)
+        return path_or_arr.astype(dtype) if hasattr(path_or_arr, "astype") else path_or_arr
+
+    def _load_mask(path_or_arr):
+        if isinstance(path_or_arr, (str, Path)):
+            return nib.load(str(path_or_arr)).get_fdata().astype(np.uint8)
+        return path_or_arr.astype(np.uint8)
+
+    # -- load data -------------------------------------------------------------
+    img = _load(image)
+    pred = _load_mask(prediction)
+    gt = _load_mask(ground_truth) if ground_truth is not None else None
+
+    # -- build palette and class map -------------------------------------------
+    all_ids_set = set(np.unique(pred)) | (set(np.unique(gt)) if gt is not None else set())
+    all_ids_set.discard(0)
+    all_ids = sorted(all_ids_set)
+
+    if class_map is None:
+        class_map = {i: f"Class {i}" for i in all_ids}
+    if palette is None:
+        default_colors = ["#FF4444", "#4488FF", "#44FF44", "#FFAA00", "#FF44FF", "#00FFFF"]
+        palette = {i: default_colors[(i - 1) % len(default_colors)] for i in all_ids}
+        palette[0] = (0, 0, 0, 0)
+
+    # -- build panel layout ----------------------------------------------------
+    n_panels = 2 if gt is None else 3
+    n_slices = img.shape[-1]
+    mid = slice_idx if slice_idx is not None else n_slices // 2
+
+    if _is_notebook():
+
+        def _plot(sl: int = mid, overlay_mode: str = "filled+hatch"):
+            fig, axes = plt.subplots(1, n_panels, figsize=(6 * n_panels, 6))
+            if n_panels == 1:
+                axes = [axes]
+
+            is_filled = overlay_mode.startswith("filled")
+            use_hatch = overlay_mode == "filled+hatch"
+
+            axes[0].imshow(img[..., sl], cmap="gray", origin="lower")
+            axes[0].set_title(f"Image  (slice {sl + 1}/{n_slices})")
+            axes[0].axis("off")
+
+            legend_handles = []
+            for c in all_ids:
+                if is_filled:
+                    legend_handles.append(
+                        mpatches.Patch(
+                            facecolor=palette.get(c, "white"),
+                            alpha=0.5,
+                            edgecolor=palette.get(c, "white"),
+                            label=class_map.get(c, f"Class {c}"),
+                        )
+                    )
+                else:
+                    legend_handles.append(mpatches.Patch(color=palette.get(c, "white"), label=class_map.get(c, f"Class {c}")))
+
+            def _draw_mask(ax, mask_vol, cls_ids):
+                for cls_id in cls_ids:
+                    mask_slice = (mask_vol[..., sl] == cls_id).astype(np.uint8)
+                    if mask_slice.max() == 0:
+                        continue
+                    color = palette.get(cls_id, "white")
+                    if is_filled:
+                        ax.contourf(
+                            mask_slice,
+                            levels=[0.5, 1],
+                            colors=[color],
+                            alpha=0.25,
+                            antialiased=True,
+                            hatches=["//"] if use_hatch else [],
+                        )
+                    else:
+                        ax.contour(mask_slice, levels=[0.5], colors=[color], linewidths=1.5)
+
+            if gt is not None:
+                gt_idx = 1
+                axes[gt_idx].imshow(img[..., sl], cmap="gray", origin="lower")
+                _draw_mask(axes[gt_idx], gt, all_ids)
+                axes[gt_idx].set_title("Ground Truth")
+                axes[gt_idx].axis("off")
+                if legend_handles:
+                    axes[gt_idx].legend(handles=legend_handles, loc="upper right", framealpha=0.7, fontsize="x-small")
+                pred_idx = 2
+            else:
+                pred_idx = 1
+
+            axes[pred_idx].imshow(img[..., sl], cmap="gray", origin="lower")
+            _draw_mask(axes[pred_idx], pred, all_ids)
+            axes[pred_idx].set_title("Prediction")
+            axes[pred_idx].axis("off")
+            if legend_handles:
+                axes[pred_idx].legend(handles=legend_handles, loc="upper right", framealpha=0.7, fontsize="x-small")
+
+            fig.tight_layout()
+            plt.show()
+
+        interact(
+            _plot,
+            sl=IntSlider(min=0, max=n_slices - 1, step=1, value=mid, description="Slice"),
+            overlay_mode=Dropdown(
+                options=["contour", "filled", "filled+hatch"],
+                value="filled+hatch",
+                description="Overlay",
+            ),
+        )
+    else:
+        # Static fallback: show 6 evenly-spaced slices
+        is_filled = overlay_mode.startswith("filled")
+        use_hatch = overlay_mode == "filled+hatch"
+
+        def _draw_static(ax, mask_vol):
+            for cls_id in all_ids:
+                mask_slice = (mask_vol[..., sl] == cls_id).astype(np.uint8)
+                if mask_slice.max() == 0:
+                    continue
+                color = palette.get(cls_id, "white")
+                if is_filled:
+                    ax.contourf(
+                        mask_slice,
+                        levels=[0.5, 1],
+                        colors=[color],
+                        alpha=0.25,
+                        antialiased=True,
+                        hatches=["//"] if use_hatch else [],
+                    )
+                else:
+                    ax.contour(mask_slice, levels=[0.5], colors=[color], linewidths=1)
+
+        step = max(1, n_slices // 6)
+        slices = list(range(0, n_slices, step))[:6]
+        fig, axes = plt.subplots(n_panels, len(slices), figsize=(4 * len(slices), 4 * n_panels))
+        if axes.ndim == 1:
+            axes = axes[:, np.newaxis]
+
+        for col, sl in enumerate(slices):
+            axes[0, col].imshow(img[..., sl], cmap="gray", origin="lower")
+            axes[0, col].set_title(f"Slice {sl}")
+            axes[0, col].axis("off")
+
+            if gt is not None:
+                axes[1, col].imshow(img[..., sl], cmap="gray", origin="lower")
+                _draw_static(axes[1, col], gt)
+                axes[1, col].axis("off")
+                pred_row = 2
+            else:
+                pred_row = 1
+
+            axes[pred_row, col].imshow(img[..., sl], cmap="gray", origin="lower")
+            _draw_static(axes[pred_row, col], pred)
+            axes[pred_row, col].axis("off")
+            axes[pred_row, col].axis("off")
+
+        axes[0, 0].set_ylabel("Image", fontsize=12)
+        if gt is not None:
+            axes[1, 0].set_ylabel("GT", fontsize=12)
+        axes[pred_row, 0].set_ylabel("Prediction", fontsize=12)
+
+        # Shared legend
+        legend_handles = [mpatches.Patch(color=palette.get(c, "white"), label=class_map.get(c, f"Class {c}")) for c in all_ids]
+        if legend_handles:
+            axes[-1, -1].legend(handles=legend_handles, loc="upper right", framealpha=0.7, fontsize="x-small")
+
+        fig.tight_layout()
+        plt.show()
+
+
+def evaluate_stage1(
+    rec: str,
+    model: torch.nn.Module,
+    db_dir: Union[str, Path],
+    device: Optional[torch.device] = None,
+) -> Dict[str, float]:
+    """Evaluate Stage 1 (coarse LA localisation) on a training sample.
+
+    Runs the Stage-1 preprocessing pipeline (canonical → downsample →
+    CLAHE if configured → z-score) and compares the coarse LA prediction
+    with the GT LA mask downsampled to Stage-1 resolution (144×144×44).
+
+    Parameters
+    ----------
+    rec : str
+        Training record name, e.g. ``"train_1"``.
+    model : torch.nn.Module
+        CARE2026_MRI_Stage1_Model in eval mode.
+    db_dir : path-like
+        Root of the CARE2026 dataset.
+    device : torch.device, optional
+
+    Returns
+    -------
+    dict with ``la_dice`` (Stage-1 resolution).
+    """
+
+    if device is None:
+        device = next(model.parameters()).device
+
+    db_dir = Path(db_dir).expanduser().resolve()
+    has_scar = False
+    reader = CARE2026_MRI(db_dir=db_dir, task=1, verbose=0)
+    if rec in reader._all_records:
+        has_scar = reader.get_scar_path(rec) is not None
+    else:
+        reader = CARE2026_MRI(db_dir=db_dir, task=2, verbose=0)
+
+    apply_mclahe = bool(model.train_config.get("apply_mclahe", False))
+
+    # Preprocessing
+    image = reader.load_data(rec)
+    gt_la_native = reader.load_la_ann(rec)
+    image_canonical = CARE2026_MRI.resample_data(image, MRI_CANONICAL_SHAPE)
+    gt_la_canonical = CARE2026_MRI.resample_ann(gt_la_native, MRI_CANONICAL_SHAPE)
+
+    if apply_mclahe:
+        image_canonical = _mclahe(image_canonical)
+
+    image_s1 = CARE2026_MRI.resample_data(image_canonical, MRI_STAGE1_SHAPE)
+    gt_la_s1 = CARE2026_MRI.resample_ann(gt_la_canonical, MRI_STAGE1_SHAPE)
+
+    # z-score
+    mean, std = float(image_s1.mean()), float(image_s1.std())
+    image_s1 = (image_s1 - mean) / (std + 1e-8)
+
+    # Inference
+    img_t = torch.from_numpy(image_s1).unsqueeze(0).unsqueeze(0).to(device)
+    with torch.no_grad():
+        out = model(img_t)
+    pred_s1 = out["la_mask"].squeeze().cpu().numpy().astype(np.uint8)
+
+    la_dice = float(_binary_dice_metric(pred_s1, gt_la_s1))
+    print(f"  Stage-1 LA Dice : {la_dice:.4f}  (Stage-1 shape {MRI_STAGE1_SHAPE})")
+    print(f"  apply_mclahe    : {apply_mclahe}")
+
+    # Interactive view
+    n_slices = image_s1.shape[-1]
+    mid = n_slices // 2
+    PALETTE = {0: (0, 0, 0, 0), 1: "#00FFFF"}
+    image_disp = image_s1  # already normalized
+
+    def _plot(sl: int = mid, overlay_mode: str = "filled+hatch"):
+        is_filled = overlay_mode.startswith("filled")
+        use_hatch = overlay_mode == "filled+hatch"
+        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+        for ax in axes:
+            ax.imshow(image_disp[..., sl], cmap="gray", origin="lower")
+
+        def _draw(ax, mask, color):
+            ms = mask[..., sl]
+            if is_filled:
+                ax.contourf(
+                    ms, levels=[0.5, 1], colors=[color], alpha=0.25, antialiased=True, hatches=["//"] if use_hatch else []
+                )
+            else:
+                ax.contour(ms, levels=[0.5], colors=[color], linewidths=1.5)
+
+        _draw(axes[1], gt_la_s1, PALETTE[1])
+        axes[1].set_title("GT LA (Stage-1)")
+
+        _draw(axes[2], pred_s1, PALETTE[1])
+        axes[2].set_title("Pred LA (Stage-1)")
+
+        axes[0].set_title(f"Stage-1 Image  (slice {sl + 1}/{n_slices})")
+        for ax in axes:
+            ax.axis("off")
+
+        legend_h = [mpatches.Patch(facecolor=PALETTE[1], alpha=0.5, edgecolor=PALETTE[1], label="LA cavity")]
+        axes[2].legend(handles=legend_h, loc="upper right", framealpha=0.7, fontsize="small")
+        fig.tight_layout()
+        plt.show()
+
+    if _is_notebook():
+        interact(
+            _plot,
+            sl=IntSlider(min=0, max=n_slices - 1, step=1, value=mid, description="Slice"),
+            overlay_mode=Dropdown(options=["contour", "filled", "filled+hatch"], value="filled+hatch", description="Overlay"),
+        )
+    else:
+        _plot()
+
+    return {"la_dice": la_dice}
+
+
+def evaluate_stage2(
+    rec: str,
+    stage1_model: torch.nn.Module,
+    stage2_model: torch.nn.Module,
+    db_dir: Union[str, Path],
+    device: Optional[torch.device] = None,
+    use_gt_centroid: bool = True,
+) -> Dict[str, float]:
+    """Evaluate Stage 2 (fine LA + scar segmentation) on a training sample.
+
+    By default uses the **GT LA centroid** for the Stage-2 crop, isolating
+    Stage-2 performance from Stage-1 localisation errors.  Set
+    ``use_gt_centroid=False`` to run the full two-stage pipeline.
+
+    Parameters
+    ----------
+    rec : str
+        Training record name, e.g. ``"train_1"``.
+    stage1_model : torch.nn.Module
+        Only used when ``use_gt_centroid=False``.
+    stage2_model : torch.nn.Module
+        CARE2026_MRI_Stage2_Model in eval mode.
+    db_dir : path-like
+        Root of the CARE2026 dataset.
+    device : torch.device, optional
+    use_gt_centroid : bool, default True
+
+    Returns
+    -------
+    dict with ``la_dice``, ``scar_dice`` (NaN if no scar GT).
+    """
+
+    if device is None:
+        device = next(stage1_model.parameters()).device
+
+    db_dir = Path(db_dir).expanduser().resolve()
+    has_scar = False
+    reader = CARE2026_MRI(db_dir=db_dir, task=1, verbose=0)
+    if rec in reader._all_records:
+        has_scar = reader.get_scar_path(rec) is not None
+    else:
+        reader = CARE2026_MRI(db_dir=db_dir, task=2, verbose=0)
+    img_path = reader.get_data_path(rec)
+
+    gt_la = reader.load_la_ann(rec)
+    gt_scar = reader.load_scar_ann(rec) if has_scar else np.zeros_like(gt_la)
+
+    import nibabel as nib
+
+    apply_mclahe = bool(stage2_model.train_config.get("apply_mclahe", False))
+
+    nii = nib.load(str(img_path))
+    img_native = nii.get_fdata().astype(np.float32)
+    affine = nii.affine
+    header = nii.header
+
+    # Canonical
+    img_canonical = CARE2026_MRI.resample_data(img_native, MRI_CANONICAL_SHAPE)
+    gt_la_can = CARE2026_MRI.resample_ann(gt_la, MRI_CANONICAL_SHAPE)
+
+    if apply_mclahe:
+        img_canonical = _mclahe(img_canonical)
+
+    if use_gt_centroid:
+        fg = np.argwhere(gt_la_can > 0)
+        if len(fg) > 0:
+            cx, cy, cz = tuple(int(fg[:, i].mean()) for i in range(3))
+        else:
+            cx, cy, cz = tuple(s // 2 for s in MRI_CANONICAL_SHAPE)
+    else:
+        img_s1 = CARE2026_MRI.resample_data(img_canonical, MRI_STAGE1_SHAPE)
+        gt_s1 = CARE2026_MRI.resample_ann(gt_la_can, MRI_STAGE1_SHAPE)
+        mean_s1, std_s1 = float(img_s1.mean()), float(img_s1.std())
+        img_s1 = (img_s1 - mean_s1) / (std_s1 + 1e-8)
+        img_t = torch.from_numpy(img_s1).unsqueeze(0).unsqueeze(0).to(device)
+        la_prob = _run_stage1_model(stage1_model, img_t, device)
+        la_mask_s1 = la_prob.argmax(axis=0)
+        la_mask_up = _resample_mask_torch(la_mask_s1, MRI_CANONICAL_SHAPE[:2])
+        fg = np.argwhere(la_mask_up > 0)
+        if len(fg) > 0:
+            cx, cy = int(fg[:, 0].mean()), int(fg[:, 1].mean())
+        else:
+            cx, cy = MRI_CANONICAL_SHAPE[0] // 2, MRI_CANONICAL_SHAPE[1] // 2
+        cz = MRI_CANONICAL_SHAPE[2] // 2
+
+    # Centroid crop
+    cH, cW, cD = MRI_STAGE2_CROP_SHAPE
+    x0 = int(np.clip(cx - cH // 2, 0, max(MRI_CANONICAL_SHAPE[0] - cH, 0)))
+    y0 = int(np.clip(cy - cW // 2, 0, max(MRI_CANONICAL_SHAPE[1] - cW, 0)))
+    z0 = int(np.clip(cz - cD // 2, 0, max(MRI_CANONICAL_SHAPE[2] - cD, 0)))
+
+    img_crop = img_canonical[x0 : x0 + cH, y0 : y0 + cW, z0 : z0 + cD]
+    # Pad to exact shape
+    px = max(0, cH - img_crop.shape[0])
+    py = max(0, cW - img_crop.shape[1])
+    pz = max(0, cD - img_crop.shape[2])
+    if px or py or pz:
+        img_crop = np.pad(img_crop, [(0, px), (0, py), (0, pz)])
+    # z-score
+    mean_c, std_c = float(img_crop.mean()), float(img_crop.std())
+    img_crop = (img_crop - mean_c) / (std_c + 1e-8)
+
+    img_t2 = torch.from_numpy(img_crop).unsqueeze(0).unsqueeze(0).to(device)
+    la_prob, scar_prob = _run_stage2_model(stage2_model, img_t2, device)
+    pred_la_crop = la_prob.argmax(axis=0).astype(np.uint8)
+    pred_scar_crop = scar_prob.argmax(axis=0).astype(np.uint8)
+
+    # Place back in canonical
+    pred_la_can = np.zeros(MRI_CANONICAL_SHAPE, dtype=np.uint8)
+    pred_scar_can = np.zeros(MRI_CANONICAL_SHAPE, dtype=np.uint8)
+    pred_la_can[x0 : x0 + cH, y0 : y0 + cW, z0 : z0 + cD] = pred_la_crop[:cH, :cW, :cD]
+    pred_scar_can[x0 : x0 + cH, y0 : y0 + cW, z0 : z0 + cD] = pred_scar_crop[:cH, :cW, :cD]
+
+    # Resample to native
+    pred_la_native = CARE2026_MRI.resample_ann(pred_la_can, img_native.shape[:3])
+    pred_scar_native = CARE2026_MRI.resample_ann(pred_scar_can, img_native.shape[:3])
+
+    la_dice = float(_binary_dice_metric(pred_la_native, gt_la))
+    scar_dice = float(_binary_dice_metric(pred_scar_native, gt_scar)) if has_scar else float("nan")
+
+    centroid_src = "GT" if use_gt_centroid else "Stage-1 predicted"
+    print(f"  Centroid       : {centroid_src}")
+    print(f"  apply_mclahe   : {apply_mclahe}")
+    print(f"  LA Dice        : {la_dice:.4f}")
+    if has_scar:
+        print(f"  Scar Dice      : {scar_dice:.4f}  (GT: {gt_scar.sum()}, Pred: {pred_scar_native.sum()})")
+    else:
+        print("  (no scar GT for Task-2 records)")
+
+    # Interactive
+    n_slices_native = img_native.shape[-1]
+    mid_n = n_slices_native // 2
+    PALETTE = {0: (0, 0, 0, 0), 1: "#00FFFF", 2: "#FF4444"}
+
+    def _plot(sl: int = mid_n, overlay_mode: str = "filled+hatch"):
+        is_filled = overlay_mode.startswith("filled")
+        use_hatch = overlay_mode == "filled+hatch"
+        fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+
+        for ax in axes:
+            ax.imshow(img_native[..., sl], cmap="gray", origin="lower")
+
+        def _draw(ax, la, scar):
+            for cls_id, mask, c in [(1, la, PALETTE[1]), (2, scar, PALETTE[2])]:
+                if mask.max() == 0:
+                    continue
+                ms = mask[..., sl]
+                if is_filled:
+                    ax.contourf(
+                        ms, levels=[0.5, 1], colors=[c], alpha=0.25, antialiased=True, hatches=["//"] if use_hatch else []
+                    )
+                else:
+                    ax.contour(ms, levels=[0.5], colors=[c], linewidths=1.5)
+
+        axes[0].set_title(f"Native Image  (slice {sl + 1}/{n_slices_native})")
+        _draw(axes[1], gt_la, gt_scar)
+        axes[1].set_title("Ground Truth")
+        _draw(axes[2], pred_la_native, pred_scar_native)
+        axes[2].set_title(f"Prediction ({centroid_src} centroid)")
+
+        for ax in axes:
+            ax.axis("off")
+
+        legend_h = []
+        for cls_id, c, label in [(1, PALETTE[1], "LA cavity"), (2, PALETTE[2], "LA scar")]:
+            legend_h.append(
+                mpatches.Patch(facecolor=c, alpha=0.5, edgecolor=c, label=label)
+                if is_filled
+                else mpatches.Patch(color=c, label=label)
+            )
+        axes[2].legend(handles=legend_h, loc="upper right", framealpha=0.7, fontsize="small")
+        fig.tight_layout()
+        plt.show()
+
+    if _is_notebook():
+        interact(
+            _plot,
+            sl=IntSlider(min=0, max=n_slices_native - 1, step=1, value=mid_n, description="Slice"),
+            overlay_mode=Dropdown(options=["contour", "filled", "filled+hatch"], value="filled+hatch", description="Overlay"),
+        )
+    else:
+        _plot()
+
+    return {"la_dice": la_dice, "scar_dice": scar_dice}
+
+
+def evaluate_training_sample(
+    rec: str,
+    stage1_model: torch.nn.Module,
+    stage2_model: torch.nn.Module,
+    db_dir: Union[str, Path],
+    device: Optional[torch.device] = None,
+    use_tta: bool = False,
+) -> Dict[str, float]:
+    """Run two-stage inference on a *training* sample and compare with GT labels.
+
+    Displays a 3-panel interactive view (Image | GT | Prediction) and prints
+    LA cavity and LA scar Dice scores.
+
+    Parameters
+    ----------
+    rec : str
+        Record name, e.g. ``"train_1"`` (Task-1: LA + scar; Task-2: LA only).
+    stage1_model : nn.Module
+        CARE2026_MRI_Stage1_Model in eval mode.
+    stage2_model : nn.Module
+        CARE2026_MRI_Stage2_Model in eval mode.
+    db_dir : path-like
+        Root of the CARE2026 dataset.
+    device : torch.device, optional
+    use_tta : bool, default False
+
+    Returns
+    -------
+    dict
+        ``la_dice``, ``scar_dice`` (NaN if no scar GT).
+
+    Examples
+    --------
+    ::
+
+        from models import CARE2026_MRI_Stage1_Model, CARE2026_MRI_Stage2_Model
+
+        m1, aux1 = CARE2026_MRI_Stage1_Model.from_checkpoint(
+            "checkpoints/mri_stage1_model.safetensors", device="cuda")
+        m1.train_config.update(aux1); m1 = m1.to("cuda").eval()
+
+        m2, aux2 = CARE2026_MRI_Stage2_Model.from_checkpoint(
+            "checkpoints/mri_stage2_model.safetensors", device="cuda")
+        m2.train_config.update(aux2); m2 = m2.to("cuda").eval()
+
+        from viz import evaluate_training_sample
+        evaluate_training_sample("train_1", m1, m2,
+                                 db_dir="/Data1/wenh06/CARE2026-LeftAtrium")
+    """
+
+    if device is None:
+        device = next(stage1_model.parameters()).device
+
+    db_dir = Path(db_dir).expanduser().resolve()
+
+    has_scar = False
+    reader = CARE2026_MRI(db_dir=db_dir, task=1, verbose=0)
+    if rec in reader._all_records:
+        img_path = reader.get_data_path(rec)
+        has_scar = reader.get_scar_path(rec) is not None
+    else:
+        reader = CARE2026_MRI(db_dir=db_dir, task=2, verbose=0)
+        img_path = reader.get_data_path(rec)
+
+    gt_la = reader.load_la_ann(rec)
+    gt_scar = reader.load_scar_ann(rec) if has_scar else np.zeros_like(gt_la)
+
+    out = predict_mri_two_stage(img_path, stage1_model, stage2_model, device=device, use_tta=use_tta)
+    pred_la = out.la_mask
+    pred_scar = out.scar_mask
+
+    def _dice(p, g):
+        p, g = p.astype(bool), g.astype(bool)
+        inter = (p & g).sum()
+        return float(2 * inter / (p.sum() + g.sum() + 1e-8))
+
+    la_dice = _dice(pred_la, gt_la)
+    scar_dice = _dice(pred_scar, gt_scar) if has_scar else float("nan")
+
+    print(f"  LA Dice : {la_dice:.4f}")
+    if has_scar:
+        print(f"  Scar Dice: {scar_dice:.4f}  (GT voxels: {gt_scar.sum()}, Pred voxels: {pred_scar.sum()})")
+    else:
+        print("  (no scar GT for Task-2 records)")
+
+    PALETTE = {0: (0, 0, 0, 0), 1: "#00FFFF", 2: "#FF4444"}
+    CLASS_NAMES = {1: "LA cavity", 2: "LA scar"}
+
+    n_slices = pred_la.shape[-1]
+    mid = n_slices // 2
+
+    def _plot(sl: int = mid, overlay_mode: str = "filled+hatch"):
+        is_filled = overlay_mode.startswith("filled")
+        use_hatch = overlay_mode == "filled+hatch"
+
+        fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+        img = nib.load(str(img_path)).get_fdata().astype(np.float32)
+
+        axes[0].imshow(img[..., sl], cmap="gray", origin="lower")
+        axes[0].set_title(f"Image  (slice {sl + 1}/{n_slices})")
+        axes[0].axis("off")
+
+        def _draw(ax, la, scar):
+            for cls_id, mask, c in [(1, la, PALETTE[1]), (2, scar, PALETTE[2])]:
+                if mask.max() == 0:
+                    continue
+                ms = mask[..., sl]
+                if is_filled:
+                    ax.contourf(
+                        ms, levels=[0.5, 1], colors=[c], alpha=0.25, antialiased=True, hatches=["//"] if use_hatch else []
+                    )
+                else:
+                    ax.contour(ms, levels=[0.5], colors=[c], linewidths=1.5)
+
+        axes[1].imshow(img[..., sl], cmap="gray", origin="lower")
+        _draw(axes[1], gt_la, gt_scar)
+        axes[1].set_title("Ground Truth")
+        axes[1].axis("off")
+
+        axes[2].imshow(img[..., sl], cmap="gray", origin="lower")
+        _draw(axes[2], pred_la, pred_scar)
+        axes[2].set_title("Prediction")
+        axes[2].axis("off")
+
+        legend_handles = []
+        for cls_id, c, label in [(1, PALETTE[1], "LA cavity"), (2, PALETTE[2], "LA scar")]:
+            legend_handles.append(
+                mpatches.Patch(facecolor=c, alpha=0.5, edgecolor=c, label=label)
+                if is_filled
+                else mpatches.Patch(color=c, label=label)
+            )
+        axes[2].legend(handles=legend_handles, loc="upper right", framealpha=0.7, fontsize="small")
+
+        fig.tight_layout()
+        plt.show()
+
+    if _is_notebook():
+        interact(
+            _plot,
+            sl=IntSlider(min=0, max=n_slices - 1, step=1, value=mid, description="Slice"),
+            overlay_mode=Dropdown(
+                options=["contour", "filled", "filled+hatch"],
+                value="filled+hatch",
+                description="Overlay",
+            ),
+        )
+    else:
+        _plot()
+
+    return {"la_dice": la_dice, "scar_dice": scar_dice}
