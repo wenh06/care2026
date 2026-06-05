@@ -193,6 +193,33 @@ def postprocess_ct_mask(ct_mask: np.ndarray, n_classes: int) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 
+def _check_model_consistency(
+    stage1_model: torch.nn.Module,
+    stage2_model: torch.nn.Module,
+) -> bool:
+    """Verify Stage-1 and Stage-2 models are compatible and return ``apply_mclahe``."""
+    tc1 = getattr(stage1_model, "train_config", {}) or {}
+    tc2 = getattr(stage2_model, "train_config", {}) or {}
+
+    s1_mclahe = bool(tc1.get("apply_mclahe", False))
+    s2_mclahe = bool(tc2.get("apply_mclahe", False))
+    if s1_mclahe != s2_mclahe:
+        raise ValueError(
+            f"Stage 1 and Stage 2 models disagree on apply_mclahe: "
+            f"Stage 1={s1_mclahe}, Stage 2={s2_mclahe}. "
+            "Both models must be trained with the same CLAHE setting."
+        )
+
+    s1_task, s2_task = tc1.get("task"), tc2.get("task")
+    s1_stage, s2_stage = tc1.get("stage"), tc2.get("stage")
+    if s1_task != "mri" or s2_task != "mri":
+        raise ValueError(f"Both models must be MRI: Stage 1 task={s1_task}, Stage 2 task={s2_task}")
+    if s1_stage != 1 or s2_stage != 2:
+        raise ValueError(f"Stage mismatch: Stage 1 stage={s1_stage}, Stage 2 stage={s2_stage} (expected 1 / 2)")
+
+    return s2_mclahe
+
+
 def _run_stage1_model(
     model: torch.nn.Module,
     img_tensor: torch.Tensor,
@@ -319,15 +346,7 @@ def predict_mri_two_stage(
         device = next(stage1_model.parameters()).device
 
     if apply_mclahe is None:
-        s1_mclahe = bool(getattr(stage1_model, "train_config", {}).get("apply_mclahe", False))
-        s2_mclahe = bool(getattr(stage2_model, "train_config", {}).get("apply_mclahe", False))
-        if s1_mclahe != s2_mclahe:
-            raise ValueError(
-                f"Stage 1 and Stage 2 models disagree on apply_mclahe: "
-                f"Stage 1={s1_mclahe}, Stage 2={s2_mclahe}. "
-                "Both models must be trained with the same CLAHE setting."
-            )
-        apply_mclahe = s2_mclahe
+        apply_mclahe = _check_model_consistency(stage1_model, stage2_model)
 
     # ── Load & canonical ───────────────────────────────────────────────────
     nii = nib.load(str(img_path))

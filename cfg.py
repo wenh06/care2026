@@ -120,9 +120,9 @@ MRI_Stage2_TrainCfg.centroid_jitter = MRI_STAGE2_CENTROID_JITTER
 MRI_Stage2_TrainCfg.train_crop_hw = 128  # model input at training time
 
 MRI_Stage2_TrainCfg.n_epochs = 200
-MRI_Stage2_TrainCfg.batch_size = 1
+MRI_Stage2_TrainCfg.batch_size = 4
 MRI_Stage2_TrainCfg.use_amp = True
-MRI_Stage2_TrainCfg.accumulate_grad_batches = 2
+MRI_Stage2_TrainCfg.accumulate_grad_batches = 1
 
 MRI_Stage2_TrainCfg.optimizer = "adamw"
 MRI_Stage2_TrainCfg.betas = (0.9, 0.999)
