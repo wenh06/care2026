@@ -24,7 +24,6 @@ __all__ = [
     "BaseCfg",
     "MRI_Stage1_TrainCfg",
     "MRI_Stage2_TrainCfg",
-    "MRI_TrainCfg",  # alias for MRI_Stage2_TrainCfg
     "CT_TrainCfg",
     "ModelCfg",
 ]
@@ -102,63 +101,85 @@ MRI_Stage1_TrainCfg.debug = False
 MRI_Stage1_TrainCfg.apply_mclahe = False
 
 # ---------------------------------------------------------------------------
-# MRI Stage 2 training configuration (fine LA + scar segmentation)
+# MRI Stage 2 training configuration (scar-only segmentation)
 # ---------------------------------------------------------------------------
-# Stage 2 model operates on a fixed-size crop centred on the GT LA centroid
-# (+ random jitter during training to match Stage 1 prediction uncertainty).
+# Stage 1 provides the LA cavity mask; Stage 2 focuses entirely on scar
+# using ScarLoss with Gaussian spatial weighting to handle extreme class
+# imbalance (~2.4 % of LA voxels are scar).
 
 MRI_Stage2_TrainCfg = deepcopy(BaseCfg)
 
 MRI_Stage2_TrainCfg.task = "mri"
 MRI_Stage2_TrainCfg.stage = 2
 
-# Volume shape: canonical → crop centred on LA centroid
-MRI_Stage2_TrainCfg.canonical_shape = MRI_CANONICAL_SHAPE  # (576, 576, 44)
-MRI_Stage2_TrainCfg.cache_shape = MRI_STAGE2_CACHE_SHAPE  # (320, 320, 44) generous cache
-MRI_Stage2_TrainCfg.patch_shape = MRI_STAGE2_CROP_SHAPE  # (256, 256, 44) model input
-MRI_Stage2_TrainCfg.centroid_jitter = MRI_STAGE2_CENTROID_JITTER  # (32, 32, 0)
+# Volume shape: canonical → crop centred on LA centroid → resize to 128×128×44
+MRI_Stage2_TrainCfg.canonical_shape = MRI_CANONICAL_SHAPE
+MRI_Stage2_TrainCfg.cache_shape = MRI_STAGE2_CACHE_SHAPE
+MRI_Stage2_TrainCfg.patch_shape = MRI_STAGE2_CROP_SHAPE
+MRI_Stage2_TrainCfg.centroid_jitter = MRI_STAGE2_CENTROID_JITTER
+MRI_Stage2_TrainCfg.train_crop_hw = 128  # model input at training time
 
-# Training patch: optional further HW sub-crop to reduce GPU memory
-MRI_Stage2_TrainCfg.train_crop_hw = 128  # 128×128×44 per sample with AMP on 16 GB GPU
-
-# Training duration and batch
-MRI_Stage2_TrainCfg.n_epochs = 150
+MRI_Stage2_TrainCfg.n_epochs = 200
 MRI_Stage2_TrainCfg.batch_size = 1
 MRI_Stage2_TrainCfg.use_amp = True
-MRI_Stage2_TrainCfg.accumulate_grad_batches = 2  # effective batch = 2
+MRI_Stage2_TrainCfg.accumulate_grad_batches = 2
 
-# Optimizer
 MRI_Stage2_TrainCfg.optimizer = "adamw"
 MRI_Stage2_TrainCfg.betas = (0.9, 0.999)
 MRI_Stage2_TrainCfg.decay = 1e-2
 MRI_Stage2_TrainCfg.learning_rate = 3e-4
 MRI_Stage2_TrainCfg.lr = MRI_Stage2_TrainCfg.learning_rate
-
-# Cosine annealing schedule
 MRI_Stage2_TrainCfg.lr_scheduler = "cosine"
 MRI_Stage2_TrainCfg.lr_min = 1e-6
 
-# Augmentation
 MRI_Stage2_TrainCfg.aug_prob = 0.5
 
-# Multi-task loss weights (same as before)
+# Scar-only loss weights (no LA head; LA from Stage 1)
 MRI_Stage2_TrainCfg.loss_weights = CFG(
-    la_dice=1.0,
-    scar_dice=2.0,
-    scar_boundary=0.0,
+    scar_dice=1.0,
     scar_focal=0.5,
+    spatial_w0=5.0,
+    spatial_sigma_mm=2.0,
 )
 
-# Checkpointing
 MRI_Stage2_TrainCfg.keep_checkpoint_max = 3
 MRI_Stage2_TrainCfg.log_step = 10
 MRI_Stage2_TrainCfg.debug = False
-
-# CLAHE preprocessing (disabled by default; enable for ablation)
 MRI_Stage2_TrainCfg.apply_mclahe = False
 
-# Backward-compatibility alias
-MRI_TrainCfg = MRI_Stage2_TrainCfg
+# ---------------------------------------------------------------------------
+# MRI Stage 2 (Scar-only) training configuration
+# ---------------------------------------------------------------------------
+# Stage 1 provides the LA cavity mask; Stage 2 focuses entirely on scar.
+# Uses ScarLoss with Gaussian spatial weighting to handle extreme class
+# imbalance (~2.4 % of LA voxels are scar).
+
+MRI_Stage2_Scar_TrainCfg = deepcopy(MRI_Stage2_TrainCfg)
+
+MRI_Stage2_Scar_TrainCfg.n_epochs = 200
+MRI_Stage2_Scar_TrainCfg.batch_size = 1
+MRI_Stage2_Scar_TrainCfg.use_amp = True
+MRI_Stage2_Scar_TrainCfg.accumulate_grad_batches = 2
+MRI_Stage2_Scar_TrainCfg.optimizer = "adamw"
+MRI_Stage2_Scar_TrainCfg.betas = (0.9, 0.999)
+MRI_Stage2_Scar_TrainCfg.decay = 1e-2
+MRI_Stage2_Scar_TrainCfg.learning_rate = 3e-4
+MRI_Stage2_Scar_TrainCfg.lr = MRI_Stage2_Scar_TrainCfg.learning_rate
+MRI_Stage2_Scar_TrainCfg.lr_scheduler = "cosine"
+MRI_Stage2_Scar_TrainCfg.lr_min = 1e-6
+MRI_Stage2_Scar_TrainCfg.train_crop_hw = 128
+MRI_Stage2_Scar_TrainCfg.aug_prob = 0.5
+MRI_Stage2_Scar_TrainCfg.keep_checkpoint_max = 3
+MRI_Stage2_Scar_TrainCfg.log_step = 10
+MRI_Stage2_Scar_TrainCfg.debug = False
+MRI_Stage2_Scar_TrainCfg.apply_mclahe = False
+# Scar-specific: no LA head (LA from Stage 1), spatial weight for scar
+MRI_Stage2_Scar_TrainCfg.loss_weights = CFG(
+    scar_dice=1.0,
+    scar_focal=0.5,
+    spatial_w0=5.0,
+    spatial_sigma_mm=2.0,
+)
 
 # ---------------------------------------------------------------------------
 # CT training configuration (Task 3 — CPS semi-supervised UNet3D)

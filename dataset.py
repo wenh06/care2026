@@ -38,7 +38,6 @@ from utils.mclahe import mclahe as _mclahe
 __all__ = [
     "CARE2026_MRI_Stage1_Dataset",
     "CARE2026_MRI_Stage2_Dataset",
-    "CARE2026_MRI_Dataset",  # alias for Stage2
     "CARE2026_CT_Dataset",
     "collate_fn_mri_stage1",
     "collate_fn_mri",
@@ -378,7 +377,6 @@ class CARE2026_MRI_Stage2_Dataset(Dataset, ReprMixin):
 
 
 # Backward-compatibility alias
-CARE2026_MRI_Dataset = CARE2026_MRI_Stage2_Dataset
 
 
 # ---------------------------------------------------------------------------

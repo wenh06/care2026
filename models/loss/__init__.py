@@ -2,8 +2,9 @@
 Loss function module for CARE2026.
 """
 
-from typing import Optional
+from typing import Optional, Tuple
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -36,7 +37,7 @@ __all__ = [
     "DiceTopKLoss",
     # task-level compound wrappers
     "Stage1MRILoss",
-    "MRILoss",
+    "ScarLoss",
     "CTLoss",
 ]
 
@@ -74,65 +75,79 @@ class Stage1MRILoss(nn.Module):
         return {"la_loss": la_loss, "total_loss": self.w_la * la_loss}
 
 
-class MRILoss(nn.Module):
-    """Compound loss for dual-head MRI model.
+class ScarLoss(nn.Module):
+    """Scar-only loss with Gaussian spatial weighting.
 
-    - LA cavity head: DiceCELoss
-    - Scar head: TverskyLoss + FocalTverskyLoss + optional BoundaryLoss
+    Scar is extremely sparse (~2.4 % of LA voxels) and located in the
+    thin atrial wall.  This loss combines an unweighted Dice+Focal
+    component with a spatially-weighted cross-entropy term that
+    up-weights voxels near GT scar::
+
+        w(x) = 1 + w₀ · exp(−d(x)² / 2σ²)
+
+    where *d(x)* is the Euclidean distance to the nearest scar voxel.
 
     Parameters
     ----------
     cfg : CFG
-        Training configuration with loss_weights dict containing:
-        la_dice, scar_dice, scar_focal, scar_boundary (0 = disabled).
+        ``loss_weights``: ``scar_dice`` (default 1.0), ``scar_focal``
+        (default 0.5), ``spatial_w0`` (default 5.0),
+        ``spatial_sigma_mm`` (default 2.0).
     """
 
     def __init__(self, cfg) -> None:
         super().__init__()
-        self.la_dice_loss = DiceCELoss(dice_weight=0.5, ce_weight=0.5)
-        self.scar_tversky = TverskyLoss(alpha=0.3, beta=0.7)
-        self.scar_focal = FocalTverskyLoss(alpha=0.3, beta=0.7, gamma=0.75)
-        self.scar_boundary = BoundaryLoss()
         w = cfg.loss_weights
-        self.w_la_dice = w.get("la_dice", 1.0)
-        self.w_scar_dice = w.get("scar_dice", 2.0)
-        self.w_scar_focal = w.get("scar_focal", 0.5)
-        self.w_scar_boundary = w.get("scar_boundary", 0.0)
+        self.dice_loss = DiceCELoss(dice_weight=0.5, ce_weight=0.5)
+        self.focal_loss = FocalTverskyLoss(alpha=0.3, beta=0.7, gamma=0.75)
+        self.w_dice = w.get("scar_dice", 1.0)
+        self.w_focal = w.get("scar_focal", 0.5)
+        self.spatial_w0 = w.get("spatial_w0", 5.0)
+        self.sigma_mm = w.get("spatial_sigma_mm", 2.0)
 
     def forward(
         self,
-        la_logits: torch.Tensor,
         scar_logits: torch.Tensor,
-        la_target: torch.Tensor,
         scar_target: torch.Tensor,
         has_scar: torch.Tensor,
+        spacing: Tuple[float, float, float] = (0.625, 0.625, 2.5),
     ) -> dict:
-        """Compute the MRI multi-task loss.
+        if not has_scar.any():
+            return {
+                "scar_loss": torch.tensor(0.0, device=scar_logits.device),
+                "total_loss": torch.tensor(0.0, device=scar_logits.device),
+            }
 
-        Parameters
-        ----------
-        la_logits : torch.Tensor, shape (B, 2, H, W, D)
-        scar_logits : torch.Tensor, shape (B, 2, H, W, D)
-        la_target : torch.Tensor, shape (B, H, W, D), dtype long
-        scar_target : torch.Tensor, shape (B, H, W, D), dtype long
-            Zeros for samples without scar annotation.
-        has_scar : torch.Tensor, shape (B,), dtype bool
+        from scipy.ndimage import distance_transform_edt
 
-        Returns
-        -------
-        dict
-            Keys: la_loss, scar_loss, total_loss.
-        """
-        la_loss = self.la_dice_loss(la_logits, la_target.long())
-        scar_loss = torch.tensor(0.0, device=la_logits.device)
-        if has_scar.any():
-            sl = scar_logits[has_scar]
-            st = scar_target[has_scar].long()
-            scar_loss = self.w_scar_dice * self.scar_tversky(sl, st) + self.w_scar_focal * self.scar_focal(sl, st)
-            if self.w_scar_boundary > 0:
-                scar_loss = scar_loss + self.w_scar_boundary * self.scar_boundary(sl, st)
-        total_loss = self.w_la_dice * la_loss + scar_loss
-        return {"la_loss": la_loss, "scar_loss": scar_loss, "total_loss": total_loss}
+        total = torch.tensor(0.0, device=scar_logits.device)
+        n = 0
+        sigma_px = max(1.0, self.sigma_mm / min(spacing[:2]))
+        for b in range(scar_logits.shape[0]):
+            if not has_scar[b]:
+                continue
+            sl = scar_logits[b : b + 1]
+            st = scar_target[b : b + 1].long()
+            st_np = st.squeeze().cpu().numpy().astype(np.uint8)
+            if st_np.sum() == 0:
+                continue
+            # Spatial weight map
+            d = distance_transform_edt(1 - st_np).astype(np.float32)
+            w_map = 1.0 + self.spatial_w0 * np.exp(-(d**2) / (2 * sigma_px**2))
+            w_t = torch.from_numpy(w_map).to(sl.device).unsqueeze(0)  # (1,H,W,D)
+
+            # Weighted CE: CE loss weighted per-voxel by w_map
+            logp = torch.log_softmax(sl, dim=1)  # (1, 2, H, W, D)
+            ce_voxel = -logp.gather(1, st.unsqueeze(1)).squeeze(1)  # (1, H, W, D)
+            weighted_ce = (ce_voxel * w_t).mean()
+
+            dice = self.dice_loss(sl, st)
+            focal = self.focal_loss(sl, st)
+            total += self.w_dice * dice + self.w_focal * focal + self.spatial_w0 * 0.1 * weighted_ce
+            n += 1
+
+        total = total / max(n, 1)
+        return {"scar_loss": total, "total_loss": total}
 
 
 class CTLoss(nn.Module):

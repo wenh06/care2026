@@ -16,7 +16,6 @@ Both functions support test-time augmentation (TTA) via axis-flip averaging.
 
 from __future__ import annotations
 
-import warnings
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple, Union
 
@@ -33,17 +32,15 @@ from const import (
     CT_NUM_CLASSES,
     CT_TARGET_SPACING,
     MRI_CANONICAL_SHAPE,
-    MRI_PATCH_SHAPE,
     MRI_STAGE1_SHAPE,
     MRI_STAGE2_CROP_SHAPE,
 )
-from data_reader import CARE2026_CT, CARE2026_MRI
+from data_reader import CARE2026_CT
 from outputs import CARE2026Outputs
 from utils.mclahe import mclahe as _mclahe
 
 __all__ = [
     "predict_mri_two_stage",
-    "predict_mri",  # deprecated shim
     "predict_ct",
     "sliding_window_inference",
     "keep_largest_component",
@@ -224,16 +221,20 @@ def _run_stage2_model(
     img_tensor: torch.Tensor,
     device: torch.device,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Forward pass through the Stage-2 dual-head VNet/NestedVNet.
+    """Forward pass through the Stage-2 model (dual-head or scar-only).
 
     Returns
     -------
     la_prob, scar_prob : each (2, H, W, D) float32
+        ``la_prob`` is all zeros for scar-only models.
     """
     img_tensor = img_tensor.to(device, dtype=torch.float32)
     out = model.forward(img_tensor)
-    la_prob = torch.softmax(out["la_logits"], dim=1).squeeze(0).detach().cpu().numpy()
     scar_prob = torch.softmax(out["scar_logits"], dim=1).squeeze(0).detach().cpu().numpy()
+    if "la_logits" in out:
+        la_prob = torch.softmax(out["la_logits"], dim=1).squeeze(0).detach().cpu().numpy()
+    else:
+        la_prob = np.zeros_like(scar_prob)
     return la_prob, scar_prob
 
 
@@ -375,9 +376,7 @@ def predict_mri_two_stage(
 
     stage2_model.eval()
     with torch.no_grad():
-        _la_p, scar_prob_s2 = (
-            _stage2_tta(stage2_model, t_s2, device) if use_tta else _run_stage2_model(stage2_model, t_s2, device)
-        )
+        _, scar_prob_s2 = _stage2_tta(stage2_model, t_s2, device) if use_tta else _run_stage2_model(stage2_model, t_s2, device)
 
     scar_crop = _resample_mask(scar_prob_s2.argmax(axis=0).astype(np.uint8), (crop_h, crop_w, crop_d))
     scar_unpad = scar_crop[px0 : tH - px1, py0 : tW - py1, pz0 : tD - pz1]
@@ -398,95 +397,6 @@ def predict_mri_two_stage(
         source_affine=nii.affine,
         source_header=nii.header,
     )
-
-
-def predict_mri(
-    img_path: Union[str, Path],
-    model: torch.nn.Module,
-    device: Optional[torch.device] = None,
-    use_tta: bool = True,
-    patch_shape: Tuple[int, int, int] = MRI_PATCH_SHAPE,
-    pad: int = 7,
-) -> CARE2026Outputs:
-    """*Deprecated* single-model MRI inference shim.
-
-    .. deprecated::
-        Use :func:`predict_mri_two_stage` instead.  This function uses a single
-        model for both the coarse-localisation and fine-segmentation passes,
-        which does not match the two-stage training pipeline.
-    """
-    warnings.warn(
-        "predict_mri() is deprecated and does not match the two-stage training "
-        "pipeline.  Use predict_mri_two_stage() instead.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-
-    if device is None:
-        device = next(model.parameters()).device
-
-    nii = nib.load(str(img_path))
-    image_raw = nii.get_fdata().astype(np.float32)
-    orig_shape = image_raw.shape
-
-    img_coarse = CARE2026_MRI.resample_data(image_raw, patch_shape)
-    img_coarse_norm = _zscore(img_coarse)
-
-    t_coarse = torch.from_numpy(img_coarse_norm).unsqueeze(0).unsqueeze(0)
-    model.eval()
-    with torch.no_grad():
-        if use_tta:
-            la_prob_c, _ = _stage2_tta(model, t_coarse, device)
-        else:
-            la_prob_c, _ = _run_stage2_model(model, t_coarse, device)
-
-    la_coarse = la_prob_c.argmax(axis=0).astype(np.uint8)
-    la_coarse_orig = _resample_mask(la_coarse, orig_shape)
-
-    fg = np.argwhere(la_coarse_orig > 0)
-    if len(fg) == 0:
-        x0, y0, z0 = 0, 0, 0
-        x1, y1, z1 = orig_shape
-    else:
-        mins, maxs = fg.min(axis=0), fg.max(axis=0)
-        x0 = max(0, mins[0] - pad)
-        x1 = min(orig_shape[0], maxs[0] + pad)
-        y0 = max(0, mins[1] - pad)
-        y1 = min(orig_shape[1], maxs[1] + pad)
-        z0 = max(0, mins[2] - pad)
-        z1 = min(orig_shape[2], maxs[2] + pad)
-
-    crop = image_raw[x0:x1, y0:y1, z0:z1]
-    crop_shape = crop.shape
-    img_fine_norm = _zscore(CARE2026_MRI.resample_data(crop, patch_shape))
-
-    t_fine = torch.from_numpy(img_fine_norm).unsqueeze(0).unsqueeze(0)
-    with torch.no_grad():
-        if use_tta:
-            la_prob_f, scar_prob_f = _stage2_tta(model, t_fine, device)
-        else:
-            la_prob_f, scar_prob_f = _run_stage2_model(model, t_fine, device)
-
-    la_crop = _resample_mask(la_prob_f.argmax(axis=0).astype(np.uint8), crop_shape)
-    scar_crop = _resample_mask(scar_prob_f.argmax(axis=0).astype(np.uint8), crop_shape)
-
-    la_out = np.zeros(orig_shape, dtype=np.uint8)
-    scar_out = np.zeros(orig_shape, dtype=np.uint8)
-    la_out[x0:x1, y0:y1, z0:z1] = la_crop
-    scar_out[x0:x1, y0:y1, z0:z1] = scar_crop
-
-    return CARE2026Outputs(
-        task="mri",
-        la_mask=la_out,
-        scar_mask=scar_out,
-        source_affine=nii.affine,
-        source_header=nii.header,
-    )
-
-
-# ---------------------------------------------------------------------------
-# CT inference — sliding window
-# ---------------------------------------------------------------------------
 
 
 def sliding_window_inference(

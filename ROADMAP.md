@@ -26,21 +26,24 @@ Raw LGE-MRI volume (H, W, D)
         │  crop 256×256×44 around (cx, cy) in canonical space
         │
         └─────────────────────── STAGE 2 ───────────────────────
-           z-score norm on crop
-           → shared-encoder DualHeadVNet
-               ├─ Head A: LA cavity (binary) — trained on all 190 samples
-               └─ Head B: LA scar   (binary) — trained on  60 samples only
-           → place masks back in canonical space
-           → resample canonical masks → original image space
+           z-score norm on crop → resize to 128×128×44
+           → single-head VNet → LA scar (binary)
+           → upsample back to 256×256×44 → place in canonical
+           → resample to original space
+           → post-process: constrain scar to dilated Stage-1 LA
+             (2 mm dilation to cover the atrial wall)
 ```
 
 Training jitter: ±32 px random centroid offset at Stage 2 training time (simulates Stage 1 errors).
 
-Loss (Stage 2, Task 1 combined head):
+Loss (Stage 2, scar-only with spatial weighting):
 
 ```
-L_total = λ₁·L_dice(LA) + λ₂·L_dice(scar) + λ₃·L_tversky(scar) + λ₄·L_focal(scar)
+L_total = λ₁·L_dice(scar) + λ₂·L_focal(scar) + λ₃·L_ce_weighted(scar)
 ```
+where ``L_ce_weighted`` multiplies voxel-wise CE by a Gaussian spatial
+weight map ``w(x) = 1 + w₀·exp(−d²/2σ²)`` (d = distance to nearest GT
+scar voxel, w₀ = 5, σ = 2 mm).
 
 Domain generalisation for Task 2 test set (Centers B & C unseen during training):
 - **Instance Normalisation** in the Stage 2 encoder.
@@ -304,18 +307,17 @@ Input: 144×144×44, batch_size=4.  Trained to epoch 100; checkpoint at `checkpo
 
 **CLAHE variant** also trained: `log/mri1_mclahe_train.log`, same architecture but with MCLAHE preprocessing enabled.
 
-### 6.2 MRI Stage 2 — Fine LA + Scar Segmenter — ✅ Done
+### 6.2 MRI Stage 2 — Scar-Only Segmenter — ⏳ Needs retraining
 
 ```bash
 PYTORCH_ALLOC_CONF=expandable_segments:True \
-  python trainer.py --task mri --stage 2 \
-  --db-dir /Data1/wenh06/CARE2026-LeftAtrium --epochs 150 \
-  2>&1 | tee log/mri2_train.log
+  python trainer.py --task mri_scar \
+  --db-dir /Data1/wenh06/CARE2026-LeftAtrium --epochs 200 --mclahe true \
+  2>&1 | tee log/scar_train.log
 ```
 
-Input: 256×256×44, batch_size=1, AMP, grad_accum=2.  Trained to epoch 149; checkpoint at `checkpoints/mri_stage2_model.safetensors`.  Epoch snapshots 147–149 also retained at `checkpoints/CARE2026_MRI_Stage2_Model-mri2_epoch*`.
-
-**CLAHE variant** also trained: `log/mri2_mclahe_train.log`.
+Input: 128×128×44 (resized from 256×256×44 crop), batch_size=1, AMP, grad_accum=2.
+ScarLoss with spatial weight map (w₀=5, σ=2 mm).  LA cavity from Stage 1.
 
 ### 6.3 CT Baseline (Task 3) — ⏳ Not started
 
