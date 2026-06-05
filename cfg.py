@@ -149,41 +149,7 @@ MRI_Stage2_TrainCfg.debug = False
 MRI_Stage2_TrainCfg.apply_mclahe = False
 
 # ---------------------------------------------------------------------------
-# MRI Stage 2 (Scar-only) training configuration
-# ---------------------------------------------------------------------------
-# Stage 1 provides the LA cavity mask; Stage 2 focuses entirely on scar.
-# Uses ScarLoss with Gaussian spatial weighting to handle extreme class
-# imbalance (~2.4 % of LA voxels are scar).
-
-MRI_Stage2_Scar_TrainCfg = deepcopy(MRI_Stage2_TrainCfg)
-
-MRI_Stage2_Scar_TrainCfg.n_epochs = 200
-MRI_Stage2_Scar_TrainCfg.batch_size = 1
-MRI_Stage2_Scar_TrainCfg.use_amp = True
-MRI_Stage2_Scar_TrainCfg.accumulate_grad_batches = 2
-MRI_Stage2_Scar_TrainCfg.optimizer = "adamw"
-MRI_Stage2_Scar_TrainCfg.betas = (0.9, 0.999)
-MRI_Stage2_Scar_TrainCfg.decay = 1e-2
-MRI_Stage2_Scar_TrainCfg.learning_rate = 3e-4
-MRI_Stage2_Scar_TrainCfg.lr = MRI_Stage2_Scar_TrainCfg.learning_rate
-MRI_Stage2_Scar_TrainCfg.lr_scheduler = "cosine"
-MRI_Stage2_Scar_TrainCfg.lr_min = 1e-6
-MRI_Stage2_Scar_TrainCfg.train_crop_hw = 128
-MRI_Stage2_Scar_TrainCfg.aug_prob = 0.5
-MRI_Stage2_Scar_TrainCfg.keep_checkpoint_max = 3
-MRI_Stage2_Scar_TrainCfg.log_step = 10
-MRI_Stage2_Scar_TrainCfg.debug = False
-MRI_Stage2_Scar_TrainCfg.apply_mclahe = False
-# Scar-specific: no LA head (LA from Stage 1), spatial weight for scar
-MRI_Stage2_Scar_TrainCfg.loss_weights = CFG(
-    scar_dice=1.0,
-    scar_focal=0.5,
-    spatial_w0=5.0,
-    spatial_sigma_mm=2.0,
-)
-
-# ---------------------------------------------------------------------------
-# CT training configuration (Task 3 — CPS semi-supervised UNet3D)
+# CT training configuration (Task 3 — semi-supervised VNet)
 # ---------------------------------------------------------------------------
 
 CT_TrainCfg = deepcopy(BaseCfg)
@@ -213,9 +179,15 @@ CT_TrainCfg.lr_poly_power = 0.9
 # Augmentation
 CT_TrainCfg.aug_prob = 0.5
 
-# Cross Pseudo Supervision (CPS) settings
-CT_TrainCfg.cps_lambda_max = 1.0  # maximum CPS consistency weight
-CT_TrainCfg.cps_rampup_epochs = 30  # ramp λ_cps linearly from 0 → cps_lambda_max
+# Semi-supervised mode: "cps" or "mean_teacher"
+CT_TrainCfg.semi_supervised_mode = "cps"
+CT_TrainCfg.consistency_rampup_epochs = 30
+# CPS
+CT_TrainCfg.cps_lambda_max = 1.0
+# Mean Teacher (Tarvainen & Valpola, NeurIPS 2017)
+# Teacher EMA decay: θ_t ← α·θ_t + (1−α)·θ_s (α=0.99 per step)
+CT_TrainCfg.mt_ema_decay = 0.99
+CT_TrainCfg.mt_consistency_weight = 1.0  # λ_consist in L_total = L_sup + λ·L_consist
 
 # Loss weights (supervised Dice + CE on labeled, CPS on all)
 CT_TrainCfg.loss_weights = CFG(

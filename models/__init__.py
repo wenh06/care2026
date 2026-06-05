@@ -177,7 +177,17 @@ class CARE2026_MRI_Stage2_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
 
 
 class CARE2026_CT_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
-    """CPS CT model (Task 3) — two VNets for semi-supervised learning."""
+    """Semi-supervised CT model (Task 3).
+
+    Supports two modes configured via ``CT_TrainCfg.semi_supervised_mode``:
+
+    - **"cps"**: Cross Pseudo Supervision — two independent VNets
+      cross-supervise each other via pseudo-labels.
+    - **"mean_teacher"**: Mean Teacher (Tarvainen & Valpola, NeurIPS
+      2017) — a single student VNet is supervised by labeled data and
+      by the consistency between its predictions and those of an EMA
+      teacher model on unlabeled data.
+    """
 
     __name__ = "CARE2026_CT_Model"
 
@@ -189,16 +199,49 @@ class CARE2026_CT_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
         self.__train_config = deepcopy(CT_TrainCfg)
         if train_config is not None:
             self.__train_config.update(deepcopy(train_config))
+
+        self.mode = self.__train_config.get("semi_supervised_mode", "cps")
+        if self.mode not in ("cps", "mean_teacher"):
+            raise ValueError(f"Unknown semi_supervised_mode: {self.mode}")
+
         self.model1 = VNet(self.config.vnet_ct)
-        self.model2 = VNet(self.config.vnet_ct)
+        if self.mode == "cps":
+            self.model2 = VNet(self.config.vnet_ct)
+        else:
+            # Mean Teacher: EMA teacher model (no grad)
+            self.teacher = VNet(self.config.vnet_ct)
+            self.teacher.load_state_dict(self.model1.state_dict())
+            for p in self.teacher.parameters():
+                p.requires_grad = False
         self.criterion = CTLoss(self.train_config)
+        self._mt_decay = float(self.__train_config.get("mt_ema_decay", 0.99))
+
+    def _update_teacher(self) -> None:
+        """EMA update: θ_t ← α·θ_t + (1−α)·θ_s (applied in train mode)."""
+        if not hasattr(self, "teacher"):
+            return
+        alpha = self._mt_decay
+        with torch.no_grad():
+            for tp, sp in zip(self.teacher.parameters(), self.model1.parameters()):
+                tp.data.mul_(alpha).add_(sp.data, alpha=1.0 - alpha)
 
     def forward(
         self, img: torch.Tensor, labels: Optional[Dict[str, torch.Tensor]] = None, cps_weight: float = 1.0
     ) -> Dict[str, torch.Tensor]:
         img = img.to(device=self.device, dtype=self.dtype)
-        logits1, logits2 = self.model1(img), self.model2(img)
-        output = {"logits1": logits1, "logits2": logits2, "seg_mask": ((logits1 + logits2) / 2).argmax(dim=1)}
+        if self.mode == "cps":
+            logits1, logits2 = self.model1(img), self.model2(img)
+            seg_mask = ((logits1 + logits2) / 2).argmax(dim=1)
+            output = {"logits1": logits1, "logits2": logits2, "seg_mask": seg_mask}
+        else:
+            logits_s = self.model1(img)
+            seg_mask = logits_s.argmax(dim=1)
+            output = {"logits1": logits_s, "seg_mask": seg_mask}
+            if self.training:
+                with torch.no_grad():
+                    logits_t = self.teacher(img)
+                    output["logits_t"] = logits_t
+
         if labels is not None:
             target = labels.get("ct_mask")
             labeled_mask = labels.get("labeled")
@@ -207,7 +250,12 @@ class CARE2026_CT_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
             if labeled_mask is not None:
                 labeled_mask = labeled_mask.to(self.device)
             loss_dict = self.criterion(
-                logits1=logits1, logits2=logits2, target=target, labeled_mask=labeled_mask, cps_weight=cps_weight
+                logits1=output.get("logits1"),
+                logits2=output.get("logits2"),
+                logits_t=output.get("logits_t") if self.mode == "mean_teacher" else None,
+                target=target,
+                labeled_mask=labeled_mask,
+                cps_weight=cps_weight,
             )
             output.update(loss_dict)
         return output

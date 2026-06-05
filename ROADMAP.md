@@ -49,11 +49,15 @@ Domain generalisation for Task 2 test set (Centers B & C unseen during training)
 - **Instance Normalisation** in the Stage 2 encoder.
 - **Aggressive augmentation**: random gamma, random intensity shift, elastic deformation, random flip.
 
-### Task 3 — CT (Semi-supervised 3D U-Net)
+### Task 3 — CT (Semi-supervised V-Net)
 
 100 of 150 training CTs have no labels; the model must leverage unlabelled data.
 
-**Cross Pseudo Supervision (CPS)** with two parallel 3D V-Nets:
+Two semi-supervised modes, switched via ``CT_TrainCfg.semi_supervised_mode``:
+
+#### Mode 1: CPS (current default)
+
+Cross Pseudo Supervision [Chen et al., 2021] with two parallel 3D V-Nets:
 
 ```
 Labelled batch
@@ -65,13 +69,42 @@ Unlabelled batch
        └─ Model 2 forward → pseudo-labels → supervise Model 1
 ```
 
-Loss:
-
-```
 L_total = L_sup(M1) + L_sup(M2) + λ_cps · [L_cps(M1←M2) + L_cps(M2←M1)]
+
+λ_cps ramps from 0 → 1 over 30 epochs.
+
+**Drawback**: both models can converge to similar errors (confirmation bias).
+
+#### Mode 2: Mean Teacher (backup)
+
+Mean Teacher [Tarvainen & Valpola, NeurIPS 2017] — single student VNet
++ EMA teacher.  The teacher's predictions serve as a consistency target
+for the student on unlabelled data.
+
+```
+Labelled batch  →  student → supervised loss (Dice + CE)
+Unlabelled batch →  student → softmax(x_s)
+                    teacher  → softmax(x_t)  (no grad)
+                    L_consist = MSE(softmax(x_s), softmax(x_t))
 ```
 
-`λ_cps` is ramped up from 0 → 1 over 20 epochs to avoid early noisy pseudo-labels.
+Teacher updated via EMA: θ_t ← α·θ_t + (1−α)·θ_s  (α = 0.99/step).
+
+**Why this works for LA**: the LA cavity is a large, well-defined
+structure — teacher predictions are stable; student consistency acts as
+a smoothness regulariser.  Validated on the LA benchmark by Wu et al.
+(MICCAI 2021, Mutual Consistency Training), MisMatch (IEEE TMI 2023),
+and Geometry-Aware Consistency Training (arXiv 2024).
+
+#### Other approaches surveyed (for reference)
+
+| Method | Venue | Key idea | LA dataset |
+|--------|-------|----------|-----------|
+| Mutual Consistency | MICCAI 2021 | Dual-view consistency | ✓ |
+| MisMatch | IEEE TMI 2023 | Morphological perturbation consistency | ✓ |
+| OMF | MICCAI 2024 | Teacher-student overlay augmentation | ✓ |
+| Geometry-Aware | arXiv 2024 | Geometric consistency + boundary weighting | ✓ |
+| FixMatch | NeurIPS 2020 | Weak→strong augmentation pseudo-labeling | ✗ |
 
 Additional tricks:
 - CT windowing to soft-tissue window (clip to −200…+800 HU, normalise to [0,1]).

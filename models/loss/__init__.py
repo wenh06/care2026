@@ -145,62 +145,57 @@ class ScarLoss(nn.Module):
 
 
 class CTLoss(nn.Module):
-    """Loss for CT semi-supervised CPS training.
-
-    Supervised component: DiceCELoss on labeled samples.
-    CPS component: CrossEntropyLoss between model predictions.
+    """Loss for CT semi-supervised training (CPS or Mean Teacher).
 
     Parameters
     ----------
     cfg : CFG
-        Training configuration with loss_weights: sup_dice, sup_ce, cps.
+        ``loss_weights``: sup_dice, sup_ce, cps (or mt_consist).
     """
 
     def __init__(self, cfg) -> None:
         super().__init__()
         w = cfg.loss_weights
-        self.supervised_loss = DiceCELoss(
-            dice_weight=w.get("sup_dice", 0.5),
-            ce_weight=w.get("sup_ce", 0.5),
-        )
-        self.cps_loss_fn = nn.CrossEntropyLoss()
+        self.supervised_loss = DiceCELoss(dice_weight=w.get("sup_dice", 0.5), ce_weight=w.get("sup_ce", 0.5))
+        self.consistency_fn = nn.MSELoss()  # Mean Teacher: MSE between softmax outputs
         self.w_cps = w.get("cps", 1.0)
+        self.w_mt = w.get("mt_consist", 1.0)
 
     def forward(
         self,
         logits1: torch.Tensor,
-        logits2: torch.Tensor,
+        logits2: Optional[torch.Tensor] = None,
+        logits_t: Optional[torch.Tensor] = None,
         target: Optional[torch.Tensor] = None,
         labeled_mask: Optional[torch.Tensor] = None,
         cps_weight: float = 1.0,
     ) -> dict:
-        """Compute CT combined loss.
-
-        Parameters
-        ----------
-        logits1 : torch.Tensor, shape (B, 4, H, W, D)
-        logits2 : torch.Tensor, shape (B, 4, H, W, D)
-        target : torch.Tensor, optional, shape (B, H, W, D), dtype long
-        labeled_mask : torch.Tensor, optional, shape (B,), dtype bool
-        cps_weight : float, default 1.0
-            Ramp-up factor (0→1).
-
-        Returns
-        -------
-        dict
-            Keys: sup_loss, cps_loss, total_loss.
-        """
-        sup_loss = torch.tensor(0.0, device=logits1.device)
+        sup_loss = logits1.sum() * 0.0
         if target is not None and labeled_mask is not None and labeled_mask.any():
-            l1 = logits1[labeled_mask]
-            l2 = logits2[labeled_mask]
-            tgt = target[labeled_mask].long()
-            sup_loss = 0.5 * (self.supervised_loss(l1, tgt) + self.supervised_loss(l2, tgt))
+            if logits2 is not None:
+                # CPS: supervised loss on both models
+                l1 = logits1[labeled_mask]
+                l2 = logits2[labeled_mask]
+                tgt = target[labeled_mask].long()
+                sup_loss = 0.5 * (self.supervised_loss(l1, tgt) + self.supervised_loss(l2, tgt))
+            else:
+                # Mean Teacher: supervised loss on student only
+                sup_loss = self.supervised_loss(logits1[labeled_mask], target[labeled_mask].long())
 
-        with torch.no_grad():
-            pseudo1 = logits1.argmax(dim=1)
-            pseudo2 = logits2.argmax(dim=1)
-        cps = 0.5 * (self.cps_loss_fn(logits1, pseudo2) + self.cps_loss_fn(logits2, pseudo1))
-        cps_loss = self.w_cps * cps_weight * cps
+        # Consistency loss
+        consist_loss = logits1.sum() * 0.0
+        if logits_t is not None:
+            # Mean Teacher: MSE(student_softmax, teacher_softmax)
+            consist_loss = (
+                self.w_mt * cps_weight * self.consistency_fn(torch.softmax(logits1, dim=1), torch.softmax(logits_t, dim=1))
+            )
+        elif logits2 is not None:
+            # CPS: cross-pseudo-label CE
+            with torch.no_grad():
+                pseudo1 = logits1.argmax(dim=1)
+                pseudo2 = logits2.argmax(dim=1)
+            cps1 = nn.functional.cross_entropy(logits1, pseudo2)
+            cps2 = nn.functional.cross_entropy(logits2, pseudo1)
+            consist_loss = self.w_cps * cps_weight * 0.5 * (cps1 + cps2)
 
-        return {"sup_loss": sup_loss, "cps_loss": cps_loss, "total_loss": sup_loss + cps_loss}
+        return {"sup_loss": sup_loss, "consist_loss": consist_loss, "total_loss": sup_loss + consist_loss}

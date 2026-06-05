@@ -222,10 +222,13 @@ class _BaseCARE2026Trainer(BaseTrainer):
                     self.optimizer.step()
                 self.optimizer.zero_grad()
                 self._update_lr()
+                # Mean Teacher EMA update (no-op for non-MT models)
+                if hasattr(self._model, "_update_teacher"):
+                    self._model._update_teacher()
 
             if self.global_step % self.train_config.log_step == 0:
                 step_metrics = {"loss": loss_for_log}
-                for key in ["la_loss", "scar_loss", "sup_loss", "cps_loss"]:
+                for key in ["la_loss", "scar_loss", "sup_loss", "cps_loss", "consist_loss"]:
                     if key in out_tensors:
                         value = out_tensors[key]
                         if isinstance(value, torch.Tensor):
