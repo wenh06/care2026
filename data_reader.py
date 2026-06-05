@@ -78,8 +78,25 @@ _CARE2026_MRI_INFO = DataBaseInfo(
 
     Annotation:
       LA cavity mask: raw values {0, ~420}, normalised to {0, 1} on load.
-      LA scar mask:   values {0, 1}; average scar-to-LA ratio ≈ 5–15 %.
-      Class imbalance ratio (scar vs. non-scar within LA): ~ 1 : 10–20.
+      LA scar mask:   values {0, 1}; average scar-to-LA ratio ≈ 2–5 %.
+      Class imbalance ratio (scar vs. non-scar within LA wall): ~ 1 : 20–50.
+
+    Scar spatial distribution (verified on training set, N = 60):
+    ─────────────────────────────────────────────────────────────
+      LA scar is located in the atrial wall (~1–3 mm thick), which
+      surrounds the LA cavity (blood pool).  Key statistics:
+        - ~32 % of scar voxels lie *inside* the cavity mask
+          (partial-volume overlap with the thin wall).
+        - ~68 % are *outside* the cavity, within the wall proper.
+        - Median distance to the nearest cavity voxel: 1.0 px
+          (0.625 mm in-plane).
+        - 92.6 % of scar voxels are within 2 mm of the cavity
+          boundary (≈ 3.2 px in-plane).
+
+      → Post-processing: constrain scar to a *dilated* cavity mask
+        (dilation ≈ 2–3 px ≈ 1.25–1.9 mm) rather than the cavity
+        itself.  Using the raw (undilated) cavity mask would discard
+        ~68 % of true scar voxels.
     """,
     usage=[
         "LA Scar Quantification",
@@ -405,8 +422,8 @@ class CARE2026_MRI(_DataBase):
     ) -> np.ndarray:
         """Compute the axis-aligned bounding box of the LA cavity annotation.
 
-        The LA cavity is used as the reference region for both tasks (the scar
-        lies entirely within it).
+        The LA cavity is used as the reference region for cropping; scar lies
+        in the atrial wall *around* the cavity (see module-level docs).
 
         Parameters
         ----------
