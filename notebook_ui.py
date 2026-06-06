@@ -392,10 +392,12 @@ class InferencePanel:
         rec = self._dd_sample.value
         sl = self._sl_slice.value
         live = self._live_output
+        live_mask = None
         if live is not None:
-            live_mask = live.get("ct") or live.get("scar") or live.get("la")
-        else:
-            live_mask = None
+            for key in ("ct", "scar", "la"):
+                if key in live:
+                    live_mask = live[key]
+                    break
 
         # Left: Live
         self._out_live.clear_output(wait=True)
