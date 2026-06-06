@@ -85,15 +85,18 @@ class InferencePanel:
         row1 = HBox([self._dd_s1, self._dd_s2, self._dd_ct, self._btn_load, self._btn_refresh])
 
         # -- Controls row 2: run selection -------------------------------------
-        self._dd_run = Dropdown(options=[], description="Existing:", layout={"width": "300px"})
-        self._txt_new = Text(
-            value="", placeholder="leave empty for auto timestamp", description="New run:", layout={"width": "300px"}
-        )
-        self._btn_save = Button(description="Save", button_style="success")
+        self._dd_run = Dropdown(options=[], description="Run:", layout={"width": "250px"})
+        self._btn_save = Button(description="Save to Run", button_style="success")
         self._btn_save.on_click(self._on_save)
         self._btn_pkg = Button(description="Package", button_style="warning")
         self._btn_pkg.on_click(self._on_package)
-        row2 = HBox([self._dd_run, self._txt_new, self._btn_save, self._btn_pkg])
+        self._lbl_run_hint = HTML(
+            value="<i>New predictions saved to selected run. Use the text field below to type a new run name before saving.</i>"
+        )
+        self._txt_new = Text(
+            value="", placeholder="Type new run name here (or leave empty to auto-generate)", layout={"width": "350px"}
+        )
+        row2 = HBox([self._dd_run, self._btn_save, self._btn_pkg])
 
         # -- Controls row 3: task / sample -------------------------------------
         self._dd_task = Dropdown(
@@ -108,17 +111,23 @@ class InferencePanel:
 
         # -- Controls row 4: threshold sliders ---------------------------------
         self._sl_s1 = FloatSlider(
-            min=0.01, max=0.99, step=0.01, value=0.5, description="S1 LA:", continuous_update=False, layout={"width": "280px"}
+            min=0.01, max=0.99, step=0.01, value=0.5, description="S1 LA:", continuous_update=True, layout={"width": "280px"}
         )
         self._sl_s2 = FloatSlider(
-            min=0.01, max=0.99, step=0.01, value=0.5, description="S2 Scar:", continuous_update=False, layout={"width": "280px"}
+            min=0.01, max=0.99, step=0.01, value=0.5, description="S2 Scar:", continuous_update=True, layout={"width": "280px"}
         )
         self._sl_ct = FloatSlider(
-            min=0.01, max=0.99, step=0.01, value=0.5, description="CT:", continuous_update=False, layout={"width": "280px"}
+            min=0.01, max=0.99, step=0.01, value=0.5, description="CT:", continuous_update=True, layout={"width": "280px"}
         )
         for sl in (self._sl_s1, self._sl_s2, self._sl_ct):
             sl.observe(self._on_threshold_change, names="value")
         row4 = HBox([self._sl_s1, self._sl_s2, self._sl_ct])
+
+        # -- Shared slice slider (controls both panels) ------------------------
+        self._sl_slice = IntSlider(
+            min=0, max=100, step=1, value=0, description="Slice:", continuous_update=False, layout={"width": "400px"}
+        )
+        self._sl_slice.observe(self._on_slice_change, names="value")
 
         # -- Status label ------------------------------------------------------
         self._lbl_status = HTML(value="")
@@ -133,8 +142,11 @@ class InferencePanel:
                 row1,
                 HTML("<b>Run</b>"),
                 row2,
+                self._txt_new,
+                self._lbl_run_hint,
                 row3,
                 row4,
+                self._sl_slice,
                 self._lbl_status,
             ]
         )
@@ -309,55 +321,78 @@ class InferencePanel:
         if data is None:
             return
 
-        task = self._dd_task.value
         rec = self._dd_sample.value
         n_slices = data.shape[-1]
-        mid = n_slices // 2
+        self._sl_slice.max = n_slices - 1
+        self._sl_slice.value = n_slices // 2
 
-        def _draw_panel(out_widget, title, mask, show_mask=True):
-            out_widget.clear_output(wait=True)
-            with out_widget:
+        # Cache for threshold / slice updates
+        self._cached_data = data
+        self._cached_saved = saved
 
-                def _plot(sl=mid):
-                    fig, ax = plt.subplots(figsize=(7, 7))
-                    ax.imshow(data[..., sl], cmap="gray", origin="lower")
-                    if show_mask and mask is not None:
-                        _overlay(ax, mask, sl, task)
-                    ax.set_title(f"{title} — {rec}  (slice {sl + 1}/{n_slices})")
-                    ax.axis("off")
-                    _add_legend(ax, task, mask is not None and show_mask)
-                    fig.tight_layout()
-                    plt.show()
+        self._render_both_panels()
 
-                from ipywidgets import interact
+    def _render_both_panels(self) -> None:
+        """Re-render both panels from cached data at current slice + thresholds."""
+        data = getattr(self, "_cached_data", None)
+        saved = getattr(self, "_cached_saved", None)
+        if data is None:
+            return
 
-                interact(_plot, sl=IntSlider(min=0, max=n_slices - 1, step=1, value=mid, description="Slice"))
-
-        # Left: live preview
-        _draw_panel(self._out_live, "Live Preview", live)
-
-        # Right: saved prediction
-        if saved is not None:
-            _draw_panel(self._out_saved, "Saved", saved)
+        task = self._dd_task.value
+        rec = self._dd_sample.value
+        sl = self._sl_slice.value
+        live = self._live_output
+        if live is not None:
+            live_mask = live.get("ct") or live.get("scar") or live.get("la")
         else:
-            self._out_saved.clear_output(wait=True)
-            with self._out_saved:
+            live_mask = None
+
+        # Left: Live
+        self._out_live.clear_output(wait=True)
+        with self._out_live:
+            self._draw_single(data, live_mask, sl, task, rec, "Live Preview")
+
+        # Right: Saved
+        self._out_saved.clear_output(wait=True)
+        with self._out_saved:
+            if saved is not None:
+                saved_mask = saved
+                self._draw_single(data, saved_mask, sl, task, rec, "Saved")
+            else:
                 print("(Not predicted yet — click Save)")
+
+    @staticmethod
+    def _draw_single(data, mask, sl, task, rec, title):
+        fig, ax = plt.subplots(figsize=(7, 7))
+        ax.imshow(data[..., sl], cmap="gray", origin="lower")
+        if mask is not None:
+            _overlay(ax, mask, sl, task)
+        ax.set_title(f"{title} — {rec}  (slice {sl + 1}/{data.shape[-1]})")
+        ax.axis("off")
+        _add_legend(ax, task, mask is not None)
+        fig.tight_layout()
+        plt.show()
 
     # ------------------------------------------------------------------
     # Threshold change
     # ------------------------------------------------------------------
 
     def _on_threshold_change(self, change) -> None:
-        # Re-run preview if any output already shown
+        """Threshold slider moved — re-run inference and update live panel."""
+        if not self._out_live.outputs:
+            return
+        data, live, saved = self._run_inference()
+        if data is None or live is None:
+            return
+        self._cached_data = data
+        self._cached_saved = saved
+        self._render_both_panels()
+
+    def _on_slice_change(self, change) -> None:
+        """Shared slice slider moved — re-render both panels at new slice."""
         if self._out_live.outputs:
-            data, live, saved = self._run_inference()
-            if data is None or live is None:
-                return
-            # Only update live panel
-            self._out_live.clear_output(wait=True)
-            with self._out_live:
-                self._render_slice_view(data, live, self._dd_task.value, self._dd_sample.value, "Live Preview")
+            self._render_both_panels()
 
     # ------------------------------------------------------------------
     # Save
@@ -430,28 +465,6 @@ class InferencePanel:
 
         zip_path = package_submission(results_dir=results_dir, team_name="REVENGER")
         self._lbl_status.value = f"<b style='color:green'>Package:</b> {zip_path}"
-
-    # ------------------------------------------------------------------
-    # Slice-view helpers
-    # ------------------------------------------------------------------
-
-    def _render_slice_view(self, data, mask, task, rec, title):
-        n_slices = data.shape[-1]
-        mid = n_slices // 2
-
-        def _plot(sl=mid):
-            fig, ax = plt.subplots(figsize=(7, 7))
-            ax.imshow(data[..., sl], cmap="gray", origin="lower")
-            _overlay(ax, mask, sl, task)
-            ax.set_title(f"{title} — {rec}  (slice {sl + 1}/{n_slices})")
-            ax.axis("off")
-            _add_legend(ax, task, mask is not None)
-            fig.tight_layout()
-            plt.show()
-
-        from ipywidgets import interact
-
-        interact(_plot, sl=IntSlider(min=0, max=n_slices - 1, step=1, value=mid, description="Slice"))
 
     def show(self) -> None:
         display(self._ui)
