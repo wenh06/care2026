@@ -7,6 +7,8 @@ adjusting thresholds with live preview, and packaging submissions.
 
 from __future__ import annotations
 
+import json
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -17,7 +19,7 @@ import nibabel as nib
 import numpy as np
 import torch
 from IPython.display import display
-from ipywidgets import HTML, Button, Dropdown, FloatSlider, HBox, IntSlider, Output, VBox
+from ipywidgets import HTML, Button, Dropdown, FloatSlider, HBox, IntSlider, Output, Text, VBox
 
 from outputs import package_submission
 from predict import predict_ct, predict_mri_two_stage
@@ -83,8 +85,10 @@ class InferencePanel:
         row1 = HBox([self._dd_s1, self._dd_s2, self._dd_ct, self._btn_load, self._btn_refresh])
 
         # -- Controls row 2: run selection -------------------------------------
-        self._dd_run = Dropdown(options=[], description="Run:", layout={"width": "300px"})
-        self._txt_new = Dropdown(options=["(auto)", "(latest)"], value="(auto)", description="New:", layout={"width": "300px"})
+        self._dd_run = Dropdown(options=[], description="Existing:", layout={"width": "300px"})
+        self._txt_new = Text(
+            value="", placeholder="leave empty for auto timestamp", description="New run:", layout={"width": "300px"}
+        )
         self._btn_save = Button(description="Save", button_style="success")
         self._btn_save.on_click(self._on_save)
         self._btn_pkg = Button(description="Package", button_style="warning")
@@ -143,20 +147,50 @@ class InferencePanel:
     # ------------------------------------------------------------------
 
     def _scan_checkpoints(self) -> None:
-        def _opts(pattern):
-            files = sorted(self.ckpt_dir.glob(pattern))
-            return [(p.name, str(p)) for p in files] or [("(none)", "")]
+        """Scan safetensors files, read metadata to identify model type."""
+        from safetensors import safe_open
 
-        self._dd_s1.options = _opts("*mri1*.safetensors")
-        self._dd_s2.options = _opts("*mri2*.safetensors") + _opts("*scar*.safetensors")
-        self._dd_ct.options = _opts("*ct*.safetensors")
+        s1_opts, s2_opts, ct_opts = [], [], []
+        for p in sorted(self.ckpt_dir.glob("*.safetensors")):
+            try:
+                with safe_open(str(p), framework="pt") as f:
+                    meta = f.metadata()
+                tc = json.loads(meta.get("train_config", "{}"))
+                task = tc.get("task", "")
+                stage = tc.get("stage", "")
+                mclahe = tc.get("apply_mclahe", False)
+                epochs = tc.get("n_epochs", "?")
+                label = p.name
+                if epochs != "?":
+                    label = f"{p.name}  [{epochs}ep]"
+                if mclahe:
+                    label += " CLAHE"
+                val = str(p)
+                if task == "mri" and stage == 1:
+                    s1_opts.append((label, val))
+                elif task == "mri" and stage == 2:
+                    s2_opts.append((label, val))
+                elif task == "ct":
+                    ct_opts.append((label, val))
+            except Exception:
+                # Fall back to heuristic for files without metadata
+                name = p.name.lower()
+                if "stage1" in name or re.search(r"mri1\d|mri1_|mri1\.", name):
+                    s1_opts.append((p.name, str(p)))
+                elif "stage2" in name or re.search(r"mri2\d|mri2_|mri2\.|scar", name):
+                    s2_opts.append((p.name, str(p)))
+                elif "ct" in name:
+                    ct_opts.append((p.name, str(p)))
+
+        self._dd_s1.options = s1_opts or [("(none)", "")]
+        self._dd_s2.options = s2_opts or [("(none)", "")]
+        self._dd_ct.options = ct_opts or [("(none)", "")]
 
     def _refresh_runs(self) -> None:
         runs = []
         if self.out_root.exists():
             runs = sorted([d.name for d in self.out_root.iterdir() if d.is_dir() and d.name.startswith("run_")], reverse=True)
         self._dd_run.options = [(r, r) for r in runs]
-        self._txt_new.options = ["(auto)", "(latest)"] + runs
         if runs:
             self._dd_run.value = runs[0]
 
@@ -336,14 +370,14 @@ class InferencePanel:
             self._lbl_status.value = "<b style='color:red'>Nothing to save. Run Preview first.</b>"
             return
 
-        run = self._dd_run.value
-        txt_val = self._txt_new.value
-        if not run or txt_val == "(auto)":
+        # Determine run name: new-run text field takes priority, else pick existing
+        new_name = self._txt_new.value.strip()
+        if new_name:
+            run = new_name
+        elif self._dd_run.value:
+            run = self._dd_run.value
+        else:
             run = datetime.now().strftime("run_%Y%m%d_%H%M%S")
-        elif txt_val == "(latest)":
-            run = self._dd_run.options[0][0] if self._dd_run.options else datetime.now().strftime("run_%Y%m%d_%H%M%S")
-        elif txt_val != run:
-            run = txt_val
 
         dir_map = {1: "LA scar quantification", 2: "LA cavity segmentation", 3: "LA multi-structure segmentation"}
         save_dir = self.out_root / run / dir_map[task] / rec
