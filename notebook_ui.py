@@ -67,6 +67,7 @@ class InferencePanel:
         self._build()
         self._scan_checkpoints()
         self._refresh_runs()
+        self._update_task_hint()
 
     # ------------------------------------------------------------------
     # Build
@@ -81,8 +82,10 @@ class InferencePanel:
         self._btn_load.on_click(self._on_load_models)
         self._btn_refresh = Button(description="↻", layout={"width": "40px"})
         self._btn_refresh.on_click(self._on_refresh)
+        self._lbl_task_hint = HTML(value="")
 
         row1 = HBox([self._dd_s1, self._dd_s2, self._dd_ct, self._btn_load, self._btn_refresh])
+        row1b = self._lbl_task_hint
 
         # -- Controls row 2: run selection -------------------------------------
         self._dd_run = Dropdown(options=[], description="Run:", layout={"width": "250px"})
@@ -111,13 +114,13 @@ class InferencePanel:
 
         # -- Controls row 4: threshold sliders ---------------------------------
         self._sl_s1 = FloatSlider(
-            min=0.01, max=0.99, step=0.01, value=0.5, description="S1 LA:", continuous_update=True, layout={"width": "280px"}
+            min=0.01, max=0.99, step=0.01, value=0.5, description="S1 LA:", continuous_update=False, layout={"width": "280px"}
         )
         self._sl_s2 = FloatSlider(
-            min=0.01, max=0.99, step=0.01, value=0.5, description="S2 Scar:", continuous_update=True, layout={"width": "280px"}
+            min=0.01, max=0.99, step=0.01, value=0.5, description="S2 Scar:", continuous_update=False, layout={"width": "280px"}
         )
         self._sl_ct = FloatSlider(
-            min=0.01, max=0.99, step=0.01, value=0.5, description="CT:", continuous_update=True, layout={"width": "280px"}
+            min=0.01, max=0.99, step=0.01, value=0.5, description="CT:", continuous_update=False, layout={"width": "280px"}
         )
         for sl in (self._sl_s1, self._sl_s2, self._sl_ct):
             sl.observe(self._on_threshold_change, names="value")
@@ -140,6 +143,7 @@ class InferencePanel:
             [
                 HTML("<b>Models</b>"),
                 row1,
+                row1b,
                 HTML("<b>Run</b>"),
                 row2,
                 self._txt_new,
@@ -194,9 +198,9 @@ class InferencePanel:
                 elif "ct" in name:
                     ct_opts.append((p.name, str(p)))
 
-        self._dd_s1.options = s1_opts or [("(none)", "")]
-        self._dd_s2.options = s2_opts or [("(none)", "")]
-        self._dd_ct.options = ct_opts or [("(none)", "")]
+        self._dd_s1.options = [("(none)", "")] + s1_opts
+        self._dd_s2.options = [("(none)", "")] + s2_opts
+        self._dd_ct.options = [("(none)", "")] + ct_opts
 
     def _refresh_runs(self) -> None:
         runs = []
@@ -218,21 +222,34 @@ class InferencePanel:
     def _on_load_models(self, _btn) -> None:
         from models import CARE2026_CT_Model, CARE2026_MRI_Stage1_Model, CARE2026_MRI_Stage2_Model
 
-        loaded = []
-        for name, dd, key in [
-            ("S1", self._dd_s1, "_s1_model"),
-            ("S2", self._dd_s2, "_s2_model"),
-            ("CT", self._dd_ct, "_ct_model"),
+        loaded, unloaded = [], []
+        for name, dd, keys in [
+            ("S1", self._dd_s1, ["_s1_model"]),
+            ("S2", self._dd_s2, ["_s2_model"]),
+            ("CT", self._dd_ct, ["_ct_model"]),
         ]:
             path = dd.value
             if not path or Path(path).name == "(none)":
+                for key in keys:
+                    if getattr(self, key) is not None:
+                        setattr(self, key, None)
+                        unloaded.append(name)
                 continue
             cls_map = {"S1": CARE2026_MRI_Stage1_Model, "S2": CARE2026_MRI_Stage2_Model, "CT": CARE2026_CT_Model}
             model, aux = cls_map[name].from_checkpoint(path, device=self._device)
             model.train_config.update(aux)
-            setattr(self, key, model.to(self._device).eval())
+            for key in keys:
+                setattr(self, key, model.to(self._device).eval())
             loaded.append(f"{name}={Path(path).name}")
-        self._lbl_status.value = f"<b>Loaded:</b> {', '.join(loaded)}" if loaded else "<i>No models selected.</i>"
+
+        parts = []
+        if loaded:
+            parts.append(f"<b>Loaded:</b> {', '.join(loaded)}")
+        if unloaded:
+            parts.append(f"<b>Unloaded:</b> {', '.join(unloaded)}")
+        self._lbl_status.value = " &nbsp;|&nbsp; ".join(parts) if parts else "<i>No models selected.</i>"
+        self._update_task_options()
+        self._update_task_hint()
         self._on_task_change(None)
 
     # ------------------------------------------------------------------
@@ -254,6 +271,38 @@ class InferencePanel:
         dir_map = {1: "LA scar quantification", 2: "LA cavity segmentation", 3: "LA multi-structure segmentation"}
         p = self.out_root / run / dir_map[task] / rec / f"{rec}_pred.nii.gz"
         return p if p.exists() else None
+
+    _TASK_REQUIREMENTS = {1: ["S1", "S2"], 2: ["S1"], 3: ["CT"]}
+
+    def _available_tasks(self) -> List[int]:
+        avail = []
+        if self._s1_model is not None and self._s2_model is not None:
+            avail.append(1)
+        if self._s1_model is not None:
+            avail.append(2)
+        if self._ct_model is not None:
+            avail.append(3)
+        return avail
+
+    def _update_task_options(self) -> None:
+        avail = self._available_tasks()
+        task_labels = {1: "Task 1 — scar", 2: "Task 2 — cavity", 3: "Task 3 — CT"}
+        current = self._dd_task.value
+        self._dd_task.options = [(task_labels[t], t) for t in avail]
+        if current in avail:
+            self._dd_task.value = current
+        elif avail:
+            self._dd_task.value = avail[0]
+
+    def _update_task_hint(self) -> None:
+        lines = []
+        for t, reqs in self._TASK_REQUIREMENTS.items():
+            loaded = all(getattr(self, f"_{r.lower()}_model") is not None for r in reqs)
+            icon = "✓" if loaded else "✗"
+            lines.append(
+                f'<span style="color:{"green" if loaded else "red"}">{icon} Task {t}: requires {", ".join(reqs)}</span>'
+            )
+        self._lbl_task_hint.value = " &nbsp;|&nbsp; ".join(lines)
 
     def _on_task_change(self, change) -> None:
         task = self._dd_task.value
