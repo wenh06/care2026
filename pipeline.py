@@ -100,6 +100,8 @@ def run_task1_inference(
     results_dir: Union[str, Path],
     device: Optional[torch.device] = None,
     use_tta: bool = True,
+    s1_threshold: float = 0.5,
+    s2_threshold: float = 0.5,
 ) -> None:
     """Run Task 1 (LA scar) inference on the validation set.
 
@@ -138,7 +140,15 @@ def run_task1_inference(
         if not img_path.exists():
             warnings.warn(f"Image not found: {img_path}")
             continue
-        out = predict_mri_two_stage(img_path, stage1_model, stage2_model, device=device, use_tta=use_tta)
+        out = predict_mri_two_stage(
+            img_path,
+            stage1_model,
+            stage2_model,
+            device=device,
+            use_tta=use_tta,
+            s1_threshold=s1_threshold,
+            s2_threshold=s2_threshold,
+        )
         out.save_as_nifti(results_dir, record_id=rec, task_num=1)
 
 
@@ -149,6 +159,7 @@ def run_task2_inference(
     results_dir: Union[str, Path],
     device: Optional[torch.device] = None,
     use_tta: bool = True,
+    s1_threshold: float = 0.5,
 ) -> None:
     """Run Task 2 (LA cavity) inference on the validation set.
 
@@ -185,7 +196,9 @@ def run_task2_inference(
         if not img_path.exists():
             warnings.warn(f"Image not found: {img_path}")
             continue
-        out = predict_mri_two_stage(img_path, stage1_model, stage2_model, device=device, use_tta=use_tta)
+        out = predict_mri_two_stage(
+            img_path, stage1_model, stage2_model, device=device, use_tta=use_tta, s1_threshold=s1_threshold
+        )
         out.save_as_nifti(results_dir, record_id=rec, task_num=2)
 
 
@@ -358,6 +371,9 @@ if __name__ == "__main__":
         default=None,
         help="Sub-directory name appended to --output_dir (default: auto-generated timestamp).",
     )
+    parser.add_argument("--s1_threshold", type=float, default=0.5, help="Stage-1 LA cavity probability threshold.")
+    parser.add_argument("--s2_threshold", type=float, default=0.5, help="Stage-2 scar probability threshold.")
+    parser.add_argument("--ct_threshold", type=float, default=0.5, help="CT multi-class probability threshold.")
     args = parser.parse_args()
 
     # Resolve --input_dir / --output_dir, with backward compatibility for

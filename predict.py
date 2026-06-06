@@ -316,6 +316,8 @@ def predict_mri_two_stage(
     use_tta: bool = True,
     apply_mclahe: Optional[bool] = None,
     centroid: Optional[Tuple[int, int, int]] = None,
+    s1_threshold: float = 0.5,
+    s2_threshold: float = 0.5,
     canonical_shape: Tuple[int, int, int] = MRI_CANONICAL_SHAPE,
     stage1_shape: Tuple[int, int, int] = MRI_STAGE1_SHAPE,
     stage2_crop_shape: Tuple[int, int, int] = MRI_STAGE2_CROP_SHAPE,
@@ -364,7 +366,7 @@ def predict_mri_two_stage(
     stage1_model.eval()
     with torch.no_grad():
         la_prob_s1 = _stage1_tta(stage1_model, t_s1, device) if use_tta else _run_stage1_model(stage1_model, t_s1, device)
-    la_mask_s1 = la_prob_s1.argmax(axis=0).astype(np.uint8)
+    la_mask_s1 = (la_prob_s1[1] >= s1_threshold).astype(np.uint8)
 
     # Stage-1 LA at canonical resolution (for scar constraint)
     la_s1_canonical = _resample_mask(la_mask_s1, canonical_shape)
@@ -404,7 +406,7 @@ def predict_mri_two_stage(
     with torch.no_grad():
         _, scar_prob_s2 = _stage2_tta(stage2_model, t_s2, device) if use_tta else _run_stage2_model(stage2_model, t_s2, device)
 
-    scar_crop = _resample_mask(scar_prob_s2.argmax(axis=0).astype(np.uint8), (crop_h, crop_w, crop_d))
+    scar_crop = _resample_mask((scar_prob_s2[1] >= s2_threshold).astype(np.uint8), (crop_h, crop_w, crop_d))
     scar_unpad = scar_crop[px0 : tH - px1, py0 : tW - py1, pz0 : tD - pz1]
     scar_canonical = np.zeros(canonical_shape, dtype=np.uint8)
     scar_canonical[xs:xe, ys:ye, zs:ze] = scar_unpad
