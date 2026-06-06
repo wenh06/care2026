@@ -93,13 +93,10 @@ class InferencePanel:
         self._btn_save.on_click(self._on_save)
         self._btn_pkg = Button(description="Package", button_style="warning")
         self._btn_pkg.on_click(self._on_package)
-        self._lbl_run_hint = HTML(
-            value="<i>New predictions saved to selected run. Use the text field below to type a new run name before saving.</i>"
-        )
-        self._txt_new = Text(
-            value="", placeholder="Type new run name here (or leave empty to auto-generate)", layout={"width": "350px"}
-        )
-        row2 = HBox([self._dd_run, self._btn_save, self._btn_pkg])
+        self._txt_new = Text(value="", placeholder="Run name (empty = auto timestamp)", layout={"width": "250px"})
+        self._btn_new_run = Button(description="New", button_style="danger", layout={"width": "60px"})
+        self._btn_new_run.on_click(self._on_new_run)
+        row2 = HBox([self._dd_run, self._txt_new, self._btn_new_run])
 
         # -- Controls row 3: task / sample -------------------------------------
         self._dd_task = Dropdown(
@@ -138,6 +135,7 @@ class InferencePanel:
         # -- Two-panel output --------------------------------------------------
         self._out_live = Output()
         self._out_saved = Output()
+        row_action = HBox([self._btn_save, self._btn_pkg])
 
         controls = VBox(
             [
@@ -146,12 +144,11 @@ class InferencePanel:
                 row1b,
                 HTML("<b>Run</b>"),
                 row2,
-                self._txt_new,
-                self._lbl_run_hint,
                 row3,
                 row4,
                 self._sl_slice,
                 self._lbl_status,
+                row_action,
             ]
         )
         panels = HBox([self._out_live, self._out_saved], layout={"border": "1px solid #ccc"})
@@ -209,6 +206,14 @@ class InferencePanel:
         self._dd_run.options = [(r, r) for r in runs]
         if runs:
             self._dd_run.value = runs[0]
+
+    def _on_new_run(self, _btn) -> None:
+        name = self._txt_new.value.strip() or datetime.now().strftime("run_%Y%m%d_%H%M%S")
+        run_dir = self.out_root / name
+        run_dir.mkdir(parents=True, exist_ok=True)
+        self._refresh_runs()
+        self._dd_run.value = name
+        self._lbl_status.value = f"<b style='color:green'>Created run:</b> {run_dir}"
 
     def _on_refresh(self, _btn) -> None:
         self._scan_checkpoints()
@@ -392,36 +397,29 @@ class InferencePanel:
         rec = self._dd_sample.value
         sl = self._sl_slice.value
         live = self._live_output
-        live_mask = None
-        if live is not None:
-            for key in ("ct", "scar", "la"):
-                if key in live:
-                    live_mask = live[key]
-                    break
 
         # Left: Live
         self._out_live.clear_output(wait=True)
         with self._out_live:
-            self._draw_single(data, live_mask, sl, task, rec, "Live Preview")
+            self._draw_single(data, live, sl, task, rec, "Live Preview")
 
         # Right: Saved
         self._out_saved.clear_output(wait=True)
         with self._out_saved:
             if saved is not None:
-                saved_mask = saved
-                self._draw_single(data, saved_mask, sl, task, rec, "Saved")
+                self._draw_single(data, {"saved": saved}, sl, task, rec, "Saved")
             else:
                 print("(Not predicted yet — click Save)")
 
     @staticmethod
-    def _draw_single(data, mask, sl, task, rec, title):
+    def _draw_single(data, masks, sl, task, rec, title):
         fig, ax = plt.subplots(figsize=(7, 7))
         ax.imshow(data[..., sl], cmap="gray", origin="lower")
-        if mask is not None:
-            _overlay(ax, mask, sl, task)
+        if masks is not None:
+            _overlay(ax, masks, sl, task)
         ax.set_title(f"{title} — {rec}  (slice {sl + 1}/{data.shape[-1]})")
         ax.axis("off")
-        _add_legend(ax, task, mask is not None)
+        _add_legend(ax, task, masks is not None)
         fig.tight_layout()
         plt.show()
 
@@ -526,18 +524,27 @@ class InferencePanel:
 # ------------------------------------------------------------------
 
 
-def _overlay(ax, mask, sl, task):
+def _overlay(ax, masks, sl, task):
+    if not masks:
+        return
     if task == 3:
-        for cls_id, color in [(1, _PALETTE["scar"]), (2, _PALETTE["pv"]), (3, _PALETTE["laa"])]:
-            m = (mask[..., sl] == cls_id).astype(np.uint8)
-            if m.max() > 0:
-                ax.contour(m, levels=[0.5], colors=[color], linewidths=1.5)
+        ct = masks.get("ct", masks.get("saved"))
+        if ct is not None:
+            for cls_id, color in [(1, _PALETTE["scar"]), (2, _PALETTE["pv"]), (3, _PALETTE["laa"])]:
+                m = (ct[..., sl] == cls_id).astype(np.uint8)
+                if m.max() > 0:
+                    ax.contour(m, levels=[0.5], colors=[color], linewidths=1.5)
     elif task == 1:
-        if mask.max() > 0:
-            ax.contour(mask[..., sl], levels=[0.5], colors=[_PALETTE["scar"]], linewidths=1.5)
+        la = masks.get("la")
+        scar = masks.get("scar", masks.get("saved"))
+        if la is not None and la.max() > 0:
+            ax.contour(la[..., sl], levels=[0.5], colors=[_PALETTE["la"]], linewidths=1.0)
+        if scar is not None and scar.max() > 0:
+            ax.contour(scar[..., sl], levels=[0.5], colors=[_PALETTE["scar"]], linewidths=1.5)
     elif task == 2:
-        if mask.max() > 0:
-            ax.contour(mask[..., sl], levels=[0.5], colors=[_PALETTE["la"]], linewidths=1.5)
+        la = masks.get("la", masks.get("saved"))
+        if la is not None and la.max() > 0:
+            ax.contour(la[..., sl], levels=[0.5], colors=[_PALETTE["la"]], linewidths=1.5)
 
 
 def _add_legend(ax, task, has_mask):
@@ -545,7 +552,7 @@ def _add_legend(ax, task, has_mask):
         return
     items = []
     if task == 1:
-        items = [(_PALETTE["scar"], "LA scar")]
+        items = [(_PALETTE["la"], "LA cavity"), (_PALETTE["scar"], "LA scar")]
     elif task == 2:
         items = [(_PALETTE["la"], "LA cavity")]
     elif task == 3:
