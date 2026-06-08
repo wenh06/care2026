@@ -30,6 +30,8 @@ __all__ = ["InferencePanel"]
 
 # Shared palette
 _PALETTE = {"la": "#00FFFF", "scar": "#FF4444", "laa": "#44FF44", "pv": "#4488FF"}
+# Distinct hatch patterns per class
+_HATCHES = {"la": "//", "scar": "\\\\", "laa": "..", "pv": "xx"}
 
 
 class InferencePanel:
@@ -128,6 +130,13 @@ class InferencePanel:
             min=0, max=100, step=1, value=0, description="Slice:", continuous_update=False, layout={"width": "400px"}
         )
         self._sl_slice.observe(self._on_slice_change, names="value")
+        self._dd_overlay = Dropdown(
+            options=["contour", "filled", "filled+hatch"],
+            value="filled+hatch",
+            description="Overlay:",
+            layout={"width": "180px"},
+        )
+        self._dd_overlay.observe(self._on_overlay_change, names="value")
 
         # -- Status label ------------------------------------------------------
         self._lbl_status = HTML(value="")
@@ -147,6 +156,7 @@ class InferencePanel:
                 row3,
                 row4,
                 self._sl_slice,
+                self._dd_overlay,
                 self._lbl_status,
                 row_action,
             ]
@@ -396,27 +406,28 @@ class InferencePanel:
         task = self._dd_task.value
         rec = self._dd_sample.value
         sl = self._sl_slice.value
+        overlay_mode = self._dd_overlay.value
         live = self._live_output
 
         # Left: Live
         self._out_live.clear_output(wait=True)
         with self._out_live:
-            self._draw_single(data, live, sl, task, rec, "Live Preview")
+            self._draw_single(data, live, sl, task, rec, "Live Preview", overlay_mode)
 
         # Right: Saved
         self._out_saved.clear_output(wait=True)
         with self._out_saved:
             if saved is not None:
-                self._draw_single(data, {"saved": saved}, sl, task, rec, "Saved")
+                self._draw_single(data, {"saved": saved}, sl, task, rec, "Saved", overlay_mode)
             else:
                 print("(Not predicted yet — click Save)")
 
     @staticmethod
-    def _draw_single(data, masks, sl, task, rec, title):
+    def _draw_single(data, masks, sl, task, rec, title, overlay_mode):
         fig, ax = plt.subplots(figsize=(7, 7))
         ax.imshow(data[..., sl], cmap="gray", origin="lower")
         if masks is not None:
-            _overlay(ax, masks, sl, task)
+            _overlay(ax, masks, sl, task, overlay_mode)
         ax.set_title(f"{title} — {rec}  (slice {sl + 1}/{data.shape[-1]})")
         ax.axis("off")
         _add_legend(ax, task, masks is not None)
@@ -437,6 +448,11 @@ class InferencePanel:
         self._cached_data = data
         self._cached_saved = saved
         self._render_both_panels()
+
+    def _on_overlay_change(self, change) -> None:
+        """Overlay mode changed — re-render both panels."""
+        if self._out_live.outputs or self._out_saved.outputs:
+            self._render_both_panels()
 
     def _on_slice_change(self, change) -> None:
         """Shared slice slider moved — re-render both panels at new slice."""
@@ -524,27 +540,38 @@ class InferencePanel:
 # ------------------------------------------------------------------
 
 
-def _overlay(ax, masks, sl, task):
+def _overlay(ax, masks, sl, task, overlay_mode="filled+hatch"):
     if not masks:
         return
+    is_filled = overlay_mode.startswith("filled")
+    use_hatch = overlay_mode == "filled+hatch"
+
+    def _draw_mask(mask_slice, color, hatch):
+        if mask_slice.max() == 0:
+            return
+        if is_filled:
+            ax.contourf(
+                mask_slice, levels=[0.5, 1], colors=[color], alpha=0.25, antialiased=True, hatches=[hatch] if use_hatch else []
+            )
+        else:
+            ax.contour(mask_slice, levels=[0.5], colors=[color], linewidths=1.5)
+
     if task == 3:
         ct = masks.get("ct", masks.get("saved"))
         if ct is not None:
-            for cls_id, color in [(1, _PALETTE["scar"]), (2, _PALETTE["pv"]), (3, _PALETTE["laa"])]:
-                m = (ct[..., sl] == cls_id).astype(np.uint8)
-                if m.max() > 0:
-                    ax.contour(m, levels=[0.5], colors=[color], linewidths=1.5)
+            for cls_id, key in [(1, "scar"), (2, "pv"), (3, "laa")]:
+                _draw_mask((ct[..., sl] == cls_id).astype(np.uint8), _PALETTE[key], _HATCHES[key])
     elif task == 1:
         la = masks.get("la")
         scar = masks.get("scar", masks.get("saved"))
-        if la is not None and la.max() > 0:
-            ax.contour(la[..., sl], levels=[0.5], colors=[_PALETTE["la"]], linewidths=1.0)
-        if scar is not None and scar.max() > 0:
-            ax.contour(scar[..., sl], levels=[0.5], colors=[_PALETTE["scar"]], linewidths=1.5)
+        if la is not None:
+            _draw_mask(la[..., sl], _PALETTE["la"], _HATCHES["la"])
+        if scar is not None:
+            _draw_mask(scar[..., sl], _PALETTE["scar"], _HATCHES["scar"])
     elif task == 2:
         la = masks.get("la", masks.get("saved"))
-        if la is not None and la.max() > 0:
-            ax.contour(la[..., sl], levels=[0.5], colors=[_PALETTE["la"]], linewidths=1.5)
+        if la is not None:
+            _draw_mask(la[..., sl], _PALETTE["la"], _HATCHES["la"])
 
 
 def _add_legend(ax, task, has_mask):
