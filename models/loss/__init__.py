@@ -156,7 +156,12 @@ class CTLoss(nn.Module):
     def __init__(self, cfg) -> None:
         super().__init__()
         w = cfg.loss_weights
-        self.supervised_loss = DiceCELoss(dice_weight=w.get("sup_dice", 0.5), ce_weight=w.get("sup_ce", 0.5))
+        class_w = w.get("ce_class_weight", None)
+        if class_w is not None:
+            class_w = torch.tensor(class_w, dtype=torch.float32)
+        self.supervised_loss = DiceCELoss(
+            dice_weight=w.get("sup_dice", 0.5), ce_weight=w.get("sup_ce", 0.5), ce_class_weight=class_w
+        )
         self.consistency_fn = nn.MSELoss()  # Mean Teacher: MSE between softmax outputs
         self.w_cps = w.get("cps", 1.0)
         self.w_mt = w.get("mt_consist", 1.0)

@@ -190,10 +190,13 @@ CT_TrainCfg.mt_ema_decay = 0.99
 CT_TrainCfg.mt_consistency_weight = 1.0  # λ_consist in L_total = L_sup + λ·L_consist
 
 # Loss weights (supervised Dice + CE on labeled, CPS on all)
+# Per-class CE weights: inverse-frequency to counteract LA dominance.
+# Train-set fg ratios: LA≈75% PV≈6% LAA≈19% → weights ≈ 1/ratio, norm to LA=1
 CT_TrainCfg.loss_weights = CFG(
     sup_dice=0.5,
     sup_ce=0.5,
     cps=1.0,
+    ce_class_weight=[0.2, 1.0, 6.0, 2.0],  # [bg, LA, PV, LAA] — PV 6x higher
 )
 
 # Checkpointing

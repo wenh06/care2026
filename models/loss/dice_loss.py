@@ -6,6 +6,8 @@ All losses accept:
     target : torch.Tensor, shape (B, H, W, D), dtype long (integer class indices)
 """
 
+from typing import Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -92,10 +94,11 @@ class DiceCELoss(nn.Module):
         ce_weight: float = 0.5,
         do_bg: bool = False,
         smooth: float = 1e-5,
+        ce_class_weight: Optional[torch.Tensor] = None,
     ) -> None:
         super().__init__()
         self.dice = SoftDiceLoss(do_bg=do_bg, smooth=smooth)
-        self.ce = nn.CrossEntropyLoss()
+        self.ce = nn.CrossEntropyLoss(weight=ce_class_weight)
         self.dice_weight = dice_weight
         self.ce_weight = ce_weight
 
