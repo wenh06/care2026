@@ -607,16 +607,16 @@ def evaluate_ct(
 
 def evaluate_training_sample(
     rec: str,
+    task: int,
     stage1_model: Optional[torch.nn.Module] = None,
     stage2_model: Optional[torch.nn.Module] = None,
     ct_model: Optional[torch.nn.Module] = None,
-    db_dir: Union[str, Path] = None,
+    db_dir: Optional[Union[str, Path]] = None,
     device: Optional[torch.device] = None,
     use_tta: bool = False,
 ) -> Dict[str, float]:
     """Run inference on a *training* sample and compare with GT labels.
 
-    Auto-detects MRI (Task 1/2) vs CT (Task 3) based on record location.
     Displays a 3-panel interactive view (Image | GT | Prediction) and prints
     Dice scores.
 
@@ -624,10 +624,12 @@ def evaluate_training_sample(
     ----------
     rec : str
         Record name, e.g. ``"train_1"``.
+    task : int
+        Task number: 1 (LA scar), 2 (LA cavity), 3 (CT multi-structure).
     stage1_model, stage2_model : nn.Module or None
-        MRI Stage-1 / Stage-2 models (at least one required for MRI).
+        MRI Stage-1 / Stage-2 models (required for task=1 or 2).
     ct_model : nn.Module or None
-        CT model (required for Task 3).
+        CT model (required for task=3).
     db_dir : path-like
         Root of the CARE2026 dataset.
     device : torch.device, optional
@@ -637,20 +639,11 @@ def evaluate_training_sample(
     -------
     dict with per-class Dice scores.
     """
+    assert db_dir is not None, "db_dir is required"
     import nibabel as nib
 
     db_dir = Path(db_dir).expanduser().resolve()
-
-    # Auto-detect task: try MRI first, then CT
-    is_mri = False
-    for task in [1, 2]:
-        try:
-            reader = CARE2026_MRI(db_dir=db_dir, task=task, verbose=0)
-            if rec in reader._all_records:
-                is_mri = True
-                break
-        except Exception:
-            pass
+    is_mri = task in (1, 2)
 
     if is_mri:
         if stage1_model is None or stage2_model is None:
@@ -658,10 +651,11 @@ def evaluate_training_sample(
         if device is None:
             device = next(stage1_model.parameters()).device
 
-        has_scar = reader.get_scar_path(rec) is not None  # type: ignore
-        img_path = reader.get_data_path(rec)  # type: ignore
-        gt_la = reader.load_la_ann(rec)  # type: ignore
-        gt_scar = reader.load_scar_ann(rec) if has_scar else np.zeros_like(gt_la)  # type: ignore
+        reader = CARE2026_MRI(db_dir=db_dir, task=task, verbose=0)
+        has_scar = reader.get_scar_path(rec) is not None
+        img_path = reader.get_data_path(rec)
+        gt_la = reader.load_la_ann(rec)
+        gt_scar = reader.load_scar_ann(rec) if has_scar else np.zeros_like(gt_la)
 
         out = predict_mri_two_stage(img_path, stage1_model, stage2_model, device=device, use_tta=use_tta)
         pred_a = out.la_mask
@@ -686,9 +680,9 @@ def evaluate_training_sample(
             raise ValueError("ct_model required for CT evaluation.")
         if device is None:
             device = next(ct_model.parameters()).device
-        reader = CARE2026_CT(db_dir=db_dir, verbose=0)
-        img_path = reader.get_data_path(rec)
-        gt = reader.load_ann(rec)
+        ct_reader = CARE2026_CT(db_dir=db_dir, verbose=0)
+        img_path = ct_reader.get_data_path(rec)
+        gt = ct_reader.load_ann(rec)
 
         from predict import predict_ct
 
