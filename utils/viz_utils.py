@@ -19,6 +19,13 @@ __all__ = [
     "_slice_view_static",
 ]
 
+# Distinct hatch patterns per class ID (cycled)
+_HATCH_POOL = ["//", "\\\\", "..", "xx", "oo", "**"]
+
+
+def _hatch_for(cls_id: int) -> str:
+    return _HATCH_POOL[(cls_id - 1) % len(_HATCH_POOL)]
+
 
 def _is_notebook() -> bool:
     """Return True when running inside a Jupyter notebook / IPython kernel."""
@@ -119,7 +126,7 @@ def _slice_view_interactive(
                         colors=[color],
                         alpha=0.25,
                         antialiased=True,
-                        hatches=["//"] if use_hatch else [],
+                        hatches=[_hatch_for(cls_id)] if use_hatch else [],
                     )
                     legend_handle = mpatches.Patch(
                         facecolor=color,
@@ -214,7 +221,7 @@ def _slice_view_static(
                     colors=[color],
                     alpha=0.25,
                     antialiased=True,
-                    hatches=["//"] if use_hatch else [],
+                    hatches=[_hatch_for(cls_id)] if use_hatch else [],
                 )
             else:
                 ax.contour(mask_slice, levels=[0.5], colors=[color], linewidths=1)
