@@ -109,8 +109,8 @@ and Geometry-Aware Consistency Training (arXiv 2024).
 Additional tricks:
 - CT windowing to soft-tissue window (clip to −200…+800 HU, normalise to [0,1]).
 - Resample all volumes to uniform 0.5 × 0.5 × 0.5 mm isotropic.
-- Deep supervision at each decoder scale.
-- Boundary Loss for PV and LAA (thin / small structures).
+- Per-class CE weighting to handle extreme class imbalance (LA : PV : LAA ≈
+  13 : 1 : 3).  Weights: [bg=0.2, LA=1.0, PV=6.0, LAA=2.0].
 
 ---
 
@@ -349,8 +349,10 @@ PYTORCH_ALLOC_CONF=expandable_segments:True \
   2>&1 | tee log/scar_train.log
 ```
 
-Input: 128×128×44 (resized from 256×256×44 crop), batch_size=1, AMP, grad_accum=2.
+Input: 128×128×44 (resized from 256×256×44 crop), batch_size=4, AMP.
 ScarLoss with spatial weight map (w₀=5, σ=2 mm).  LA cavity from Stage 1.
+``no_scar_proportion=0.3`` keeps ~35/130 Task-2 (no-scar) records as hard
+negatives; the ScarLoss penalises false scar predictions on these samples.
 
 ### 6.3 CT Baseline (Task 3) — ⏳ Not started
 

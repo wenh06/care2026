@@ -93,19 +93,11 @@ _CARE2026_MRI_INFO = DataBaseInfo(
         - 92.6 % of scar voxels are within 2 mm of the cavity
           boundary (≈ 3.2 px in-plane).
 
-      → Post-processing: constrain scar to a *dilated* cavity mask
-        (dilation ≈ 2–3 px ≈ 1.25–1.9 mm) rather than the cavity
-        itself.  Using the raw (undilated) cavity mask would discard
-        ~68 % of true scar voxels.
-
-    Dataset composition (Stage 2 training):
-    ───────────────────────────────────────
+    Dataset composition:
+    ────────────────────
       Task 1: 60 records with LA cavity + scar labels.
       Task 2: 130 records with LA cavity label only (no scar).
       Scar prevalence: ~32 % of all 190 MRI records.
-      ``no_scar_proportion`` (default 0.3) controls the fraction of
-      Task-2 records included as hard negatives during Stage 2 training.
-      With the default, ~60 scar + ~35 no-scar ≈ 95 samples per epoch.
     """,
     usage=[
         "LA Scar Quantification",
@@ -134,10 +126,17 @@ _CARE2026_CT_INFO = DataBaseInfo(
     Image matrix:        variable; typically 512×512 in-plane
     HU range:            soft-tissue window; clipped to [−200, +800] HU for training
 
-    Annotation (50 labelled volumes):
-      Class 1 (LA):               present in all 50; typical DSC among top teams ≈ 0.93–0.96
-      Class 2 (pulmonary veins):  thin tubular structures; hardest class; DSC ≈ 0.82–0.89
-      Class 3 (LA appendage):     small / variable shape; DSC ≈ 0.80–0.88
+    Annotation (50 labelled volumes, N = 50):
+    ───────────────────────────────────────────
+      Class 1 (LA):  ~74.8 % of foreground voxels (median)
+        Present in all 50; typical DSC among top teams ≈ 0.93–0.96.
+      Class 2 (pulmonary veins):  ~5.6 % of foreground (median)
+        Thin tubular structures; hardest class; DSC ≈ 0.82–0.89.
+      Class 3 (LA appendage):  ~19.1 % of foreground (median)
+        Small / variable shape; DSC ≈ 0.80–0.88.
+
+      Class imbalance (LA : PV : LAA ≈ 13 : 1 : 3).
+
     Semi-supervised split: 50 labelled (train_1..50) + 100 unlabelled (train_51..150).
     """,
     usage=[
