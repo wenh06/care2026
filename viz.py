@@ -29,6 +29,7 @@ __all__ = [
     "view_prediction",
     "evaluate_stage1",
     "evaluate_stage2",
+    "evaluate_ct",
     "evaluate_training_sample",
 ]
 
@@ -493,27 +494,24 @@ def evaluate_stage2(
     return {"la_dice": la_dice, "scar_dice": scar_dice}
 
 
-def evaluate_training_sample(
+def evaluate_ct(
     rec: str,
-    stage1_model: torch.nn.Module,
-    stage2_model: torch.nn.Module,
+    model: torch.nn.Module,
     db_dir: Union[str, Path],
     device: Optional[torch.device] = None,
     use_tta: bool = False,
 ) -> Dict[str, float]:
-    """Run two-stage inference on a *training* sample and compare with GT labels.
+    """Evaluate CT model (Task 3) on a training sample with GT labels.
 
     Displays a 3-panel interactive view (Image | GT | Prediction) and prints
-    LA cavity and LA scar Dice scores.
+    per-class Dice scores.
 
     Parameters
     ----------
     rec : str
-        Record name, e.g. ``"train_1"`` (Task-1: LA + scar; Task-2: LA only).
-    stage1_model : nn.Module
-        CARE2026_MRI_Stage1_Model in eval mode.
-    stage2_model : nn.Module
-        CARE2026_MRI_Stage2_Model in eval mode.
+        Training record name, e.g. ``"train_1"`` (must have a GT label).
+    model : torch.nn.Module
+        CARE2026_CT_Model in eval mode.
     db_dir : path-like
         Root of the CARE2026 dataset.
     device : torch.device, optional
@@ -521,111 +519,72 @@ def evaluate_training_sample(
 
     Returns
     -------
-    dict
-        ``la_dice``, ``scar_dice`` (NaN if no scar GT).
-
-    Examples
-    --------
-    ::
-
-        from models import CARE2026_MRI_Stage1_Model, CARE2026_MRI_Stage2_Model
-
-        m1, aux1 = CARE2026_MRI_Stage1_Model.from_checkpoint(
-            "checkpoints/mri_stage1_model.safetensors", device="cuda")
-        m1.train_config.update(aux1); m1 = m1.to("cuda").eval()
-
-        m2, aux2 = CARE2026_MRI_Stage2_Model.from_checkpoint(
-            "checkpoints/mri_stage2_model.safetensors", device="cuda")
-        m2.train_config.update(aux2); m2 = m2.to("cuda").eval()
-
-        from viz import evaluate_training_sample
-        evaluate_training_sample("train_1", m1, m2,
-                                 db_dir="/Data1/wenh06/CARE2026-LeftAtrium")
+    dict with ``ct_dice_la``, ``ct_dice_pv``, ``ct_dice_laa``, ``ct_mean_dice``.
     """
+    from data_reader import CARE2026_CT
+    from predict import predict_ct
 
     if device is None:
-        device = next(stage1_model.parameters()).device
-
+        device = next(model.parameters()).device
     db_dir = Path(db_dir).expanduser().resolve()
 
-    has_scar = False
-    reader = CARE2026_MRI(db_dir=db_dir, task=1, verbose=0)
-    if rec in reader._all_records:
-        img_path = reader.get_data_path(rec)
-        has_scar = reader.get_scar_path(rec) is not None
-    else:
-        reader = CARE2026_MRI(db_dir=db_dir, task=2, verbose=0)
-        img_path = reader.get_data_path(rec)
+    reader = CARE2026_CT(db_dir=db_dir, verbose=0)
+    img_path = reader.get_data_path(rec)
+    gt = reader.load_ann(rec)
 
-    gt_la = reader.load_la_ann(rec)
-    gt_scar = reader.load_scar_ann(rec) if has_scar else np.zeros_like(gt_la)
+    out = predict_ct(img_path, model, device=device, use_tta=use_tta)
+    pred = out.ct_mask
 
-    out = predict_mri_two_stage(img_path, stage1_model, stage2_model, device=device, use_tta=use_tta)
-    pred_la = out.la_mask
-    pred_scar = out.scar_mask
-
-    def _dice(p, g):
-        p, g = p.astype(bool), g.astype(bool)
+    def _dice_per_class(mask, cls_id):
+        p = (mask == cls_id).astype(bool)
+        g = (gt == cls_id).astype(bool)
         inter = (p & g).sum()
         return float(2 * inter / (p.sum() + g.sum() + 1e-8))
 
-    la_dice = _dice(pred_la, gt_la)
-    scar_dice = _dice(pred_scar, gt_scar) if has_scar else float("nan")
+    dice_la = _dice_per_class(pred, 1)
+    dice_pv = _dice_per_class(pred, 2)
+    dice_laa = _dice_per_class(pred, 3)
+    print(f"  LA  Dice: {dice_la:.4f}")
+    print(f"  PV  Dice: {dice_pv:.4f}")
+    print(f"  LAA Dice: {dice_laa:.4f}")
+    print(f"  Mean Dice: {(dice_la + dice_pv + dice_laa) / 3:.4f}")
 
-    print(f"  LA Dice : {la_dice:.4f}")
-    if has_scar:
-        print(f"  Scar Dice: {scar_dice:.4f}  (GT voxels: {gt_scar.sum()}, Pred voxels: {pred_scar.sum()})")
-    else:
-        print("  (no scar GT for Task-2 records)")
-
-    PALETTE = {0: (0, 0, 0, 0), 1: "#00FFFF", 2: "#FF4444"}
-    CLASS_NAMES = {1: "LA cavity", 2: "LA scar"}
-
-    n_slices = pred_la.shape[-1]
+    # Interactive view
+    img_native = nib.load(str(img_path)).get_fdata().astype(np.float32)
+    n_slices = img_native.shape[-1]
     mid = n_slices // 2
+    PALETTE = {1: "#FF4444", 2: "#4488FF", 3: "#44FF44"}
+    CLASS_NAMES = {1: "LA", 2: "PV", 3: "LAA"}
 
     def _plot(sl: int = mid, overlay_mode: str = "filled+hatch"):
         is_filled = overlay_mode.startswith("filled")
         use_hatch = overlay_mode == "filled+hatch"
-
         fig, axes = plt.subplots(1, 3, figsize=(18, 6))
-        img = nib.load(str(img_path)).get_fdata().astype(np.float32)
+        for ax in axes:
+            ax.imshow(img_native[..., sl], cmap="gray", origin="lower")
 
-        axes[0].imshow(img[..., sl], cmap="gray", origin="lower")
-        axes[0].set_title(f"Image  (slice {sl + 1}/{n_slices})")
-        axes[0].axis("off")
-
-        def _draw(ax, la, scar):
-            for cls_id, mask, c in [(1, la, PALETTE[1]), (2, scar, PALETTE[2])]:
-                if mask.max() == 0:
+        def _draw(ax, mask):
+            for cls_id, c in PALETTE.items():
+                ms = (mask[..., sl] == cls_id).astype(np.uint8)
+                if ms.max() == 0:
                     continue
-                ms = mask[..., sl]
                 if is_filled:
-                    ax.contourf(
-                        ms, levels=[0.5, 1], colors=[c], alpha=0.25, antialiased=True, hatches=["//"] if use_hatch else []
-                    )
+                    ax.contourf(ms, levels=[0.5, 1], colors=[c], alpha=0.25, antialiased=True)
                 else:
                     ax.contour(ms, levels=[0.5], colors=[c], linewidths=1.5)
 
-        axes[1].imshow(img[..., sl], cmap="gray", origin="lower")
-        _draw(axes[1], gt_la, gt_scar)
+        axes[0].set_title(f"CT Image  (slice {sl + 1}/{n_slices})")
+        _draw(axes[1], gt)
         axes[1].set_title("Ground Truth")
-        axes[1].axis("off")
-
-        axes[2].imshow(img[..., sl], cmap="gray", origin="lower")
-        _draw(axes[2], pred_la, pred_scar)
+        _draw(axes[2], pred)
         axes[2].set_title("Prediction")
-        axes[2].axis("off")
-
-        legend_handles = []
-        for cls_id, c, label in [(1, PALETTE[1], "LA cavity"), (2, PALETTE[2], "LA scar")]:
-            legend_handles.append(
-                mpatches.Patch(facecolor=c, alpha=0.5, edgecolor=c, label=label)
-                if is_filled
-                else mpatches.Patch(color=c, label=label)
-            )
-        axes[2].legend(handles=legend_handles, loc="upper right", framealpha=0.7, fontsize="small")
-
+        for ax in axes:
+            ax.axis("off")
+        legend_h = [
+            mpatches.Patch(facecolor=c, alpha=0.5, edgecolor=c, label=l) if is_filled else mpatches.Patch(color=c, label=l)
+            for c, l in zip(PALETTE.values(), CLASS_NAMES.values())
+        ]
+        axes[2].legend(handles=legend_h, loc="upper right", framealpha=0.7, fontsize="small")
         fig.tight_layout()
         plt.show()
 
@@ -633,13 +592,177 @@ def evaluate_training_sample(
         interact(
             _plot,
             sl=IntSlider(min=0, max=n_slices - 1, step=1, value=mid, description="Slice"),
-            overlay_mode=Dropdown(
-                options=["contour", "filled", "filled+hatch"],
-                value="filled+hatch",
-                description="Overlay",
-            ),
+            overlay_mode=Dropdown(options=["contour", "filled", "filled+hatch"], value="filled+hatch", description="Overlay"),
         )
     else:
         _plot()
 
-    return {"la_dice": la_dice, "scar_dice": scar_dice}
+    return {
+        "ct_dice_la": dice_la,
+        "ct_dice_pv": dice_pv,
+        "ct_dice_laa": dice_laa,
+        "ct_mean_dice": (dice_la + dice_pv + dice_laa) / 3,
+    }
+
+
+def evaluate_training_sample(
+    rec: str,
+    stage1_model: Optional[torch.nn.Module] = None,
+    stage2_model: Optional[torch.nn.Module] = None,
+    ct_model: Optional[torch.nn.Module] = None,
+    db_dir: Union[str, Path] = None,
+    device: Optional[torch.device] = None,
+    use_tta: bool = False,
+) -> Dict[str, float]:
+    """Run inference on a *training* sample and compare with GT labels.
+
+    Auto-detects MRI (Task 1/2) vs CT (Task 3) based on record location.
+    Displays a 3-panel interactive view (Image | GT | Prediction) and prints
+    Dice scores.
+
+    Parameters
+    ----------
+    rec : str
+        Record name, e.g. ``"train_1"``.
+    stage1_model, stage2_model : nn.Module or None
+        MRI Stage-1 / Stage-2 models (at least one required for MRI).
+    ct_model : nn.Module or None
+        CT model (required for Task 3).
+    db_dir : path-like
+        Root of the CARE2026 dataset.
+    device : torch.device, optional
+    use_tta : bool, default False
+
+    Returns
+    -------
+    dict with per-class Dice scores.
+    """
+    import nibabel as nib
+
+    db_dir = Path(db_dir).expanduser().resolve()
+
+    # Auto-detect task: try MRI first, then CT
+    is_mri = False
+    for task in [1, 2]:
+        try:
+            reader = CARE2026_MRI(db_dir=db_dir, task=task, verbose=0)
+            if rec in reader._all_records:
+                is_mri = True
+                break
+        except Exception:
+            pass
+
+    if is_mri:
+        if stage1_model is None or stage2_model is None:
+            raise ValueError("stage1_model and stage2_model required for MRI evaluation.")
+        if device is None:
+            device = next(stage1_model.parameters()).device
+
+        has_scar = reader.get_scar_path(rec) is not None  # type: ignore
+        img_path = reader.get_data_path(rec)  # type: ignore
+        gt_la = reader.load_la_ann(rec)  # type: ignore
+        gt_scar = reader.load_scar_ann(rec) if has_scar else np.zeros_like(gt_la)  # type: ignore
+
+        out = predict_mri_two_stage(img_path, stage1_model, stage2_model, device=device, use_tta=use_tta)
+        pred_a = out.la_mask
+        pred_b = out.scar_mask
+        dice_a = float(_binary_dice_metric(pred_a, gt_la))
+        dice_b = float(_binary_dice_metric(pred_b, gt_scar)) if has_scar else float("nan")
+
+        print(f"  LA Dice : {dice_a:.4f}")
+        if has_scar:
+            print(f"  Scar Dice: {dice_b:.4f}  (GT voxels: {gt_scar.sum()}, Pred voxels: {pred_b.sum()})")
+        else:
+            print("  (no scar GT for Task-2 records)")
+
+        PALETTE = [(1, "#00FFFF", "LA cavity"), (2, "#FF4444", "LA scar")]
+        gt_masks = [(gt_la, 1), (gt_scar, 2)]
+        pred_masks = [(pred_a, 1), (pred_b, 2)]
+    else:
+        # CT (Task 3)
+        from data_reader import CARE2026_CT
+
+        if ct_model is None:
+            raise ValueError("ct_model required for CT evaluation.")
+        if device is None:
+            device = next(ct_model.parameters()).device
+        reader = CARE2026_CT(db_dir=db_dir, verbose=0)
+        img_path = reader.get_data_path(rec)
+        gt = reader.load_ann(rec)
+
+        from predict import predict_ct
+
+        out = predict_ct(img_path, ct_model, device=device, use_tta=use_tta)
+        pred = out.ct_mask
+        pred_a = pred
+        pred_b = None
+
+        def _dice_cls(mask, cls_id):
+            p = mask == cls_id
+            g = gt == cls_id
+            return float(2 * (p & g).sum() / (p.sum() + g.sum() + 1e-8))
+
+        d_la = _dice_cls(pred, 1)
+        d_pv = _dice_cls(pred, 2)
+        d_laa = _dice_cls(pred, 3)
+        print(f"  LA  Dice: {d_la:.4f}")
+        print(f"  PV  Dice: {d_pv:.4f}")
+        print(f"  LAA Dice: {d_laa:.4f}")
+        print(f"  Mean Dice: {(d_la + d_pv + d_laa) / 3:.4f}")
+
+        PALETTE = [(1, "#FF4444", "LA"), (2, "#4488FF", "PV"), (3, "#44FF44", "LAA")]
+        gt_masks = [(gt, c) for c, _, _ in PALETTE]
+        pred_masks = [(pred, c) for c, _, _ in PALETTE]
+        has_scar = False
+        dice_a = dice_b = None  # computed above, not returned the same way
+
+    # Interactive view
+    img_native = nib.load(str(img_path)).get_fdata().astype(np.float32)
+    n_slices = img_native.shape[-1]
+    mid = n_slices // 2
+
+    def _plot(sl: int = mid, overlay_mode: str = "filled+hatch"):
+        is_filled = overlay_mode.startswith("filled")
+        use_hatch = overlay_mode == "filled+hatch"
+        fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+        for ax in axes:
+            ax.imshow(img_native[..., sl], cmap="gray", origin="lower")
+
+        def _draw(ax, masks):
+            for mask, cls_id in masks:
+                if mask.max() == 0:
+                    continue
+                c = next(col for cid, col, _ in PALETTE if cid == cls_id)
+                ms = (mask[..., sl] == cls_id).astype(np.uint8) if not is_mri else mask[..., sl]
+                if is_filled:
+                    ax.contourf(ms, levels=[0.5, 1], colors=[c], alpha=0.25, antialiased=True)
+                else:
+                    ax.contour(ms, levels=[0.5], colors=[c], linewidths=1.5)
+
+        axes[0].set_title(f"Image  (slice {sl + 1}/{n_slices})")
+        _draw(axes[1], gt_masks)
+        axes[1].set_title("Ground Truth")
+        _draw(axes[2], pred_masks)
+        axes[2].set_title("Prediction")
+        for ax in axes:
+            ax.axis("off")
+        legend_h = [
+            mpatches.Patch(facecolor=c, alpha=0.5, edgecolor=c, label=l) if is_filled else mpatches.Patch(color=c, label=l)
+            for _, c, l in PALETTE
+        ]
+        axes[2].legend(handles=legend_h, loc="upper right", framealpha=0.7, fontsize="small")
+        fig.tight_layout()
+        plt.show()
+
+    if _is_notebook():
+        interact(
+            _plot,
+            sl=IntSlider(min=0, max=n_slices - 1, step=1, value=mid, description="Slice"),
+            overlay_mode=Dropdown(options=["contour", "filled", "filled+hatch"], value="filled+hatch", description="Overlay"),
+        )
+    else:
+        _plot()
+
+    if is_mri:
+        return {"la_dice": dice_a, "scar_dice": dice_b}
+    return {"ct_dice_la": d_la, "ct_dice_pv": d_pv, "ct_dice_laa": d_laa, "ct_mean_dice": (d_la + d_pv + d_laa) / 3}
