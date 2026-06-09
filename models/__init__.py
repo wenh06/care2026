@@ -53,6 +53,11 @@ class CARE2026_MRI_Stage1_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
         self.__train_config = deepcopy(MRI_Stage1_TrainCfg)
         if train_config is not None:
             self.__train_config.update(deepcopy(train_config))
+        # Sync inference-relevant fields into config so they are
+        # serialised in model_config metadata and available at load time.
+        for key in ("canonical_shape", "patch_shape", "apply_mclahe"):
+            if key in self.__train_config and key not in self.__config:
+                self.__config[key] = self.__train_config[key]
         self.backbone = VNet(self.config.vnet_stage1)
         self.criterion = Stage1MRILoss(self.train_config)
 
@@ -124,6 +129,10 @@ class CARE2026_MRI_Stage2_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
         self.__train_config = deepcopy(MRI_Stage2_TrainCfg)
         if train_config is not None:
             self.__train_config.update(deepcopy(train_config))
+        # Sync inference-relevant fields into config (do not overwrite).
+        for key in ("canonical_shape", "patch_shape", "train_crop_hw", "apply_mclahe"):
+            if key in self.__train_config and key not in self.__config:
+                self.__config[key] = self.__train_config[key]
         # Single-head VNet or NestedVNet, scar only (2 classes: bg + scar)
         backbone = str(self.__config.get("backbone", self.__train_config.get("backbone", "vnet_stage2")))
         if backbone == "nested_vnet_stage2":
@@ -225,7 +234,17 @@ class CARE2026_CT_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
         if train_config is not None:
             self.__train_config.update(deepcopy(train_config))
 
-        self.mode = self.__train_config.get("semi_supervised_mode", "cps")
+        # Sync inference-relevant fields into config (do not overwrite).
+        for key in ("patch_size", "normalization", "semi_supervised_mode"):
+            if key in self.__train_config and key not in self.__config:
+                self.__config[key] = self.__train_config[key]
+
+        # Read mode from config first (populated from safetensors metadata at
+        # load time), falling back to train_config.  Store in config so that
+        # CkptMixin.save() serialises it in model_config metadata, which
+        # CkptMixin.from_checkpoint() passes to __init__ as ``config``.
+        self.mode = self.__config.get("semi_supervised_mode") or self.__train_config.get("semi_supervised_mode", "cps")
+        self.__config["semi_supervised_mode"] = self.mode
         if self.mode not in ("cps", "mean_teacher"):
             raise ValueError(f"Unknown semi_supervised_mode: {self.mode}")
 

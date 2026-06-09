@@ -31,6 +31,7 @@ from const import (
     CT_HU_MAX,
     CT_HU_MIN,
     CT_NUM_CLASSES,
+    CT_PATCH_SIZE,
     CT_TARGET_SPACING,
     MRI_CANONICAL_SHAPE,
     MRI_STAGE1_SHAPE,
@@ -319,9 +320,9 @@ def predict_mri_two_stage(
     centroid: Optional[Tuple[int, int, int]] = None,
     s1_threshold: float = 0.5,
     s2_threshold: float = 0.5,
-    canonical_shape: Tuple[int, int, int] = MRI_CANONICAL_SHAPE,
-    stage1_shape: Tuple[int, int, int] = MRI_STAGE1_SHAPE,
-    stage2_crop_shape: Tuple[int, int, int] = MRI_STAGE2_CROP_SHAPE,
+    canonical_shape: Optional[Tuple[int, int, int]] = None,
+    stage1_shape: Optional[Tuple[int, int, int]] = None,
+    stage2_crop_shape: Optional[Tuple[int, int, int]] = None,
 ) -> CARE2026Outputs:
     """Two-stage MRI inference matching the training pipeline.
 
@@ -350,6 +351,17 @@ def predict_mri_two_stage(
 
     if apply_mclahe is None:
         apply_mclahe = _check_model_consistency(stage1_model, stage2_model)
+
+    # Read shapes from model config (synced from train_config at init)
+    cfg1 = getattr(stage1_model, "config", {}) or {}
+    cfg2 = getattr(stage2_model, "config", {}) or {}
+    if canonical_shape is None:
+        canonical_shape = tuple(cfg2.get("canonical_shape", MRI_CANONICAL_SHAPE))
+    if stage1_shape is None:
+        stage1_shape = tuple(cfg1.get("patch_shape", MRI_STAGE1_SHAPE))
+    if stage2_crop_shape is None:
+        stage2_crop_shape = tuple(cfg2.get("patch_shape", MRI_STAGE2_CROP_SHAPE))
+    s2_hw = int(cfg2.get("train_crop_hw", 128))
 
     # ── Load & canonical ───────────────────────────────────────────────────
     nii = nib.load(str(img_path))
@@ -398,7 +410,6 @@ def predict_mri_two_stage(
         crop = np.pad(crop, ((px0, px1), (py0, py1), (pz0, pz1)), mode="constant", constant_values=0.0)
 
     crop_h, crop_w, crop_d = crop.shape
-    s2_hw = 128  # train_crop_hw from MRI_Stage2_TrainCfg
     img_s2_norm = _zscore(crop)
     img_s2_resized = _resample_3d(img_s2_norm, (s2_hw, s2_hw, crop_d))
     t_s2 = torch.from_numpy(img_s2_resized).unsqueeze(0).unsqueeze(0)
@@ -508,7 +519,10 @@ def _run_ct_model(
     patch_tensor: torch.Tensor,
     device: torch.device,
 ) -> np.ndarray:
-    """Run CPS CT model on a single patch, return averaged softmax probabilities.
+    """Run CT model on a single patch, return softmax probabilities.
+
+    Works for both CPS (model1+model2 average) and Mean Teacher
+    (model1 only at inference).
 
     Parameters
     ----------
@@ -521,8 +535,10 @@ def _run_ct_model(
     """
     patch_tensor = patch_tensor.to(device, dtype=torch.float32)
     out = model.forward(patch_tensor)
-    # Average the two CPS branches
-    prob = torch.softmax((out["logits1"] + out["logits2"]) / 2.0, dim=1)
+    if "logits2" in out:
+        prob = torch.softmax((out["logits1"] + out["logits2"]) / 2.0, dim=1)
+    else:
+        prob = torch.softmax(out["logits1"], dim=1)
     return prob.squeeze(0).detach().cpu().numpy()  # (n_classes, ps, ps, ps)
 
 
@@ -587,6 +603,12 @@ def predict_ct(
     """
     if device is None:
         device = next(model.parameters()).device
+
+    # Read inference parameters from model config (synced from train_config at init)
+    mcfg = getattr(model, "config", {}) or {}
+    if patch_size is None:
+        patch_size = int(mcfg.get("patch_size", CT_PATCH_SIZE))
+    patch_size = patch_size or 128
     if stride is None:
         stride = patch_size // 2
 
@@ -595,8 +617,8 @@ def predict_ct(
     orig_shape = image_raw.shape
     zooms = np.array(nii.header.get_zooms()[:3], dtype=np.float64)
 
-    # Normalise according to the model's training config
-    norm_cfg = getattr(model, "train_config", CFG()).get("normalization", CFG(mode="minmax"))
+    # Normalise according to the model config (synced from train_config at init)
+    norm_cfg = mcfg.get("normalization", CFG(mode="minmax"))
     mode = str(norm_cfg.get("mode", "minmax"))
     if mode == "percentile":
         p_low = float(norm_cfg.get("p_low", 0.5))
