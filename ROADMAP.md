@@ -360,13 +360,18 @@ negatives; the ScarLoss penalises false scar predictions on these samples.
 
 ### 6.3 CT Semi-Supervised (Task 3) — 🔄 Iterating
 
-Three variants trained, each 200 epochs (SGD+poly LR, batch_size=2, 128³ patches):
+All runs: SGD+poly LR (power=0.9), batch_size=2, 128³ patches,
+HU clip [−200,800] → minmax [0,1], 0.5mm isotropic resampling.
+Old augmentations (＂old aug＂): flips + 90° rotation + intensity
+scaling [0.9,1.1] + Gaussian noise σ≤0.05, each at 50 % prob.
 
-| Variant | Best mean Dice | Notes |
-|---------|---------------|-------|
-| CPS (baseline) | 0.3904 | No class weights; standard CPS with λ ramp-up |
-| CPS + class weights | 0.4275 | `ce_class_weight=[0.2,1,6,2]` — PV 6× higher |
-| **Mean Teacher** | **0.4655** | EMA decay 0.99; MSE consistency; best so far |
+| # | Mode | Epochs | Aug | Class weights | Best | @Ep | Notes |
+|---|------|--------|-----|---------------|------|-----|-------|
+| 1 | CPS | 200 | old aug | — | 0.3904 | — | baseline |
+| 2 | CPS | 200 | old aug | [0.2,1,6,2] | 0.4275 | — | PV ×6 |
+| 3 | MT | 200 | old aug | [0.2,1,6,2] | 0.4655 | — | EMA 0.99 |
+| 4 | MT | 300 | old aug | [0.2,1,6,2] | **0.5234** | 265 | +100 ep; also 0.4601 @197 ep |
+| 5 | MT | 300 | new 8-way | [0.2,1,6,2] | — | — | planned |
 
 Mean Teacher outperforms CPS by ~7.5 pp, likely because:
 - Teacher EMA provides a more stable pseudo-label target than the
@@ -383,13 +388,32 @@ PYTORCH_ALLOC_CONF=expandable_segments:True \
   2>&1 | tee log/ct_mt_train.log
 ```
 
-Next: add augmentations (gamma, brightness/contrast, Gaussian blur) and
-re-run Mean Teacher to measure gain.
+**MT extended (300 epochs, 2026-06-09):**
+
+```bash
+PYTORCH_ALLOC_CONF=expandable_segments:True \
+  python trainer.py --task ct \
+  --db-dir /Data1/wenh06/CARE2026-LeftAtrium --epochs 300 \
+  --semi-mode mean_teacher \
+  2>&1 | tee log/ct_mt_300ep_train.log
+```
+
+| Metric | Value | Epoch |
+|--------|-------|-------|
+| Best (overall) | **0.5234** | 265 |
+| Best within 200 ep | 0.4601 | 197 |
+
+Note: this run used the old hardcoded augmentations (flips, rotation,
+intensity scaling, Gaussian noise) via ``aug_prob=0.5``.  The +5.8 pp
+gain over the 200-epoch MT baseline (0.4655 → 0.5234) is attributable
+to extended training (+100 epochs).  Planned: re-run with the new
+8-method configurable augmentations enabled.
 
 ### 6.4 Validation & Submission
 
 MRI models ready (Stage 1 + Stage 2 both with CLAHE variants). CT model iterating
-(Mean Teacher best at 0.4655; re-training with augmentations next).
+(Mean Teacher best at 0.5234 with 300 epochs, no augmentation; planned re-run
+with 8-way augmentation enabled).
 
 ```bash
 # MRI only (Tasks 1 & 2):
