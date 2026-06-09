@@ -100,8 +100,10 @@ class ScarLoss(nn.Module):
         w = cfg.loss_weights
         self.dice_loss = DiceCELoss(dice_weight=0.5, ce_weight=0.5)
         self.focal_loss = FocalTverskyLoss(alpha=0.3, beta=0.7, gamma=0.75)
+        self.boundary_loss = BoundaryLoss() if w.get("scar_boundary", 0.0) > 0 else None
         self.w_dice = w.get("scar_dice", 1.0)
         self.w_focal = w.get("scar_focal", 0.5)
+        self.w_boundary = w.get("scar_boundary", 0.0)
         self.spatial_w0 = w.get("spatial_w0", 5.0)
         self.sigma_mm = w.get("spatial_sigma_mm", 2.0)
 
@@ -132,7 +134,10 @@ class ScarLoss(nn.Module):
                 weighted_ce = (ce_voxel * w_t).mean()
                 dice = self.dice_loss(sl, st)
                 focal = self.focal_loss(sl, st)
-                total = total + self.w_dice * dice + self.w_focal * focal + self.spatial_w0 * 0.1 * weighted_ce
+                term = self.w_dice * dice + self.w_focal * focal + self.spatial_w0 * 0.1 * weighted_ce
+                if self.boundary_loss is not None:
+                    term = term + self.w_boundary * self.boundary_loss(sl, st)
+                total = total + term
                 n_pos += 1
             else:
                 # No-scar sample: push scar probability towards zero everywhere
@@ -163,6 +168,8 @@ class CTLoss(nn.Module):
             dice_weight=w.get("sup_dice", 0.5), ce_weight=w.get("sup_ce", 0.5), ce_class_weight=class_w
         )
         self.consistency_fn = nn.MSELoss()  # Mean Teacher: MSE between softmax outputs
+        self.boundary_loss = HausdorffERLoss(alpha=2.0, erosions=5) if w.get("sup_boundary", 0.0) > 0 else None
+        self.w_boundary = w.get("sup_boundary", 0.0)
         self.w_cps = w.get("cps", 1.0)
         self.w_mt = w.get("mt_consist", 1.0)
 
@@ -176,6 +183,7 @@ class CTLoss(nn.Module):
         cps_weight: float = 1.0,
     ) -> dict:
         sup_loss = logits1.sum() * 0.0
+        boundary_loss = logits1.sum() * 0.0
         if target is not None and labeled_mask is not None and labeled_mask.any():
             if logits2 is not None:
                 # CPS: supervised loss on both models
@@ -183,9 +191,13 @@ class CTLoss(nn.Module):
                 l2 = logits2[labeled_mask]
                 tgt = target[labeled_mask].long()
                 sup_loss = 0.5 * (self.supervised_loss(l1, tgt) + self.supervised_loss(l2, tgt))
+                if self.boundary_loss is not None:
+                    boundary_loss = 0.5 * (self.boundary_loss(l1, tgt) + self.boundary_loss(l2, tgt))
             else:
                 # Mean Teacher: supervised loss on student only
                 sup_loss = self.supervised_loss(logits1[labeled_mask], target[labeled_mask].long())
+                if self.boundary_loss is not None:
+                    boundary_loss = self.boundary_loss(logits1[labeled_mask], target[labeled_mask].long())
 
         # Consistency loss
         consist_loss = logits1.sum() * 0.0
@@ -203,4 +215,7 @@ class CTLoss(nn.Module):
             cps2 = nn.functional.cross_entropy(logits2, pseudo1)
             consist_loss = self.w_cps * cps_weight * 0.5 * (cps1 + cps2)
 
-        return {"sup_loss": sup_loss, "consist_loss": consist_loss, "total_loss": sup_loss + consist_loss}
+        total = sup_loss + consist_loss
+        if self.boundary_loss is not None:
+            total = total + self.w_boundary * boundary_loss
+        return {"sup_loss": sup_loss, "consist_loss": consist_loss, "total_loss": total}

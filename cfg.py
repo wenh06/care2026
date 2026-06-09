@@ -116,6 +116,7 @@ MRI_Stage2_TrainCfg = deepcopy(BaseCfg)
 
 MRI_Stage2_TrainCfg.task = "mri"
 MRI_Stage2_TrainCfg.stage = 2
+MRI_Stage2_TrainCfg.backbone = "vnet_stage2"  # "vnet_stage2" | "nested_vnet_stage2"
 
 # Volume shape: canonical → crop centred on LA centroid → resize to 128×128×44
 MRI_Stage2_TrainCfg.canonical_shape = MRI_CANONICAL_SHAPE
@@ -153,6 +154,7 @@ MRI_Stage2_TrainCfg.augmentation = CFG(
 MRI_Stage2_TrainCfg.loss_weights = CFG(
     scar_dice=1.0,
     scar_focal=0.5,
+    scar_boundary=0.0,  # set >0 to enable BoundaryLoss (thin wall precision)
     spatial_w0=5.0,
     spatial_sigma_mm=2.0,
 )
@@ -170,6 +172,7 @@ MRI_Stage2_TrainCfg.apply_mclahe = False
 CT_TrainCfg = deepcopy(BaseCfg)
 
 CT_TrainCfg.task = "ct"
+CT_TrainCfg.backbone = "vnet_ct"  # "vnet_ct" | "nested_vnet_ct"
 
 # Patch size (isotropic cube) after resampling to 0.5 mm isotropic
 CT_TrainCfg.patch_size = CT_PATCH_SIZE  # 128³
@@ -190,6 +193,18 @@ CT_TrainCfg.lr = CT_TrainCfg.learning_rate
 # Polynomial LR decay (power = 0.9)
 CT_TrainCfg.lr_scheduler = "poly"
 CT_TrainCfg.lr_poly_power = 0.9
+
+# CT intensity normalisation — configurable mode
+# "minmax"     : fixed HU clip then scale to [0,1]  (current default)
+# "percentile" : per-volume percentile clip then scale to [0,1]  (nnUNet-style)
+# "zscore"     : per-volume z-score  (μ=0, σ=1), no clipping
+CT_TrainCfg.normalization = CFG(
+    mode="minmax",
+    hu_min=-200.0,
+    hu_max=800.0,  # for "minmax"
+    p_low=0.5,
+    p_high=99.5,  # for "percentile"
+)
 
 # Augmentation (nnUNet-inspired, configurable per method)
 CT_TrainCfg.augmentation = CFG(
@@ -219,6 +234,7 @@ CT_TrainCfg.mt_consistency_weight = 1.0  # λ_consist in L_total = L_sup + λ·L
 CT_TrainCfg.loss_weights = CFG(
     sup_dice=0.5,
     sup_ce=0.5,
+    sup_boundary=0.0,  # set >0 to enable HausdorffERLoss (PV/LAA boundary precision)
     cps=1.0,
     ce_class_weight=[0.2, 1.0, 6.0, 2.0],  # [bg, LA, PV, LAA] — PV 6x higher
 )
@@ -241,6 +257,7 @@ ModelCfg.vnet_stage1 = CFG(
     num_classes=2,  # binary: background + LA cavity
     norm="instance",
     activation="mish",
+    use_eca_skip=False,
     input_conv=CFG(channels=16, kernel_size=5),
     down_conv=CFG(
         channels=[32, 64, 128, 256],
@@ -265,6 +282,7 @@ ModelCfg.vnet_stage2 = CFG(
     num_classes=2,  # binary: background + scar
     norm="instance",
     activation="mish",
+    use_eca_skip=False,
     input_conv=CFG(channels=16, kernel_size=5),
     down_conv=CFG(
         channels=[32, 64, 128, 256],
@@ -280,6 +298,30 @@ ModelCfg.vnet_stage2 = CFG(
     bottleneck_transformer=None,
 )
 
+# -- Nested V-Net (UNet++) for MRI Stage 2 (deep supervision variant) ---------
+
+ModelCfg.nested_vnet_stage2 = CFG(
+    in_channels=1,
+    num_classes=2,  # binary: background + scar
+    norm="instance",
+    activation="mish",
+    use_eca_skip=False,
+    input_conv=CFG(channels=16, kernel_size=5),
+    down_conv=CFG(
+        channels=[32, 64, 128, 256],
+        kernel_size=[3, 3, 3, 3],
+        dropout=[0.0, 0.0, 0.3, 0.3],
+    ),
+    up_conv=CFG(
+        channels=[128, 64, 32, 16],
+        kernel_size=[3, 3, 3, 3],
+        dropout=[0.0, 0.0, 0.0, 0.0],
+    ),
+    output_conv=CFG(kernel_size=1),
+    deep_supervision=True,
+    bottleneck_transformer=None,
+)
+
 # -- VNet (single-head) for CT CPS (Task 3) ----------------------------------
 
 ModelCfg.vnet_ct = CFG(
@@ -287,6 +329,7 @@ ModelCfg.vnet_ct = CFG(
     num_classes=CT_NUM_CLASSES,  # 4
     norm="batch",
     activation="relu",
+    use_eca_skip=False,
     input_conv=CFG(channels=16, kernel_size=3),
     down_conv=CFG(
         channels=[32, 64, 128, 256],
@@ -299,5 +342,29 @@ ModelCfg.vnet_ct = CFG(
         dropout=[0.0, 0.0, 0.0, 0.0],
     ),
     output_conv=CFG(kernel_size=1),
+    bottleneck_transformer=None,
+)
+
+# -- Nested V-Net (UNet++) for CT (deep supervision variant) --------------------
+
+ModelCfg.nested_vnet_ct = CFG(
+    in_channels=1,
+    num_classes=CT_NUM_CLASSES,  # 4
+    norm="batch",
+    activation="relu",
+    use_eca_skip=False,
+    input_conv=CFG(channels=16, kernel_size=3),
+    down_conv=CFG(
+        channels=[32, 64, 128, 256],
+        kernel_size=[3, 3, 3, 3],
+        dropout=[0.0, 0.0, 0.0, 0.2],
+    ),
+    up_conv=CFG(
+        channels=[128, 64, 32, 16],
+        kernel_size=[3, 3, 3, 3],
+        dropout=[0.0, 0.0, 0.0, 0.0],
+    ),
+    output_conv=CFG(kernel_size=1),
+    deep_supervision=True,
     bottleneck_transformer=None,
 )

@@ -19,7 +19,7 @@ from torch_ecg.utils import SizeMixin
 
 from .layers import BottleneckTransformer3D, ConvNormAct, DownBlock3D, UpBlock3D
 
-__all__ = ["VNet"]
+__all__ = ["VNet", "_SegEncoder3D", "_upsample_to"]
 
 
 class _SegEncoder3D(nn.Module):
@@ -115,6 +115,7 @@ class VNet(nn.Module, SizeMixin):
         num_classes=4,
         norm="batch",
         activation="relu",
+        use_eca_skip=False,
         input_conv=CFG(channels=16, kernel_size=3),
         down_conv=CFG(
             channels=[32, 64, 128, 256],
@@ -160,7 +161,13 @@ class VNet(nn.Module, SizeMixin):
             down_conv=self.__config.down_conv,
             bottleneck_transformer=bottleneck_transformer,
         )
-        self.up_blocks = _make_decoder(self.encoder._enc_channels, self.__config.up_conv, norm, act)
+        self.up_blocks = _make_decoder(
+            self.encoder._enc_channels,
+            self.__config.up_conv,
+            norm,
+            act,
+            use_eca=bool(self.__config.get("use_eca_skip", False)),
+        )
         self.out_conv = nn.Conv3d(self.__config.up_conv.channels[-1], self.__config.num_classes, kernel_size=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -193,3 +200,10 @@ class VNet(nn.Module, SizeMixin):
     @property
     def config(self) -> CFG:
         return self.__config
+
+
+def _upsample_to(x: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Upsample *x* to match the spatial size of *target* via trilinear interpolation."""
+    if x.shape[2:] == target.shape[2:]:
+        return x
+    return nn.functional.interpolate(x, size=target.shape[2:], mode="trilinear", align_corners=False)

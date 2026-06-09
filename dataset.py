@@ -516,14 +516,39 @@ class CARE2026_CT_Dataset(Dataset, ReprMixin):
         return self._cache[rec]
 
     def _preprocess_ct(self, rec: str) -> Tuple[np.ndarray, Optional[np.ndarray]]:
-        """HU clip, normalise, and resample CT volume to isotropic 0.5 mm voxels."""
+        """Normalise and resample CT volume to isotropic 0.5 mm voxels.
+
+        Normalisation mode is read from ``self.config.normalization``:
+        - ``"minmax"``     → fixed HU clip then scale to [0,1]
+        - ``"percentile"`` → per-volume percentile clip then scale to [0,1]
+        - ``"zscore"``     → per-volume z-score
+        """
         nii = nib.load(str(self._reader.get_data_path(rec)))
         image = nii.get_fdata().astype(np.float32)
         zooms = np.array(nii.header.get_zooms()[:3], dtype=np.float64)  # (sx, sy, sz) mm
 
-        # HU clip then normalise to [0, 1]
-        image = np.clip(image, CT_HU_MIN, CT_HU_MAX)
-        image = (image - CT_HU_MIN) / (CT_HU_MAX - CT_HU_MIN)
+        norm_cfg = self.config.get("normalization", {})
+        mode = str(norm_cfg.get("mode", "minmax"))
+
+        if mode == "percentile":
+            p_low = float(norm_cfg.get("p_low", 0.5))
+            p_high = float(norm_cfg.get("p_high", 99.5))
+            v_low = float(np.percentile(image, p_low))
+            v_high = float(np.percentile(image, p_high))
+            if v_high > v_low:
+                image = np.clip(image, v_low, v_high)
+                image = (image - v_low) / (v_high - v_low)
+            else:
+                image = np.zeros_like(image, dtype=np.float32)
+        elif mode == "zscore":
+            mu, std = float(image.mean()), float(image.std())
+            image = (image - mu) / (std + 1e-8)
+        else:
+            # "minmax" — fixed HU window
+            hu_min = float(norm_cfg.get("hu_min", CT_HU_MIN))
+            hu_max = float(norm_cfg.get("hu_max", CT_HU_MAX))
+            image = np.clip(image, hu_min, hu_max)
+            image = (image - hu_min) / (hu_max - hu_min)
 
         # Compute target shape for isotropic resampling
         native_shape = np.array(image.shape[:3], dtype=np.float64)

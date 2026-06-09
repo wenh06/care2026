@@ -124,17 +124,39 @@ class CARE2026_MRI_Stage2_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
         self.__train_config = deepcopy(MRI_Stage2_TrainCfg)
         if train_config is not None:
             self.__train_config.update(deepcopy(train_config))
-        # Single-head VNet, scar only (2 classes: bg + scar)
-        self.backbone = VNet(self.config.vnet_stage2)
+        # Single-head VNet or NestedVNet, scar only (2 classes: bg + scar)
+        backbone = str(self.__config.get("backbone", self.__train_config.get("backbone", "vnet_stage2")))
+        if backbone == "nested_vnet_stage2":
+            from .nested_vnet import NestedVNet
+
+            self.backbone = NestedVNet(self.config.nested_vnet_stage2)
+            self._is_nested = True
+        else:
+            self.backbone = VNet(self.config.vnet_stage2)
+            self._is_nested = False
         self.criterion = ScarLoss(self.train_config)
 
     def forward(self, img: torch.Tensor, labels: Optional[Dict[str, torch.Tensor]] = None) -> Dict[str, torch.Tensor]:
         img = img.to(device=self.device, dtype=self.dtype)
         scar_logits = self.backbone(img)
-        output = {"scar_logits": scar_logits, "scar_mask": scar_logits.argmax(dim=1)}
+        # For NestedVNet with deep supervision: upsample each level to the
+        # full-resolution space, then average for loss computation.
+        if self._is_nested and isinstance(scar_logits, (list, tuple)):
+            full_logits = []
+            tgt_spatial = scar_logits[-1].shape[2:]
+            for lo in scar_logits:
+                if lo.shape[2:] != tgt_spatial:
+                    lo = nn.functional.interpolate(lo, size=tgt_spatial, mode="trilinear", align_corners=False)
+                full_logits.append(lo)
+            logits_for_loss = sum(full_logits) / len(full_logits)
+            logits_for_mask = scar_logits[-1]
+        else:
+            logits_for_loss = scar_logits
+            logits_for_mask = scar_logits
+        output = {"scar_logits": scar_logits, "scar_mask": logits_for_mask.argmax(dim=1)}
         if labels is not None:
             loss_dict = self.criterion(
-                scar_logits=scar_logits,
+                scar_logits=logits_for_loss,
                 scar_target=labels["scar_mask"].to(self.device),
                 has_scar=labels["has_scar"].to(self.device),
             )
@@ -148,7 +170,10 @@ class CARE2026_MRI_Stage2_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
         input_t = self._prepare_input(img)
         output = self.forward(input_t)
         self.train(original_mode)
-        return CARE2026Outputs(task="mri", scar_mask=output["scar_mask"].cpu().numpy().astype(np.uint8))
+        scar_mask = output["scar_mask"]
+        if isinstance(scar_mask, (list, tuple)):
+            scar_mask = scar_mask[-1]
+        return CARE2026Outputs(task="mri", scar_mask=scar_mask.cpu().numpy().astype(np.uint8))
 
     def _prepare_input(self, img: Union[np.ndarray, torch.Tensor, list]) -> torch.Tensor:
         if isinstance(img, (list, tuple)):
@@ -204,12 +229,24 @@ class CARE2026_CT_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
         if self.mode not in ("cps", "mean_teacher"):
             raise ValueError(f"Unknown semi_supervised_mode: {self.mode}")
 
-        self.model1 = VNet(self.config.vnet_ct)
+        backbone = str(self.__config.get("backbone", "vnet_ct"))
+        if backbone == "nested_vnet_ct":
+            from .nested_vnet import NestedVNet
+
+            model_cfg = self.config.nested_vnet_ct
+            self._make_model = lambda: NestedVNet(model_cfg)
+        else:
+            model_cfg = self.config.vnet_ct
+            self._make_model = lambda: VNet(model_cfg)
+        self._backbone = backbone
+        self._is_nested = backbone.startswith("nested")
+
+        self.model1 = self._make_model()
         if self.mode == "cps":
-            self.model2 = VNet(self.config.vnet_ct)
+            self.model2 = self._make_model()
         else:
             # Mean Teacher: EMA teacher model (no grad)
-            self.teacher = VNet(self.config.vnet_ct)
+            self.teacher = self._make_model()
             self.teacher.load_state_dict(self.model1.state_dict())
             for p in self.teacher.parameters():
                 p.requires_grad = False
@@ -225,17 +262,27 @@ class CARE2026_CT_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
             for tp, sp in zip(self.teacher.parameters(), self.model1.parameters()):
                 tp.data.mul_(alpha).add_(sp.data, alpha=1.0 - alpha)
 
+    def _ds_loss(self, loss_fn, logits_list, target, **kw):
+        """Average loss across deep-supervision levels (no-op for single-output models)."""
+        if isinstance(logits_list, (list, tuple)):
+            return sum(loss_fn(lo, target, **kw) for lo in logits_list) / len(logits_list)
+        return loss_fn(logits_list, target, **kw)
+
+    def _ds_last(self, logits):
+        """Return the last (full-resolution) output from a NestedVNet list."""
+        return logits[-1] if isinstance(logits, (list, tuple)) else logits
+
     def forward(
         self, img: torch.Tensor, labels: Optional[Dict[str, torch.Tensor]] = None, cps_weight: float = 1.0
     ) -> Dict[str, torch.Tensor]:
         img = img.to(device=self.device, dtype=self.dtype)
         if self.mode == "cps":
             logits1, logits2 = self.model1(img), self.model2(img)
-            seg_mask = ((logits1 + logits2) / 2).argmax(dim=1)
+            seg_mask = self._ds_last((self._ds_last(logits1) + self._ds_last(logits2)) / 2).argmax(dim=1)
             output = {"logits1": logits1, "logits2": logits2, "seg_mask": seg_mask}
         else:
             logits_s = self.model1(img)
-            seg_mask = logits_s.argmax(dim=1)
+            seg_mask = self._ds_last(logits_s).argmax(dim=1)
             output = {"logits1": logits_s, "seg_mask": seg_mask}
             if self.training:
                 with torch.no_grad():
@@ -249,14 +296,51 @@ class CARE2026_CT_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
                 target = target.to(self.device)
             if labeled_mask is not None:
                 labeled_mask = labeled_mask.to(self.device)
-            loss_dict = self.criterion(
-                logits1=output.get("logits1"),
-                logits2=output.get("logits2"),
-                logits_t=output.get("logits_t") if self.mode == "mean_teacher" else None,
-                target=target,
-                labeled_mask=labeled_mask,
-                cps_weight=cps_weight,
-            )
+
+            logits1 = output.get("logits1")
+            logits2 = output.get("logits2")
+            logits_t = output.get("logits_t") if self.mode == "mean_teacher" else None
+
+            if self._is_nested:
+                # Deep supervision: upsample each level to target spatial size,
+                # then average loss across all levels.
+                total_loss = logits1[0].sum() * 0.0
+                sup_losses, consist_losses = [], []
+                tgt_spatial = target.shape[1:]  # (H, W, D) — target has no channel dim
+                for level, (l1,) in enumerate(zip(logits1)):
+                    if l1.shape[2:] != tgt_spatial:
+                        l1 = nn.functional.interpolate(l1, size=tgt_spatial, mode="trilinear", align_corners=False)
+                    l2_lev = logits2[level] if logits2 is not None else None
+                    if l2_lev is not None and l2_lev.shape[2:] != tgt_spatial:
+                        l2_lev = nn.functional.interpolate(l2_lev, size=tgt_spatial, mode="trilinear", align_corners=False)
+                    lt_lev = logits_t[level] if logits_t is not None else None
+                    if lt_lev is not None and lt_lev.shape[2:] != tgt_spatial:
+                        lt_lev = nn.functional.interpolate(lt_lev, size=tgt_spatial, mode="trilinear", align_corners=False)
+                    ld = self.criterion(
+                        logits1=l1,
+                        logits2=l2_lev,
+                        logits_t=lt_lev,
+                        target=target,
+                        labeled_mask=labeled_mask,
+                        cps_weight=cps_weight,
+                    )
+                    sup_losses.append(ld["sup_loss"])
+                    consist_losses.append(ld["consist_loss"])
+                    total_loss = total_loss + ld["total_loss"]
+                loss_dict = {
+                    "sup_loss": sum(sup_losses) / len(sup_losses),
+                    "consist_loss": sum(consist_losses) / len(consist_losses),
+                    "total_loss": total_loss / len(logits1),
+                }
+            else:
+                loss_dict = self.criterion(
+                    logits1=logits1,
+                    logits2=logits2,
+                    logits_t=logits_t,
+                    target=target,
+                    labeled_mask=labeled_mask,
+                    cps_weight=cps_weight,
+                )
             output.update(loss_dict)
         return output
 

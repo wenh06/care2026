@@ -76,7 +76,7 @@ Data are provided in NIfTI format:
 
 - [README.md](README.md): this file — project overview, task definitions, data layout, and module descriptions.
 - [ROADMAP.md](ROADMAP.md): development roadmap covering approach design, phased implementation plan, MBAS2024 insights, experiment matrix, and next steps.
-- [cfg.py](cfg.py): centralized configuration objects (`BaseCfg`, `MRI_Stage1_TrainCfg`, `MRI_Stage2_TrainCfg`, `CT_TrainCfg`, `ModelCfg`) via `torch_ecg.cfg.CFG`. Covers optimiser, scheduler, loss weights, CPS ramp-up, and architecture hyper-parameters.
+- [cfg.py](cfg.py): centralized configuration objects (`BaseCfg`, `MRI_Stage1_TrainCfg`, `MRI_Stage2_TrainCfg`, `CT_TrainCfg`, `ModelCfg`) via `torch_ecg.cfg.CFG`. Covers optimiser, scheduler, per-task augmentation presets, loss weights, semi-supervised mode (CPS/Mean Teacher), and architecture hyper-parameters.
 - [const.py](const.py): shared project-wide constants — MRI/CT spatial shapes and spacings, class maps, dataset size counts, cache directory paths, and a `REMOTE_MODELS` placeholder for cloud-hosted checkpoint URLs.
 - [data_reader.py](data_reader.py): NIfTI data reader classes (`CARE2026_MRI`, `CARE2026_CT`) built on `torch_ecg` — file listing, label loading, LA bounding-box extraction, resampling, HU windowing, and cropped data access.
 - [dataset.py](dataset.py): PyTorch `Dataset` classes for all three tasks (`CARE2026_MRI_Stage1_Dataset`, `CARE2026_MRI_Stage2_Dataset`, `CARE2026_CT_Dataset`) with RAM caching, on-the-fly augmentation, foreground-biased patch sampling, and CLAHE support.
@@ -102,12 +102,12 @@ Data are provided in NIfTI format:
 ### Folders (Modules)
 
 - [models](models): model architecture definitions and high-level wrappers.
-  - [`__init__.py`](models/__init__.py): model wrapper classes — `CARE2026_MRI_Stage1_Model` (VNet for coarse LA localisation), `CARE2026_MRI_Stage2_Model` (DualHeadVNet or DualHeadNestedVNet for LA + scar), `CARE2026_CT_Model` (twin VNets for CPS semi-supervised learning). All wrappers compute loss inside `forward()` and support checkpoint save/load.
-  - [vnet.py](models/vnet.py): 3D V-Net backbone — `VNet` (single-decoder, multi-class) and `DualHeadVNet` (shared encoder + two independent decoders for LA cavity and scar). Supports optional `BottleneckTransformer3D` at the bottleneck and `ECAGate3D` on skip connections.
-  - [nested_vnet.py](models/nested_vnet.py): UNet++-style `DualHeadNestedVNet` with dense skip connections, deep supervision at multiple decoder resolutions, and dual heads for LA cavity + scar.
+  - [`__init__.py`](models/__init__.py): model wrapper classes — `CARE2026_MRI_Stage1_Model` (VNet for coarse LA localisation), `CARE2026_MRI_Stage2_Model` (single-head VNet for scar-only, trained on centroid-cropped region), `CARE2026_CT_Model` (VNet(s) supporting CPS dual-model and Mean Teacher semi-supervised modes). All wrappers compute loss inside `forward()` and support checkpoint save/load.
+  - [vnet.py](models/vnet.py): 3D V-Net backbone — `VNet` (encoder-decoder with skip connections). Supports optional `BottleneckTransformer3D` at the bottleneck and `ECAGate3D` on skip connections.
+  - [nested_vnet.py](models/nested_vnet.py): UNet++-style NestedVNet with dense skip connections and deep supervision at multiple decoder resolutions (reserved for future use).
   - [layers.py](models/layers.py): shared 3-D building blocks — `ConvNormAct`, `ResBlock3D`, `DownBlock3D`, `UpBlock3D`, `NestedUpBlock3D`, `ECAGate3D` (efficient channel attention), `WindowedMHSA3D` (windowed multi-head self-attention), `BottleneckTransformer3D` (Swin-style transformer block).
   - [loss/](models/loss): custom loss functions for all three tasks.
-    - [`__init__.py`](models/loss/__init__.py): task-level compound loss wrappers — `Stage1MRILoss` (binary DiceCE), `MRILoss` (LA DiceCE + scar Tversky/Focal/Boundary), `CTLoss` (supervised DiceCE + CPS consistency CE).
+    - [`__init__.py`](models/loss/__init__.py): task-level compound loss wrappers — `Stage1MRILoss` (binary DiceCE), `ScarLoss` (Dice+Focal+spatially-weighted CE with Gaussian distance map), `CTLoss` (supervised DiceCE + CPS or Mean Teacher consistency).
     - [dice_loss.py](models/loss/dice_loss.py): `SoftDiceLoss`, `DiceCELoss`, `TverskyLoss`, `FocalTverskyLoss`.
     - [boundary_loss.py](models/loss/boundary_loss.py): `BoundaryLoss` (signed distance map), `HausdorffDTLoss` (distance-transform HD), `HausdorffERLoss` (GPU morphological erosion HD).
     - [compound_loss.py](models/loss/compound_loss.py): `DiceFocalLoss`, `DiceBoundaryLoss`, `DiceTopKLoss`.

@@ -25,6 +25,7 @@ import torch
 import torch.nn.functional as F
 from scipy.ndimage import binary_dilation
 from scipy.ndimage import label as _nd_label
+from torch_ecg.cfg import CFG
 
 from const import (
     CT_HU_MAX,
@@ -594,9 +595,28 @@ def predict_ct(
     orig_shape = image_raw.shape
     zooms = np.array(nii.header.get_zooms()[:3], dtype=np.float64)
 
-    # HU clip + normalise
-    image = np.clip(image_raw, CT_HU_MIN, CT_HU_MAX)
-    image = (image - CT_HU_MIN) / (CT_HU_MAX - CT_HU_MIN)
+    # Normalise according to the model's training config
+    norm_cfg = getattr(model, "train_config", CFG()).get("normalization", CFG(mode="minmax"))
+    mode = str(norm_cfg.get("mode", "minmax"))
+    if mode == "percentile":
+        p_low = float(norm_cfg.get("p_low", 0.5))
+        p_high = float(norm_cfg.get("p_high", 99.5))
+        v_low = float(np.percentile(image_raw, p_low))
+        v_high = float(np.percentile(image_raw, p_high))
+        if v_high > v_low:
+            image = np.clip(image_raw, v_low, v_high)
+            image = (image - v_low) / (v_high - v_low)
+        else:
+            image = np.zeros_like(image_raw, dtype=np.float32)
+    elif mode == "zscore":
+        mu, std = float(image_raw.mean()), float(image_raw.std())
+        image = (image_raw - mu) / (std + 1e-8)
+    else:
+        # "minmax"
+        hu_min = float(norm_cfg.get("hu_min", CT_HU_MIN))
+        hu_max = float(norm_cfg.get("hu_max", CT_HU_MAX))
+        image = np.clip(image_raw, hu_min, hu_max)
+        image = (image - hu_min) / (hu_max - hu_min)
 
     # Resample to 0.5 mm isotropic
     target_spacing = np.array(CT_TARGET_SPACING, dtype=np.float64)
