@@ -23,7 +23,7 @@ from const import MRI_CANONICAL_SHAPE, MRI_STAGE1_SHAPE
 from data_reader import CARE2026_MRI
 from predict import predict_mri_two_stage
 from utils.mclahe import mclahe as _mclahe
-from utils.viz_utils import _is_notebook
+from utils.viz_utils import _hatch_for, _is_notebook
 
 __all__ = [
     "view_prediction",
@@ -38,6 +38,17 @@ def _binary_dice_metric(pred: np.ndarray, target: np.ndarray) -> float:
     p, g = pred.astype(bool), target.astype(bool)
     inter = (p & g).sum()
     return float(2 * inter / (p.sum() + g.sum() + 1e-8))
+
+
+def _contourf_with_hatch(ax, mask_slice, color, hatch, alpha=0.25):
+    """Draw filled contour + opaque hatch overlay on top.
+
+    Hatch lines must be rendered independently from the transparent fill,
+    otherwise they inherit the fill's alpha and become invisible.
+    Each class should use a distinct pattern via ``_hatch_for(cls_id)``.
+    """
+    ax.contourf(mask_slice, levels=[0.5, 1], colors=[color], alpha=alpha, antialiased=True)
+    return ax.contourf(mask_slice, levels=[0.5, 1], colors="none", antialiased=True, hatches=[hatch])
 
 
 def view_prediction(
@@ -150,14 +161,16 @@ def view_prediction(
                         continue
                     color = palette.get(cls_id, "white")
                     if is_filled:
-                        ax.contourf(
-                            mask_slice,
-                            levels=[0.5, 1],
-                            colors=[color],
-                            alpha=0.25,
-                            antialiased=True,
-                            hatches=["//"] if use_hatch else [],
-                        )
+                        if use_hatch:
+                            _contourf_with_hatch(ax, mask_slice, color, _hatch_for(cls_id))
+                        else:
+                            ax.contourf(
+                                mask_slice,
+                                levels=[0.5, 1],
+                                colors=[color],
+                                alpha=0.25,
+                                antialiased=True,
+                            )
                     else:
                         ax.contour(mask_slice, levels=[0.5], colors=[color], linewidths=1.5)
 
@@ -204,14 +217,16 @@ def view_prediction(
                     continue
                 color = palette.get(cls_id, "white")
                 if is_filled:
-                    ax.contourf(
-                        mask_slice,
-                        levels=[0.5, 1],
-                        colors=[color],
-                        alpha=0.25,
-                        antialiased=True,
-                        hatches=["//"] if use_hatch else [],
-                    )
+                    if use_hatch:
+                        _contourf_with_hatch(ax, mask_slice, color, _hatch_for(cls_id))
+                    else:
+                        ax.contourf(
+                            mask_slice,
+                            levels=[0.5, 1],
+                            colors=[color],
+                            alpha=0.25,
+                            antialiased=True,
+                        )
                 else:
                     ax.contour(mask_slice, levels=[0.5], colors=[color], linewidths=1)
 
@@ -336,9 +351,10 @@ def evaluate_stage1(
         def _draw(ax, mask, color):
             ms = mask[..., sl]
             if is_filled:
-                ax.contourf(
-                    ms, levels=[0.5, 1], colors=[color], alpha=0.25, antialiased=True, hatches=["//"] if use_hatch else []
-                )
+                if use_hatch:
+                    _contourf_with_hatch(ax, ms, color, _hatch_for(1))
+                else:
+                    ax.contourf(ms, levels=[0.5, 1], colors=[color], alpha=0.25, antialiased=True)
             else:
                 ax.contour(ms, levels=[0.5], colors=[color], linewidths=1.5)
 
@@ -458,9 +474,10 @@ def evaluate_stage2(
                     continue
                 ms = mask[..., sl]
                 if is_filled:
-                    ax.contourf(
-                        ms, levels=[0.5, 1], colors=[c], alpha=0.25, antialiased=True, hatches=["//"] if use_hatch else []
-                    )
+                    if use_hatch:
+                        _contourf_with_hatch(ax, ms, c, _hatch_for(cls_id))
+                    else:
+                        ax.contourf(ms, levels=[0.5, 1], colors=[c], alpha=0.25, antialiased=True)
                 else:
                     ax.contour(ms, levels=[0.5], colors=[c], linewidths=1.5)
 
@@ -569,7 +586,10 @@ def evaluate_ct(
                 if ms.max() == 0:
                     continue
                 if is_filled:
-                    ax.contourf(ms, levels=[0.5, 1], colors=[c], alpha=0.25, antialiased=True)
+                    if use_hatch:
+                        _contourf_with_hatch(ax, ms, c, _hatch_for(cls_id))
+                    else:
+                        ax.contourf(ms, levels=[0.5, 1], colors=[c], alpha=0.25, antialiased=True)
                 else:
                     ax.contour(ms, levels=[0.5], colors=[c], linewidths=1.5)
 
@@ -729,7 +749,10 @@ def evaluate_training_sample(
                 c = next(col for cid, col, _ in PALETTE if cid == cls_id)
                 ms = (mask[..., sl] == cls_id).astype(np.uint8) if not is_mri else mask[..., sl]
                 if is_filled:
-                    ax.contourf(ms, levels=[0.5, 1], colors=[c], alpha=0.25, antialiased=True)
+                    if use_hatch:
+                        _contourf_with_hatch(ax, ms, c, _hatch_for(cls_id))
+                    else:
+                        ax.contourf(ms, levels=[0.5, 1], colors=[c], alpha=0.25, antialiased=True)
                 else:
                     ax.contour(ms, levels=[0.5], colors=[c], linewidths=1.5)
 

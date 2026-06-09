@@ -21,6 +21,7 @@ __all__ = [
 
 # Distinct hatch patterns per class ID (cycled)
 _HATCH_POOL = ["//", "\\\\", "..", "xx", "oo", "**"]
+_HATCH_COLOR = "black"  # colour for hatch edges (when used) - black looks best on light colours
 
 
 def _hatch_for(cls_id: int) -> str:
@@ -118,16 +119,23 @@ def _slice_view_interactive(
                 color = palette.get(cls_id, "white")
 
                 if is_filled:
-                    # Filled overlay: single contourf with optional hatch pattern.
-                    # (Two separate contourf calls would overwrite each other.)
+                    # Filled fill (transparent, no hatch).
                     ax.contourf(
                         mask_slice,
                         levels=[0.5, 1],
                         colors=[color],
                         alpha=0.25,
                         antialiased=True,
-                        hatches=[_hatch_for(cls_id)] if use_hatch else [],
                     )
+                    if use_hatch:
+                        # Hatch overlay on top — opaque so lines are crisp.
+                        ax.contourf(
+                            mask_slice,
+                            levels=[0.5, 1],
+                            colors="none",
+                            antialiased=True,
+                            hatches=[_hatch_for(cls_id)],
+                        )
                     legend_handle = mpatches.Patch(
                         facecolor=color,
                         alpha=0.5,
@@ -221,8 +229,15 @@ def _slice_view_static(
                     colors=[color],
                     alpha=0.25,
                     antialiased=True,
-                    hatches=[_hatch_for(cls_id)] if use_hatch else [],
                 )
+                if use_hatch:
+                    ax.contourf(
+                        mask_slice,
+                        levels=[0.5, 1],
+                        colors="none",
+                        antialiased=True,
+                        hatches=[_hatch_for(cls_id)],
+                    )
             else:
                 ax.contour(mask_slice, levels=[0.5], colors=[color], linewidths=1)
 

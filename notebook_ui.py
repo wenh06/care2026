@@ -19,10 +19,11 @@ import nibabel as nib
 import numpy as np
 import torch
 from IPython.display import display
-from ipywidgets import HTML, Button, Dropdown, FloatSlider, HBox, IntSlider, Output, Text, VBox
+from ipywidgets import HTML, Button, Checkbox, Dropdown, FloatSlider, HBox, IntSlider, Output, Text, VBox
 
 from outputs import package_submission
 from predict import predict_ct, predict_mri_two_stage
+from utils.mclahe import mclahe as _mclahe
 from utils.viz_utils import _is_notebook
 
 __all__ = ["InferencePanel"]
@@ -109,7 +110,9 @@ class InferencePanel:
         self._dd_sample.observe(self._on_sample_change, names="value")
         self._btn_preview = Button(description="Preview", button_style="info")
         self._btn_preview.on_click(self._on_preview)
-        row3 = HBox([self._dd_task, self._dd_sample, self._btn_preview])
+        self._cb_mclahe = Checkbox(value=False, description="MCLAHE", disabled=False)
+        self._cb_mclahe.observe(self._on_mclahe_change, names="value")
+        row3 = HBox([self._dd_task, self._dd_sample, self._btn_preview, self._cb_mclahe])
 
         # -- Controls row 4: threshold sliders ---------------------------------
         self._sl_s1 = FloatSlider(
@@ -325,6 +328,8 @@ class InferencePanel:
         run = self._dd_run.value
         done = sum(1 for r in records if self._pred_path(task, r)) if run else 0
         self._dd_sample.options = records
+        # Freeze MCLAHE checkbox for CT (task 3) — not applicable
+        self._cb_mclahe.disabled = task == 3
         self._lbl_status.value = f"Task {task}: <b>{done}/{len(records)}</b> predicted" if records else ""
 
     def _on_sample_change(self, change) -> None:
@@ -409,16 +414,20 @@ class InferencePanel:
         overlay_mode = self._dd_overlay.value
         live = self._live_output
 
+        # Apply MCLAHE if checkbox is enabled and checked (MRI only)
+        use_mclahe = self._cb_mclahe.value and not self._cb_mclahe.disabled
+        disp_data = _mclahe(data) if use_mclahe else data
+
         # Left: Live
         self._out_live.clear_output(wait=True)
         with self._out_live:
-            self._draw_single(data, live, sl, task, rec, "Live Preview", overlay_mode)
+            self._draw_single(disp_data, live, sl, task, rec, "Live Preview", overlay_mode)
 
         # Right: Saved
         self._out_saved.clear_output(wait=True)
         with self._out_saved:
             if saved is not None:
-                self._draw_single(data, {"saved": saved}, sl, task, rec, "Saved", overlay_mode)
+                self._draw_single(disp_data, {"saved": saved}, sl, task, rec, "Saved", overlay_mode)
             else:
                 print("(Not predicted yet — click Save)")
 
@@ -452,6 +461,11 @@ class InferencePanel:
     def _on_overlay_change(self, change) -> None:
         """Overlay mode changed — re-render both panels."""
         if self._out_live.outputs or self._out_saved.outputs:
+            self._render_both_panels()
+
+    def _on_mclahe_change(self, change) -> None:
+        """MCLAHE checkbox toggled — re-render with/without enhancement."""
+        if self._out_live.outputs:
             self._render_both_panels()
 
     def _on_slice_change(self, change) -> None:
@@ -550,9 +564,11 @@ def _overlay(ax, masks, sl, task, overlay_mode="filled+hatch"):
         if mask_slice.max() == 0:
             return
         if is_filled:
-            ax.contourf(
-                mask_slice, levels=[0.5, 1], colors=[color], alpha=0.25, antialiased=True, hatches=[hatch] if use_hatch else []
-            )
+            # Transparent fill
+            ax.contourf(mask_slice, levels=[0.5, 1], colors=[color], alpha=0.25, antialiased=True)
+            if use_hatch:
+                # Opaque hatch overlay on top
+                ax.contourf(mask_slice, levels=[0.5, 1], colors="none", antialiased=True, hatches=[hatch])
         else:
             ax.contour(mask_slice, levels=[0.5], colors=[color], linewidths=1.5)
 
