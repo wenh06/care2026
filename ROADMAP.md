@@ -111,6 +111,10 @@ Additional tricks:
 - Resample all volumes to uniform 0.5 × 0.5 × 0.5 mm isotropic.
 - Per-class CE weighting to handle extreme class imbalance (LA : PV : LAA ≈
   13 : 1 : 3).  Weights: [bg=0.2, LA=1.0, PV=6.0, LAA=2.0].
+- Configurable augmentations (probabilities set in ``TrainCfg.augmentation``):
+  flips, 90° rotations, gamma correction, brightness/contrast jitter,
+  Gaussian noise, Gaussian blur, elastic deformation, low-resolution
+  simulation.  Each method is independently toggleable via its ``prob``.
 
 ---
 
@@ -354,18 +358,38 @@ ScarLoss with spatial weight map (w₀=5, σ=2 mm).  LA cavity from Stage 1.
 ``no_scar_proportion=0.3`` keeps ~35/130 Task-2 (no-scar) records as hard
 negatives; the ScarLoss penalises false scar predictions on these samples.
 
-### 6.3 CT Baseline (Task 3) — ⏳ Not started
+### 6.3 CT Semi-Supervised (Task 3) — 🔄 Iterating
 
+Three variants trained, each 200 epochs (SGD+poly LR, batch_size=2, 128³ patches):
+
+| Variant | Best mean Dice | Notes |
+|---------|---------------|-------|
+| CPS (baseline) | 0.3904 | No class weights; standard CPS with λ ramp-up |
+| CPS + class weights | 0.4275 | `ce_class_weight=[0.2,1,6,2]` — PV 6× higher |
+| **Mean Teacher** | **0.4655** | EMA decay 0.99; MSE consistency; best so far |
+
+Mean Teacher outperforms CPS by ~7.5 pp, likely because:
+- Teacher EMA provides a more stable pseudo-label target than the
+  cross-pseudo-supervision cycle (which can suffer confirmation bias).
+- MSE on softmax preserves prediction uncertainty; CPS hard argmax
+  discards it.
+
+Training command:
 ```bash
 PYTORCH_ALLOC_CONF=expandable_segments:True \
   python trainer.py --task ct \
   --db-dir /Data1/wenh06/CARE2026-LeftAtrium --epochs 200 \
-  2>&1 | tee log/ct_train.log
+  --semi-mode mean_teacher \
+  2>&1 | tee log/ct_mt_train.log
 ```
+
+Next: add augmentations (gamma, brightness/contrast, Gaussian blur) and
+re-run Mean Teacher to measure gain.
 
 ### 6.4 Validation & Submission
 
-After Stage 1 + Stage 2 training (MRI models ready; CT pending):
+MRI models ready (Stage 1 + Stage 2 both with CLAHE variants). CT model iterating
+(Mean Teacher best at 0.4655; re-training with augmentations next).
 
 ```bash
 # MRI only (Tasks 1 & 2):
@@ -375,7 +399,7 @@ python pipeline.py \
   --model_dir checkpoints/ \
   --tasks 1,2
 
-# Full submission (all three tasks, once CT is trained):
+# Full submission (all three tasks, once CT is final):
 python pipeline.py \
   --input_dir /Data1/wenh06/CARE2026-LeftAtrium \
   --output_dir /Data1/wenh06/CARE2026-LeftAtrium/output \
@@ -402,7 +426,8 @@ Local metrics to track:
 | Multi-task MRI vs. separate models | Verify joint training helps scar head |
 | `DualHeadVNet` vs. `DualHeadNestedVNet` | Deep supervision benefit; especially for superior/inferior slices |
 | Instance Norm vs. Batch Norm (MRI) | Quantify domain generalisation gain for Task 2 |
-| CPS vs. supervised-only (CT) | Measure semi-supervised benefit on 50 labelled / 100 unlabelled |
+| CPS vs. Mean Teacher (CT) | Measure semi-supervised benefit of EMA consistency vs CPS | ✅ Done — MT wins (0.4655 vs 0.3904) |
+| CT augmentation sweep | Gamma + brightness/contrast + Gaussian blur; measure per-class Dice impact | 🔄 Next |
 | Boundary Loss weight sweep | Optimise PV / LAA delineation (CT Task 3) |
 | Patch size: 128³ vs. 64³ (CT) | Memory vs. accuracy trade-off |
 
@@ -442,28 +467,29 @@ Local metrics to track:
 
 1. ~~**Train MRI Stage 1**~~ ✅ Done — checkpoint: `checkpoints/mri_stage1_model.safetensors` (also CLAHE variant trained).
 2. ~~**Train MRI Stage 2**~~ ✅ Done — checkpoint: `checkpoints/mri_stage2_model.safetensors` (also CLAHE variant trained; epoch snapshots 147–149 retained).
-3. **Run MRI validation inference** (Tasks 1 & 2) — this is the current step:
+3. ~~**MRI post-processing**~~ ✅ Done — `postprocess_mri_masks()` (scar constrained within dilated LA cavity; largest connected component).
+4. ~~**CT post-processing**~~ ✅ Done — `postprocess_ct_mask()` (per-class largest connected component).
+5. ~~**CLAHE ablation**~~ ✅ Done — MCLAHE wired into dataset (config flag `apply_mclahe`); auto-detected at inference time.
+6. ~~**CT baseline training**~~ ✅ Done — CPS baseline + class weights + Mean Teacher all trained; MT best (0.4655 mean Dice).
+7. **Retrain CT with augmented data** — configurable augmentation (8 methods) wired into `_augment_ct()` / `_augment_mri()` via `TrainCfg.augmentation`:
+   ```bash
+   PYTORCH_ALLOC_CONF=expandable_segments:True \
+     python trainer.py --task ct \
+     --db-dir /Data1/wenh06/CARE2026-LeftAtrium --epochs 200 \
+     --semi-mode mean_teacher \
+     2>&1 | tee log/ct_mt_aug_train.log
+   ```
+8. **Run MRI validation inference** (Tasks 1 & 2):
    ```bash
    python pipeline.py \
      --input_dir /Data1/wenh06/CARE2026-LeftAtrium \
      --output_dir /Data1/wenh06/CARE2026-LeftAtrium/output \
      --model_dir checkpoints/ \
      --tasks 1,2
-   # Upload CARE-Leftatrium-REVENGER.zip to http://zmic.org.cn/care_2026/eval
    ```
-4. **Train CT model** (Task 3):
-   ```bash
-   PYTORCH_ALLOC_CONF=expandable_segments:True \
-     python trainer.py --task ct \
-     --db-dir /Data1/wenh06/CARE2026-LeftAtrium --epochs 200 \
-     2>&1 | tee log/ct_train.log
-   ```
-5. ~~**MRI post-processing**~~ ✅ Done — `postprocess_mri_masks()` (scar constrained within LA cavity; largest connected component).
-6. ~~**CT post-processing**~~ ✅ Done — `postprocess_ct_mask()` (per-class largest connected component).
-7. ~~**CLAHE ablation**~~ ✅ Done — MCLAHE wired into dataset (config flag `apply_mclahe`); auto-detected at inference time.
-8. **5-fold CV + ensemble** (Phase 8): train 5 folds, ensemble predictions for final submission.
-9. **Extend MRI training epochs** (400+): evaluate whether extended training closes the gap toward winning-team performance.
-10. **SGD + poly LR for MRI**: test whether SGD (as used by top MBAS2024 teams) outperforms AdamW+cosine for MRI tasks.
+9. **5-fold CV + ensemble** (Phase 8): train 5 folds, ensemble predictions for final submission.
+10. **Extend MRI training epochs** (400+): evaluate whether extended training closes the gap toward winning-team performance.
+11. **SGD + poly LR for MRI**: test whether SGD (as used by top MBAS2024 teams) outperforms AdamW+cosine for MRI tasks.
 
 ---
 

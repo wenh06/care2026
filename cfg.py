@@ -87,7 +87,12 @@ MRI_Stage1_TrainCfg.lr_scheduler = "cosine"
 MRI_Stage1_TrainCfg.lr_min = 1e-6
 
 # Augmentation
-MRI_Stage1_TrainCfg.aug_prob = 0.5
+MRI_Stage1_TrainCfg.augmentation = CFG(
+    flips=CFG(prob=0.5),
+    rotation=CFG(prob=0.5),
+    gamma=CFG(prob=0.5, range=[0.7, 1.5]),
+    gaussian_noise=CFG(prob=0.5, std_range=[0.0, 0.1]),
+)
 
 # Loss weights (Stage 1 only predicts binary LA → no scar head)
 MRI_Stage1_TrainCfg.loss_weights = CFG(la_dice=1.0)
@@ -132,7 +137,17 @@ MRI_Stage2_TrainCfg.lr = MRI_Stage2_TrainCfg.learning_rate
 MRI_Stage2_TrainCfg.lr_scheduler = "cosine"
 MRI_Stage2_TrainCfg.lr_min = 1e-6
 
-MRI_Stage2_TrainCfg.aug_prob = 0.5
+# Aggressive augmentation for domain generalisation (Task 2 unseen centres)
+MRI_Stage2_TrainCfg.augmentation = CFG(
+    flips=CFG(prob=0.5),
+    rotation=CFG(prob=0.5),
+    gamma=CFG(prob=0.5, range=[0.7, 1.5]),
+    gaussian_noise=CFG(prob=0.5, std_range=[0.0, 0.1]),
+    brightness_contrast=CFG(prob=0.5, contrast_range=[0.85, 1.15], brightness_range=[-0.1, 0.1]),
+    gaussian_blur=CFG(prob=0.2, sigma_range=[0.5, 1.0]),
+    elastic_deformation=CFG(prob=0.2, alpha_range=[0, 200], sigma_range=[9, 13]),
+    low_resolution=CFG(prob=0.2, zoom_range=[0.5, 1.0]),
+)
 
 # Scar-only loss weights (no LA head; LA from Stage 1)
 MRI_Stage2_TrainCfg.loss_weights = CFG(
@@ -176,8 +191,17 @@ CT_TrainCfg.lr = CT_TrainCfg.learning_rate
 CT_TrainCfg.lr_scheduler = "poly"
 CT_TrainCfg.lr_poly_power = 0.9
 
-# Augmentation
-CT_TrainCfg.aug_prob = 0.5
+# Augmentation (nnUNet-inspired, configurable per method)
+CT_TrainCfg.augmentation = CFG(
+    flips=CFG(prob=0.5),
+    rotation=CFG(prob=0.5),
+    gamma=CFG(prob=0.5, range=[0.7, 1.5]),
+    gaussian_noise=CFG(prob=0.5, std_range=[0.0, 0.05]),
+    brightness_contrast=CFG(prob=0.5, contrast_range=[0.85, 1.15], brightness_range=[-0.1, 0.1]),
+    gaussian_blur=CFG(prob=0.5, sigma_range=[0.5, 1.5]),
+    elastic_deformation=CFG(prob=0.2, alpha_range=[0, 200], sigma_range=[9, 13]),
+    low_resolution=CFG(prob=0.2, zoom_range=[0.5, 1.0]),
+)
 
 # Semi-supervised mode: "cps" or "mean_teacher"
 CT_TrainCfg.semi_supervised_mode = "cps"
@@ -232,11 +256,13 @@ ModelCfg.vnet_stage1 = CFG(
     bottleneck_transformer=None,
 )
 
-# -- Dual-head V-Net for MRI (Tasks 1 & 2) ----------------------------------
+# -- Single-head V-Net for MRI Stage 2 (scar-only, cropped region) ------------
+# Stage 1 provides the LA cavity mask and centroid; Stage 2 is a single-head
+# VNet trained on the centroid-cropped region (128×128×44) to segment scar only.
 
-ModelCfg.vnet = CFG(
+ModelCfg.vnet_stage2 = CFG(
     in_channels=1,
-    # Instance Norm for domain generalisation (Task 2 test set has new centres)
+    num_classes=2,  # binary: background + scar
     norm="instance",
     activation="mish",
     input_conv=CFG(channels=16, kernel_size=5),
@@ -251,40 +277,7 @@ ModelCfg.vnet = CFG(
         dropout=[0.0, 0.0, 0.0, 0.0],
     ),
     output_conv=CFG(kernel_size=1),
-    use_eca_skip=False,
     bottleneck_transformer=None,
-    # Two output heads: LA cavity (binary) and LA scar (binary)
-    heads=CFG(
-        la=CFG(out_channels=2),  # 2-class: background + LA cavity
-        scar=CFG(out_channels=2),  # 2-class: background + scar
-    ),
-)
-
-# -- NestedV-Net (deep supervision) for MRI ---------------------------------
-
-ModelCfg.nested_vnet = CFG(
-    in_channels=1,
-    norm="instance",
-    activation="mish",
-    input_conv=CFG(channels=16, kernel_size=5),
-    down_conv=CFG(
-        channels=[32, 64, 128, 256],
-        kernel_size=[3, 3, 3, 3],
-        dropout=[0.0, 0.0, 0.3, 0.3],
-    ),
-    up_conv=CFG(
-        channels=[128, 64, 32, 16],
-        kernel_size=[3, 3, 3, 3],
-        dropout=[0.0, 0.0, 0.0, 0.0],
-    ),
-    output_conv=CFG(kernel_size=1),
-    deep_supervision=True,
-    use_eca_skip=False,
-    bottleneck_transformer=None,
-    heads=CFG(
-        la=CFG(out_channels=2),
-        scar=CFG(out_channels=2),
-    ),
 )
 
 # -- VNet (single-head) for CT CPS (Task 3) ----------------------------------

@@ -14,6 +14,7 @@ from typing import Dict, List, Optional, Tuple, Union
 import nibabel as nib
 import numpy as np
 import torch
+from scipy.ndimage import gaussian_filter
 from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset
 from torch_ecg.cfg import CFG
@@ -179,8 +180,8 @@ class CARE2026_MRI_Stage1_Dataset(Dataset, ReprMixin):
         record = self._cache_records[idx]
 
         if self.training:
-            p = float(self.config.get("aug_prob", 0.5))
-            image, la_mask, _ = _augment_mri(image, la_mask, np.zeros_like(la_mask), p=p)
+            aug_cfg = self.config.get("augmentation", None)
+            image, la_mask, _ = _augment_mri(image, la_mask, np.zeros_like(la_mask), aug_cfg=aug_cfg)
 
         return {"image": image, "la_mask": la_mask, "record": record}
 
@@ -361,8 +362,8 @@ class CARE2026_MRI_Stage2_Dataset(Dataset, ReprMixin):
                 jitter=jitter,
                 crop_shape=self._crop_shape,
             )
-            p = float(self.config.get("aug_prob", 0.5))
-            image, la_mask, scar_mask = _augment_mri(image, la_mask, scar_mask, p=p)
+            aug_cfg = self.config.get("augmentation", None)
+            image, la_mask, scar_mask = _augment_mri(image, la_mask, scar_mask, aug_cfg=aug_cfg)
             crop_hw = int(self.config.get("train_crop_hw", 0))
             if crop_hw > 0:
                 image, la_mask, scar_mask = _crop_hw_train(image, la_mask, scar_mask, crop_hw)
@@ -491,9 +492,9 @@ class CARE2026_CT_Dataset(Dataset, ReprMixin):
 
         ps = self._patch_size
         if self.training:
-            aug_prob = float(self.config.get("aug_prob", 0.5))
+            aug_cfg = self.config.get("augmentation", None)
             image_patch, mask_patch = _random_patch(image, mask, ps)
-            image_patch, mask_patch = _augment_ct(image_patch, mask_patch, p=aug_prob)
+            image_patch, mask_patch = _augment_ct(image_patch, mask_patch, aug_cfg=aug_cfg)
         else:
             image_patch, mask_patch = _center_patch(image, mask, ps)
 
@@ -754,48 +755,199 @@ def _center_patch(
 # ---------------------------------------------------------------------------
 
 
+def _elastic_deform(
+    image: np.ndarray,
+    la_mask: np.ndarray,
+    scar_mask: np.ndarray,
+    alpha_range=(0, 200),
+    sigma_range=(9, 13),
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Apply a random 3D elastic deformation to image and masks.
+
+    Generates a random displacement field smoothed by a Gaussian filter
+    (nnUNet-style).  ``image`` has shape (C, H, W, D); masks are (H, W, D).
+    """
+    from scipy.ndimage import map_coordinates
+
+    rng = np.random.default_rng()
+    spatial_shape = image.shape[1:]  # (H, W, D)
+    alpha = float(rng.uniform(*alpha_range))
+    sigma = float(rng.uniform(*sigma_range))
+
+    # Random displacement field
+    displacements = [rng.standard_normal(spatial_shape, dtype=np.float32) * alpha for _ in range(3)]
+    # Smooth with Gaussian
+    for d in displacements:
+        gaussian_filter(d, sigma=sigma, output=d)
+
+    # Coordinate grid
+    coords = np.meshgrid(
+        np.arange(spatial_shape[0], dtype=np.float32),
+        np.arange(spatial_shape[1], dtype=np.float32),
+        np.arange(spatial_shape[2], dtype=np.float32),
+        indexing="ij",
+    )
+    indices = [c + d for c, d in zip(coords, displacements)]
+
+    # Deform image channel-by-channel
+    for c in range(image.shape[0]):
+        image[c] = map_coordinates(image[c], indices, order=1, mode="reflect")
+
+    la_mask = map_coordinates(la_mask.astype(np.float32), indices, order=0, mode="nearest")
+    scar_mask = map_coordinates(scar_mask.astype(np.float32), indices, order=0, mode="nearest")
+
+    return image, la_mask.astype(scar_mask.dtype), scar_mask.astype(scar_mask.dtype)
+
+
+def _elastic_deform_ct(
+    image: np.ndarray,
+    mask: np.ndarray,
+    alpha_range=(0, 200),
+    sigma_range=(9, 13),
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Elastic deformation for CT patch (no batch/channel dim)."""
+    from scipy.ndimage import map_coordinates
+
+    rng = np.random.default_rng()
+    shape = image.shape  # (H, W, D)
+    alpha = float(rng.uniform(*alpha_range))
+    sigma = float(rng.uniform(*sigma_range))
+
+    displacements = [rng.standard_normal(shape, dtype=np.float32) * alpha for _ in range(3)]
+    for d in displacements:
+        gaussian_filter(d, sigma=sigma, output=d)
+
+    coords = np.meshgrid(
+        np.arange(shape[0], dtype=np.float32),
+        np.arange(shape[1], dtype=np.float32),
+        np.arange(shape[2], dtype=np.float32),
+        indexing="ij",
+    )
+    indices = [c + d for c, d in zip(coords, displacements)]
+
+    image = map_coordinates(image, indices, order=1, mode="reflect")
+    mask = map_coordinates(mask.astype(np.float32), indices, order=0, mode="nearest")
+
+    return image.astype(np.float32), mask.astype(mask.dtype)
+
+
+def _low_res_simulate(image: np.ndarray, zoom: float = 0.5) -> np.ndarray:
+    """Simulate lower-resolution acquisition by down-then-up sampling.
+
+    Parameters
+    ----------
+    image : np.ndarray, shape (H, W, D) or (C, H, W, D)
+    zoom : float ∈ (0, 1]
+        Scale factor for the downsampled size.
+    """
+    from scipy.ndimage import zoom as nd_zoom
+
+    if zoom >= 1.0:
+        return image
+    low_shape = tuple(max(1, int(s * zoom)) for s in image.shape[-3:])
+    if image.ndim == 4:
+        # (C, H, W, D) — resize spatial dims only
+        low_res = np.stack(
+            [nd_zoom(image[c], [lo / s for lo, s in zip(low_shape, image.shape[1:])], order=1) for c in range(image.shape[0])]
+        )
+        image = np.stack(
+            [nd_zoom(low_res[c], [s / lo for lo, s in zip(low_shape, image.shape[1:])], order=1) for c in range(image.shape[0])]
+        )
+    else:
+        low_res = nd_zoom(image, [lo / s for lo, s in zip(low_shape, image.shape)], order=1)
+        image = nd_zoom(low_res, [s / lo for lo, s in zip(low_shape, image.shape)], order=1)
+    return image.astype(np.float32)
+
+
 def _augment_mri(
     image: np.ndarray,
     la_mask: np.ndarray,
     scar_mask: np.ndarray,
-    p: float = 0.5,
+    aug_cfg=None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Random augmentation for a single MRI sample.
+    """Random augmentation for a single MRI sample, driven by config.
 
-    Applied independently with probability *p*:
-    axis flips, 90° in-plane rotations, gamma correction, additive noise.
+    Each augmentation is applied independently with its own probability
+    from ``aug_cfg``.  Set any ``prob=0`` to disable.
     """
+    if aug_cfg is None:
+        return image, la_mask, scar_mask
+
     rng = np.random.default_rng()
 
-    # Random flips along each spatial axis (axis 0-2 of mask → axis 1-3 of image)
+    # --- spatial ----------------------------------------------------------------
+
+    # Random flips along each spatial axis
+    flip_p = float(aug_cfg.get("flips", {}).get("prob", 0.0))
     for ax in range(3):
-        if rng.random() < p:
+        if rng.random() < flip_p:
             image = np.flip(image, axis=ax + 1)
             la_mask = np.flip(la_mask, axis=ax)
             scar_mask = np.flip(scar_mask, axis=ax)
 
     # Random 90° rotation in the axial (x–y) plane
-    if rng.random() < p:
+    rot_p = float(aug_cfg.get("rotation", {}).get("prob", 0.0))
+    if rng.random() < rot_p:
         k = int(rng.integers(1, 4))
         image = np.rot90(image, k=k, axes=(1, 2))
         la_mask = np.rot90(la_mask, k=k, axes=(0, 1))
         scar_mask = np.rot90(scar_mask, k=k, axes=(0, 1))
 
-    # Gamma correction (intensity augmentation on image channel only)
-    if rng.random() < p:
-        gamma = float(rng.uniform(0.7, 1.5))
+    # Elastic deformation
+    ed_p = float(aug_cfg.get("elastic_deformation", {}).get("prob", 0.0))
+    if rng.random() < ed_p:
+        ed = aug_cfg["elastic_deformation"]
+        image, la_mask, scar_mask = _elastic_deform(
+            image,
+            la_mask,
+            scar_mask,
+            alpha_range=ed.get("alpha_range", [0, 200]),
+            sigma_range=ed.get("sigma_range", [9, 13]),
+        )
+
+    # --- intensity --------------------------------------------------------------
+
+    # Gamma correction
+    gamma_p = float(aug_cfg.get("gamma", {}).get("prob", 0.0))
+    if rng.random() < gamma_p:
+        g = aug_cfg["gamma"]
+        gamma = float(rng.uniform(*g.get("range", [0.7, 1.5])))
         img_min = float(image.min())
         img_range = float(image.max()) - img_min
         if img_range > 0:
             image_norm = (image - img_min) / img_range
             image = (image_norm**gamma) * img_range + img_min
 
-    # Additive Gaussian noise
-    if rng.random() < p:
-        noise_std = float(rng.uniform(0.0, 0.1))
+    # Brightness + contrast jitter
+    bc_p = float(aug_cfg.get("brightness_contrast", {}).get("prob", 0.0))
+    if rng.random() < bc_p:
+        bc = aug_cfg["brightness_contrast"]
+        contrast = float(rng.uniform(*bc.get("contrast_range", [0.85, 1.15])))
+        brightness = float(rng.uniform(*bc.get("brightness_range", [-0.1, 0.1])))
+        image = image * contrast + brightness
+
+    # Gaussian noise
+    gn_p = float(aug_cfg.get("gaussian_noise", {}).get("prob", 0.0))
+    if rng.random() < gn_p:
+        gn = aug_cfg["gaussian_noise"]
+        noise_std = float(rng.uniform(*gn.get("std_range", [0.0, 0.1])))
         image = image + rng.standard_normal(image.shape).astype(np.float32) * noise_std
 
-    # np.flip / np.rot90 return views; make contiguous for DataLoader safety
+    # Gaussian blur
+    gb_p = float(aug_cfg.get("gaussian_blur", {}).get("prob", 0.0))
+    if rng.random() < gb_p:
+        gb = aug_cfg["gaussian_blur"]
+        sigma = float(rng.uniform(*gb.get("sigma_range", [0.5, 1.0])))
+        image = gaussian_filter(image, sigma=sigma)
+
+    # Low-resolution simulation (downsample → upsample)
+    lr_p = float(aug_cfg.get("low_resolution", {}).get("prob", 0.0))
+    if rng.random() < lr_p:
+        lr = aug_cfg["low_resolution"]
+        zoom = float(rng.uniform(*lr.get("zoom_range", [0.5, 1.0])))
+        image = _low_res_simulate(image, zoom=zoom)
+
+    # Make contiguous for DataLoader safety (np.flip / np.rot90 return views)
     image = np.ascontiguousarray(image)
     la_mask = np.ascontiguousarray(la_mask)
     scar_mask = np.ascontiguousarray(scar_mask)
@@ -806,38 +958,89 @@ def _augment_mri(
 def _augment_ct(
     image: np.ndarray,
     mask: Optional[np.ndarray],
-    p: float = 0.5,
+    aug_cfg=None,
 ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
-    """Random augmentation for a single CT patch."""
+    """Random augmentation for a single CT patch, driven by config.
+
+    Each augmentation is applied independently with its own probability
+    from ``aug_cfg``.  Set any ``prob=0`` to disable.
+    """
+    if aug_cfg is None:
+        return image, mask
+
     rng = np.random.default_rng()
 
-    # Random flips
+    # --- spatial ----------------------------------------------------------------
+
+    # Random flips along each axis
+    flip_p = float(aug_cfg.get("flips", {}).get("prob", 0.0))
     for ax in range(3):
-        if rng.random() < p:
+        if rng.random() < flip_p:
             image = np.flip(image, axis=ax)
             if mask is not None:
                 mask = np.flip(mask, axis=ax)
 
     # Random 90° rotation in the axial plane
-    if rng.random() < p:
+    rot_p = float(aug_cfg.get("rotation", {}).get("prob", 0.0))
+    if rng.random() < rot_p:
         k = int(rng.integers(1, 4))
         image = np.rot90(image, k=k, axes=(0, 1))
         if mask is not None:
             mask = np.rot90(mask, k=k, axes=(0, 1))
 
-    # Intensity scaling (keep within [0, 1])
-    if rng.random() < p:
-        scale = float(rng.uniform(0.9, 1.1))
-        image = np.clip(image * scale, 0.0, 1.0)
+    # Elastic deformation (only when mask is present)
+    ed_p = float(aug_cfg.get("elastic_deformation", {}).get("prob", 0.0))
+    if rng.random() < ed_p and mask is not None:
+        ed = aug_cfg["elastic_deformation"]
+        image, mask = _elastic_deform_ct(
+            image,
+            mask,
+            alpha_range=ed.get("alpha_range", [0, 200]),
+            sigma_range=ed.get("sigma_range", [9, 13]),
+        )
+
+    # --- intensity --------------------------------------------------------------
+
+    # Gamma correction
+    gamma_p = float(aug_cfg.get("gamma", {}).get("prob", 0.0))
+    if rng.random() < gamma_p:
+        g = aug_cfg["gamma"]
+        gamma = float(rng.uniform(*g.get("range", [0.7, 1.5])))
+        eps = 1e-7
+        image = np.clip(image, eps, None) ** gamma
+
+    # Brightness + contrast jitter
+    bc_p = float(aug_cfg.get("brightness_contrast", {}).get("prob", 0.0))
+    if rng.random() < bc_p:
+        bc = aug_cfg["brightness_contrast"]
+        contrast = float(rng.uniform(*bc.get("contrast_range", [0.85, 1.15])))
+        brightness = float(rng.uniform(*bc.get("brightness_range", [-0.1, 0.1])))
+        image = np.clip(contrast * image + brightness, 0.0, 1.0)
 
     # Gaussian noise
-    if rng.random() < p:
-        noise_std = float(rng.uniform(0.0, 0.05))
+    gn_p = float(aug_cfg.get("gaussian_noise", {}).get("prob", 0.0))
+    if rng.random() < gn_p:
+        gn = aug_cfg["gaussian_noise"]
+        noise_std = float(rng.uniform(*gn.get("std_range", [0.0, 0.05])))
         image = np.clip(
             image + rng.standard_normal(image.shape).astype(np.float32) * noise_std,
             0.0,
             1.0,
         )
+
+    # Gaussian blur
+    gb_p = float(aug_cfg.get("gaussian_blur", {}).get("prob", 0.0))
+    if rng.random() < gb_p:
+        gb = aug_cfg["gaussian_blur"]
+        sigma = float(rng.uniform(*gb.get("sigma_range", [0.5, 1.5])))
+        image = gaussian_filter(image, sigma=sigma)
+
+    # Low-resolution simulation (downsample → upsample)
+    lr_p = float(aug_cfg.get("low_resolution", {}).get("prob", 0.0))
+    if rng.random() < lr_p:
+        lr = aug_cfg["low_resolution"]
+        zoom = float(rng.uniform(*lr.get("zoom_range", [0.5, 1.0])))
+        image = _low_res_simulate(image, zoom=zoom)
 
     image = np.ascontiguousarray(image)
     if mask is not None:

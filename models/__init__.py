@@ -125,7 +125,7 @@ class CARE2026_MRI_Stage2_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
         if train_config is not None:
             self.__train_config.update(deepcopy(train_config))
         # Single-head VNet, scar only (2 classes: bg + scar)
-        self.backbone = VNet(CFG({**self.config.vnet_stage1, "num_classes": 2}))
+        self.backbone = VNet(self.config.vnet_stage2)
         self.criterion = ScarLoss(self.train_config)
 
     def forward(self, img: torch.Tensor, labels: Optional[Dict[str, torch.Tensor]] = None) -> Dict[str, torch.Tensor]:
