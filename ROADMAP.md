@@ -45,9 +45,8 @@ where ``L_ce_weighted`` multiplies voxel-wise CE by a Gaussian spatial
 weight map ``w(x) = 1 + w₀·exp(−d²/2σ²)`` (d = distance to nearest GT
 scar voxel, w₀ = 5, σ = 2 mm).
 
-Domain generalisation for Task 2 test set (Centers B & C unseen during training):
-- **Instance Normalisation** in the Stage 2 encoder.
-- **Aggressive augmentation**: random gamma, random intensity shift, elastic deformation, random flip.
+Task 2 uses the Stage-1 LA mask directly.  Stage-2 is reserved for scar
+segmentation and does not refine the LA cavity mask.
 
 ### Task 3 — CT (Semi-supervised V-Net)
 
@@ -174,19 +173,25 @@ Key settings:
 | `MRI_Stage1_TrainCfg.n_epochs` | 100 |
 | `MRI_Stage2_TrainCfg.n_epochs` | 150 |
 | `CT_TrainCfg.n_epochs` | 200 |
-| `*.batch_size` | 4 (Stage 1), 1 (Stage 2 + CT, AMP) |
-| `*.optimizer` | `"adamw_amsgrad"` |
-| `*.lr` | `1e-3` |
-| `*.lr_scheduler` | `"cosine_annealing"` |
+| `MRI_Stage1_TrainCfg.batch_size` | 4 |
+| `MRI_Stage2_TrainCfg.batch_size` | 4 |
+| `CT_TrainCfg.batch_size` | 2 |
+| `MRI_*.optimizer` | `"adamw"` |
+| `CT_TrainCfg.optimizer` | `"sgd"` |
+| `MRI_*.lr` | `3e-4` |
+| `CT_TrainCfg.lr` | `1e-2` |
+| `MRI_*.lr_scheduler` | `"cosine"` |
+| `CT_TrainCfg.lr_scheduler` | `"poly"` |
 | `ModelCfg.vnet_stage1` | VNet config, `num_classes=2` |
-| `ModelCfg.vnet` | DualHeadVNet config, `heads={la:2, scar:2}` |
+| `ModelCfg.vnet_stage2` | VNet config, `num_classes=2` (background + scar) |
+| `ModelCfg.vnet_ct` | VNet config, `num_classes=4` |
 
 ### 2.3 `dataset.py`
 
 Implement PyTorch Dataset classes:
 
 - `CARE2026_MRI_Stage1_Dataset`: resample raw volume → canonical → downsample → z-score; caches `(image, la_mask)` at `MRI_STAGE1_SHAPE`; augment on-the-fly (flip, elastic, gamma).
-- `CARE2026_MRI_Stage2_Dataset`: resample raw → canonical; cache `MRI_STAGE2_CACHE_SHAPE` patch centred on GT LA centroid; at `__getitem__` apply ±`MRI_STAGE2_CENTROID_JITTER` offset and sub-crop to `MRI_STAGE2_CROP_SHAPE`; returns `(image, la_mask, scar_mask, has_scar)`.
+- `CARE2026_MRI_Stage2_Dataset`: resample raw → canonical; cache `MRI_STAGE2_CACHE_SHAPE` patch centred on GT LA centroid; at `__getitem__` apply ±`MRI_STAGE2_CENTROID_JITTER` offset and sub-crop to `MRI_STAGE2_CROP_SHAPE`; returns `(image, scar_mask, has_scar)` plus LA context for crop placement.
 - `CARE2026_CT_Dataset`: CT windowing; resample to isotropic 0.5 mm; random patch; returns `(image, mask, is_labeled)`.
 - `collate_fn_mri_stage1`, `collate_fn_mri`, `collate_fn_ct`.
 
@@ -201,14 +206,13 @@ Implement PyTorch Dataset classes:
 ### 3.2 `models/vnet.py` — V-Net for MRI & CT
 
 - `_SegEncoder3D`: shared encoder (stem + DownBlock3D stack).
-- `DualHeadVNet`: shared encoder → two independent decoders (LA cavity + scar). **Instance Norm** for domain generalisation.
-- `VNet`: shared encoder → single decoder. **Batch Norm**. Used as both Model 1 and Model 2 in CPS for CT.
+- `VNet`: shared encoder → single decoder. Used for MRI Stage 1, MRI Stage 2 scar segmentation, and CT segmentation.
 
-### 3.3 `models/nested_vnet.py` — Nested V-Net (UNet++) for MRI
+### 3.3 `models/nested_vnet.py` — Nested V-Net (UNet++)
 
-`DualHeadNestedVNet`: same `_SegEncoder3D` encoder as above + two `_NestedDecoder` paths.
-- Dense skip connections across all encoder levels (UNet++ node grid).
-- **Deep supervision**: returns one logit tensor per decoder level (coarse → fine); loss averaged across levels. Particularly helpful for superior/inferior slice regions (see MBAS2024 insights below).
+`NestedVNet`: UNet++-style single-output variant.
+- Dense skip connections across encoder/decoder levels.
+- **Deep supervision**: returns one logit tensor per decoder level (coarse → fine); loss averaged across levels when enabled.
 
 ### 3.4 `models/loss/`
 
@@ -216,13 +220,15 @@ Implement PyTorch Dataset classes:
 |------|----------|
 | `dice_loss.py` | `SoftDiceLoss`, `DiceCELoss`, `TverskyLoss`, `FocalTverskyLoss` |
 | `boundary_loss.py` | `BoundaryLoss` (on-the-fly scipy distance transform) |
-| `__init__.py` | `MRILoss` (LA DiceCE + scar Tversky/Focal/Boundary), `CTLoss` (supervised DiceCE + CPS CE) |
+| `__init__.py` | `Stage1MRILoss`, `ScarLoss`, `CTLoss` |
 
 ### 3.5 `models/__init__.py` — model wrappers
 
-`CARE2026_MRI_Model`: wraps `DualHeadVNet` or `DualHeadNestedVNet` (controlled by `backbone=` arg); loss computed inside `forward()` when labels are provided; handles deep-supervision list output.
+`CARE2026_MRI_Stage1_Model`: single-head VNet for LA localisation and Task 2 LA output.
 
-`CARE2026_CT_Model`: wraps two `VNet` instances for CPS; loss includes supervised DiceCE + consistency CE.
+`CARE2026_MRI_Stage2_Model`: single-head VNet for scar segmentation only.  It does not predict LA; scar post-processing is constrained by the Stage-1 LA mask.
+
+`CARE2026_CT_Model`: wraps CPS or Mean Teacher VNet(s); loss includes supervised DiceCE plus consistency loss.
 
 ---
 
@@ -240,14 +246,14 @@ Implement PyTorch Dataset classes:
 | **SGD lr=0.01, 1000 epochs** — most common winning configuration | Our planned 150/200 epochs is too short; target ≥ 400 epochs; revisit optimiser |
 | **Instance Norm** is critical for cross-center generalisation | Already in our MRI models; do not switch to Batch Norm for MRI |
 | **Lightweight CNN (VNet, UMamba) matches large models** — no correlation between parameter count and DSC | Our ~7M-param VNet is well-chosen; no need to scale up |
-| **Labeling strategy matters**: separating cavity and wall heads consistently outperformed joint multi-class models | Validates our dual-head design (LA cavity head + scar head) |
+| **Lightweight, task-specific models are preferable on small MRI sets** | Keep Stage 1 LA localisation and Stage 2 scar segmentation separate |
 
 ### Hardest failure modes (directly relevant to our tasks)
 
 | Failure mode | Where it hurts us | Mitigation |
 |---|---|---|
 | **Domain shift** — wall/scar DSC drops ~10 pp at unseen center | Task 2 (cross-center LA segmentation) | InstanceNorm; TTA; test-time BN adaptation |
-| **Post-ablation scar signal ≈ atrial wall** — models confuse the two | Task 1 (scar quantification) | Dual-head avoids mixing; Tversky/Focal losses for imbalance |
+| **Post-ablation scar signal ≈ atrial wall** — models confuse the two | Task 1 (scar quantification) | Scar-only Stage 2; Tversky/Focal/spatially weighted losses for imbalance |
 | **Superior/inferior slice degradation** — U-shaped DSC profile along z-axis; complex vascular junctions | All tasks | Deep supervision (NestedVNet); slice-position feature |
 | **Segmentation leakage** — predictions bleed into adjacent structures | All tasks | Connected-component post-processing (keep largest component) |
 | **Low-SNR images** — wall/scar DSC strongly correlated with SNR | Task 1 scar boundary accuracy | CLAHE preprocessing (`utils/mclahe.py` already exists) |
@@ -270,11 +276,11 @@ Two separate trainer classes:
 - Checkpoint prefix `*-mri1`; monitors `la_dice`.
 
 `CARE2026_MRI_Stage2_Trainer`:
-- Multi-task loss: Head A (LA DiceCE) on all batches; Head B (scar Tversky+Focal) only when `has_scar=True`.
-- Metrics: `la_dice`, `scar_dice`, `scar_acc`, `scar_sen`.
-- Checkpoint prefix `*-mri2`; monitors `la_dice` (can override to `scar_dice`).
+- Scar-only loss (`ScarLoss`) on Task-1 samples, with no-scar Task-2 samples used as hard negatives.
+- Metrics: `scar_dice`, `scar_acc`, `scar_sen`.
+- Checkpoint prefix `*-scar`; monitors `scar_dice`.
 - Supports `backbone="vnet"` and `backbone="nested_vnet"`.
-- AMP + gradient accumulation: `use_amp=True`, `accumulate_grad_batches=2`.
+- AMP: `use_amp=True`.
 
 CLI:
 ```bash
@@ -300,10 +306,10 @@ python trainer.py --task ct --db-dir <data_root> --epochs 200
 `predict.py` (core volume-level inference library):
 - **`predict_mri_two_stage(img_path, stage1_model, stage2_model, ...)`** — true two-stage inference:
   1. Load NIfTI → resample to `MRI_CANONICAL_SHAPE` (576×576×44).
-  2. Downsample canonical → `MRI_STAGE1_SHAPE` (144×144×44) → z-score → Stage-1 VNet → binary LA prob map → upsample to canonical → LA centroid.
+  2. Downsample canonical → `MRI_STAGE1_SHAPE` (144×144×44) → z-score → Stage-1 VNet → binary LA prob map → upsample to canonical.  This is the Task-2 LA output and also provides the Stage-2 crop centroid.
   3. Crop `MRI_STAGE2_CROP_SHAPE` (256×256×44) centred on centroid (zero-pad if near boundary).
-  4. z-score → Stage-2 DualHeadVNet → LA + scar prob maps.
-  5. Strip padding → place back in canonical → resample canonical masks to original shape + affine.
+  4. z-score → Stage-2 scar-only VNet → scar prob map.
+  5. Strip padding → place scar back in canonical → resample LA/scar masks to original shape + affine.
 - **CT inference** (`predict_ct`): sliding window `128³` patches, stride `64³`, Gaussian overlap weighting, soft-vote argmax.
 - **TTA**: 8-fold flip averaging (all `{H, W, D}` axis combinations) for both stages / CT.
 - **Post-processing**: `keep_largest_component`, `postprocess_mri_masks` (scar constrained within LA cavity), `postprocess_ct_mask` (per-class largest component).
@@ -348,7 +354,7 @@ Input: 144×144×44, batch_size=4.  Trained to epoch 100; checkpoint at `checkpo
 
 ```bash
 PYTORCH_ALLOC_CONF=expandable_segments:True \
-  python trainer.py --task mri_scar \
+  python trainer.py --task mri --stage 2 \
   --db-dir /Data1/wenh06/CARE2026-LeftAtrium --epochs 200 --mclahe true \
   2>&1 | tee log/scar_train.log
 ```
@@ -447,9 +453,9 @@ Local metrics to track:
 
 | Experiment | Goal |
 |------------|------|
-| Multi-task MRI vs. separate models | Verify joint training helps scar head |
-| `DualHeadVNet` vs. `DualHeadNestedVNet` | Deep supervision benefit; especially for superior/inferior slices |
-| Instance Norm vs. Batch Norm (MRI) | Quantify domain generalisation gain for Task 2 |
+| Scar-only VNet vs. NestedVNet | Deep supervision benefit for sparse scar segmentation |
+| Scar threshold sweep | Optimise Task 1 G-DSC / SEN trade-off |
+| Stage-1 threshold sweep | Optimise Task 2 DSC and Task 1 scar constraint region |
 | CPS vs. Mean Teacher (CT) | Measure semi-supervised benefit of EMA consistency vs CPS | ✅ Done — MT wins (0.4655 vs 0.3904) |
 | CT augmentation sweep | Gamma + brightness/contrast + Gaussian blur; measure per-class Dice impact | 🔄 Next |
 | Boundary Loss weight sweep | Optimise PV / LAA delineation (CT Task 3) |
@@ -466,8 +472,8 @@ Local metrics to track:
 | **5-fold CV + ensemble** — train 5 folds, ensemble predictions | Expected +1–2 pp DSC; mandatory for final submission | 🟡 Medium (Phase 8) | ⏳ |
 | **SGD + polynomial LR for MRI** (vs. AdamW) | Winning teams used SGD lr=0.01; compare convergence | 🟡 Medium | ⏳ (CT uses SGD+poly; MRI still AdamW+cosine) |
 | **Slice-position encoding** — append z-coordinate channel to input | Help model handle hard superior/inferior slices | 🟡 Medium | ⏳ |
-| **Test-time BN/IN adaptation** — update norm stats on test volume | Domain-shift mitigation for Task 2 unseen centers | 🟡 Medium | ⏳ |
-| **UMamba backbone** — replace VNet encoder with Mamba SSM | Near-ResUNet accuracy, more efficient; possible Task 2 alternative | 🟢 Low | ⏳ |
+| **Histogram matching / intensity standardisation** | Domain-shift mitigation for Task 2 unseen centers without changing the model | 🟡 Medium | ⏳ |
+| **UMamba backbone** — replace VNet encoder with Mamba SSM | Near-ResUNet accuracy, more efficient; possible scar segmentation alternative | 🟢 Low | ⏳ |
 | **Shape-constrained regularisation** — atlas-based prior or topology loss | Anatomy-aware design; reduce leakage at vascular junctions | 🟢 Low | ⏳ |
 
 ---
