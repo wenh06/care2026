@@ -499,7 +499,7 @@ Local metrics to track:
    ```bash
    PYTORCH_ALLOC_CONF=expandable_segments:True \
      python trainer.py --task ct \
-     --db-dir /Data1/wenh06/CARE2026-LeftAtrium --epochs 200 \
+     --db-dir /Data1/wenh06/CARE2026-LeftAtrium --epochs 300 \
      --semi-mode mean_teacher \
      2>&1 | tee log/ct_mt_aug_train.log
    ```

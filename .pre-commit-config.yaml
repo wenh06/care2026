@@ -1,4 +1,4 @@
-exclude: '^.*\.(svg|txt|json|html)$|^build|^dist|\.ipynb_checkpoints|fast-test.*\.ipynb'
+exclude: '^.*\.(svg|txt|json|html)$|^build|^dist|instruction-la\.md|\.ipynb_checkpoints|fast-test.*\.ipynb'
 fail_fast: false
 
 repos:
