@@ -21,7 +21,7 @@ from torch_ecg.components.trainer import BaseTrainer
 from torch_ecg.utils.misc import str2bool
 from tqdm.auto import tqdm
 
-from cfg import CT_TrainCfg, ModelCfg, MRI_Stage1_TrainCfg, MRI_Stage2_TrainCfg
+from cfg import CT_TrainCfg, CT_TrainCfgV2, ModelCfg, MRI_Stage1_TrainCfg, MRI_Stage2_TrainCfg
 from dataset import (
     CARE2026_CT_Dataset,
     CARE2026_MRI_Stage1_Dataset,
@@ -30,7 +30,7 @@ from dataset import (
     collate_fn_mri,
     collate_fn_mri_stage1,
 )
-from models import CARE2026_CT_Model, CARE2026_MRI_Stage1_Model, CARE2026_MRI_Stage2_Model
+from models import CARE2026_CT_Model, CARE2026_CT_ModelV2, CARE2026_MRI_Stage1_Model, CARE2026_MRI_Stage2_Model
 
 __all__ = [
     "CARE2026_MRI_Stage1_Trainer",
@@ -403,12 +403,15 @@ class CARE2026_CT_Trainer(_BaseCARE2026Trainer):
     ) -> None:
         num_workers = 1 if self.device == torch.device("cpu") else 4
         db_dir = self.train_config.db_dir
+        semi_mode = str(self.train_config.get("semi_supervised_mode", "cps"))
+        # supervised mode → only labelled records; cps/mean_teacher → all records
+        train_labeled = True if semi_mode == "supervised" else None
         if train_dataset is None:
             train_dataset = CARE2026_CT_Dataset(
                 db_dir=db_dir,
                 config=self.train_config,
                 training=True,
-                labeled=None,
+                labeled=train_labeled,
                 val_ratio=float(self.train_config.get("val_ratio", 0.1)),
                 random_seed=int(self.train_config.get("random_seed", 42)),
             )
@@ -642,6 +645,14 @@ def get_args(**kwargs: Any) -> CFG:
         help="Semi-supervised mode for CT (Task 3).",
     )
     parser.add_argument("--mclahe", type=str2bool, default=None, dest="apply_mclahe", help="Enable MCLAHE preprocessing")
+    parser.add_argument(
+        "--ct-model",
+        type=str,
+        default="v2",
+        choices=["v1", "v2"],
+        dest="ct_model_version",
+        help="CT model version: v1 (original BN+ReLU+SGD+CPS/MT) or v2 (IN+Mish+AdamW, supervised-first).",
+    )
     args = {k: v for k, v in vars(parser.parse_args()).items() if v is not None}
     cfg.update(args)
     return CFG(cfg)
@@ -672,10 +683,17 @@ if __name__ == "__main__":
             model = CARE2026_MRI_Stage2_Model(config=model_config, train_config=train_config)
             trainer_cls = CARE2026_MRI_Stage2_Trainer
     else:
-        train_config = CFG(deepcopy(CT_TrainCfg))
-        train_config.update(args)
-        model_config = deepcopy(ModelCfg)
-        model = CARE2026_CT_Model(config=model_config, train_config=train_config)
+        ct_version = args.get("ct_model_version", "v2")
+        if ct_version == "v2":
+            train_config = CFG(deepcopy(CT_TrainCfgV2))
+            train_config.update(args)
+            model_config = deepcopy(ModelCfg)
+            model = CARE2026_CT_ModelV2(config=model_config, train_config=train_config)
+        else:
+            train_config = CFG(deepcopy(CT_TrainCfg))
+            train_config.update(args)
+            model_config = deepcopy(ModelCfg)
+            model = CARE2026_CT_Model(config=model_config, train_config=train_config)
         trainer_cls = CARE2026_CT_Trainer
 
     if torch.cuda.device_count() > 1:
