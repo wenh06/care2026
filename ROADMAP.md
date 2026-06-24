@@ -377,13 +377,71 @@ scaling [0.9,1.1] + Gaussian noise σ≤0.05, each at 50 % prob.
 | 2 | CPS | 200 | old aug | [0.2,1,6,2] | 0.4275 | — | PV ×6 |
 | 3 | MT | 200 | old aug | [0.2,1,6,2] | 0.4655 | — | EMA 0.99 |
 | 4 | MT | 300 | old aug | [0.2,1,6,2] | **0.5234** | 265 | +100 ep; also 0.4601 @197 ep |
-| 5 | MT | 300 | new 8-way | [0.2,1,6,2] | — | — | planned |
+| 5 | MT | 300 | new 8-way | [0.2,1,6,2] | 0.5013 | 296 | aug hurt (−2.1 pp vs run 4) |
 
 Mean Teacher outperforms CPS by ~7.5 pp, likely because:
 - Teacher EMA provides a more stable pseudo-label target than the
   cross-pseudo-supervision cycle (which can suffer confirmation bias).
 - MSE on softmax preserves prediction uncertainty; CPS hard argmax
   discards it.
+
+#### 6.3.1 V1 Diagnostic (2026-06-24)
+
+Inference on the 50 labelled training records with the best V1 checkpoint
+(MT, epoch 299) reveals severe underfitting — the model fails to learn
+even the training set:
+
+| Class | Train Dice | Sensitivity | Precision | Pred/GT |
+|-------|-----------|-------------|-----------|---------|
+| LA | 0.697 | 0.766 | 0.677 | 1.25× |
+| PV | 0.329 | 0.527 | 0.255 | 2.23× |
+| LAA | 0.378 | 0.369 | 0.471 | 0.90× |
+| **Mean** | **0.468** | — | — | — |
+
+Root causes (ranked by impact):
+
+1. **BatchNorm + batch_size=2 is broken for 3D.**  BN computes
+   statistics over 2 × spatial_samples; deep layers have only
+   ~512 values/channel.  The MRI models use InstanceNorm and
+   work well — CT should match.
+2. **SGD lr=0.01 amplifies small-batch noise.**  MRI models use
+   AdamW lr=3e-4.  With batch_size=2, SGD gradient estimates are
+   too noisy for stable convergence.
+3. **PV class weight 6× causes massive over-prediction.**  The
+   model predicts 2.23× more PV voxels than GT (precision 0.255).
+4. **Semi-supervised signal is negligible.**  Consistency loss
+   ≈ 0.0003 vs supervised loss ≈ 0.4 — a 1000× gap.  The
+   teacher (EMA of a bad student) produces garbage pseudo-labels
+   that reinforce errors (confirmation bias).
+5. **8-way augmentation degrades performance.**  Run 5 (0.5013)
+   underperforms run 4 (0.5234); elastic deformation likely
+   distorts thin PV structures.
+
+**Plan → V2 (Section 6.3.2).**
+
+#### 6.3.2 CT V2 — Supervised-First Redesign
+
+Three architectural fixes applied in ``CT_TrainCfgV2`` +
+``ModelCfg.vnet_ct_v2`` + ``CARE2026_CT_ModelV2``:
+
+| Component | V1 | V2 | Rationale |
+|-----------|----|----|-----------|
+| Normalisation | BatchNorm | **InstanceNorm** | batch-size independent |
+| Activation | ReLU | **Mish** | smoother gradients |
+| Optimizer | SGD lr=1e-2 | **AdamW lr=3e-4** | adaptive LR, matches MRI |
+| LR schedule | poly | **cosine** | matches MRI |
+| Semi-supervised | CPS/MT | **supervised-only** | 50 labelled CTs sufficient; semi-supervised was adding noise |
+| PV class weight | 6.0 | **3.0** | reduce over-prediction |
+| Augmentation | 8 methods | **6** (−elastic, −low-res) | avoid distorting thin PV |
+| Params | 13.7M (×2 models) | **6.9M** (×1 model) | lighter, faster |
+
+Training command:
+```bash
+PYTORCH_ALLOC_CONF=expandable_segments:True \
+  python trainer.py --task ct \
+  --db-dir /Data1/wenh06/CARE2026-LeftAtrium --epochs 300 \
+  2>&1 | tee log/ct_v2_train.log
+```
 
 Training command:
 ```bash
@@ -500,14 +558,13 @@ Local metrics to track:
 3. ~~**MRI post-processing**~~ ✅ Done — `postprocess_mri_masks()` (scar constrained within dilated LA cavity; largest connected component).
 4. ~~**CT post-processing**~~ ✅ Done — `postprocess_ct_mask()` (per-class largest connected component).
 5. ~~**CLAHE ablation**~~ ✅ Done — MCLAHE wired into dataset (config flag `apply_mclahe`); auto-detected at inference time.
-6. ~~**CT baseline training**~~ ✅ Done — CPS baseline + class weights + Mean Teacher all trained; MT best (0.4655 mean Dice).
-7. **Retrain CT with augmented data** — configurable augmentation (8 methods) wired into `_augment_ct()` / `_augment_mri()` via `TrainCfg.augmentation`:
+6. ~~**CT baseline training**~~ ✅ Done — CPS baseline + class weights + Mean Teacher all trained; MT best (0.5234 mean Dice).  V1 diagnostic (2026-06-24) identified BatchNorm + SGD + PV weight as root causes of poor performance.
+7. **Train CT V2 (supervised-first)** — ``CT_TrainCfgV2`` + ``CARE2026_CT_ModelV2`` with InstanceNorm + Mish + AdamW:
    ```bash
    PYTORCH_ALLOC_CONF=expandable_segments:True \
      python trainer.py --task ct \
      --db-dir /Data1/wenh06/CARE2026-LeftAtrium --epochs 300 \
-     --semi-mode mean_teacher \
-     2>&1 | tee log/ct_mt_aug_train.log
+     2>&1 | tee log/ct_v2_train.log
    ```
 8. **Run MRI validation inference** (Tasks 1 & 2):
    ```bash
