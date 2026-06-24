@@ -9,6 +9,7 @@ and :class:`~data_reader.CARE2026_CT`.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
 from typing import Dict, Optional, Union
 
@@ -31,6 +32,7 @@ __all__ = [
     "evaluate_stage2",
     "evaluate_ct",
     "evaluate_training_sample",
+    "debug_ct_data_flow",
 ]
 
 
@@ -38,6 +40,21 @@ def _binary_dice_metric(pred: np.ndarray, target: np.ndarray) -> float:
     p, g = pred.astype(bool), target.astype(bool)
     inter = (p & g).sum()
     return float(2 * inter / (p.sum() + g.sum() + 1e-8))
+
+
+def _multiclass_dice(mask_a: np.ndarray, mask_b: np.ndarray, cls_id: int) -> float:
+    """Dice score for one foreground class."""
+    a = mask_a == cls_id
+    b = mask_b == cls_id
+    return float(2 * (a & b).sum() / (a.sum() + b.sum() + 1e-8))
+
+
+def _mask_centroid(mask: np.ndarray, cls_id: int) -> Optional[np.ndarray]:
+    """Centroid of a class mask in voxel coordinates, or None if absent."""
+    pts = np.argwhere(mask == cls_id)
+    if len(pts) == 0:
+        return None
+    return pts.mean(axis=0)
 
 
 def _contourf_with_hatch(ax, mask_slice, color, hatch, alpha=0.25):
@@ -622,6 +639,188 @@ def evaluate_ct(
         "ct_dice_pv": dice_pv,
         "ct_dice_laa": dice_laa,
         "ct_mean_dice": (dice_la + dice_pv + dice_laa) / 3,
+    }
+
+
+def debug_ct_data_flow(
+    rec: str = "train_1",
+    db_dir: Union[str, Path] = None,
+    *,
+    pred_path: Optional[Union[str, Path]] = None,
+    model: Optional[torch.nn.Module] = None,
+    device: Optional[torch.device] = None,
+    use_tta: bool = False,
+    dataset_training: bool = False,
+    dataset_index: Optional[int] = None,
+) -> Dict[str, object]:
+    """Inspect CT preprocessing, dataset output, and optional prediction alignment.
+
+    This is intended for debugging apparent spatial shifts.  It shows:
+
+    - Native CT image + native GT label.
+    - Label after train-time resampling to 0.5 mm and nearest-neighbour
+      roundtrip back to native shape.
+    - The exact preprocessed full-volume arrays produced by
+      :class:`CARE2026_CT_Dataset._preprocess_ct`.
+    - A dataset ``__getitem__`` patch.
+    - Optional prediction from ``pred_path`` or live ``model`` inference.
+
+    Notebook usage::
+
+        from viz import debug_ct_data_flow
+        debug_ct_data_flow(
+            rec="train_1",
+            db_dir="/Data1/wenh06/CARE2026-LeftAtrium",
+            pred_path="/path/to/val_or_train_pred.nii.gz",
+        )
+
+    Returns a dict of loaded arrays so the same data can be inspected manually.
+    """
+    if db_dir is None:
+        raise ValueError("db_dir is required")
+    from cfg import CT_TrainCfg
+    from const import CT_NUM_CLASSES, CT_TARGET_SPACING
+    from data_reader import CARE2026_CT
+    from dataset import CARE2026_CT_Dataset
+    from predict import _resample_mask, postprocess_ct_mask, predict_ct
+
+    db_dir = Path(db_dir).expanduser().resolve()
+    reader = CARE2026_CT(db_dir=db_dir, verbose=0)
+    img_path = reader.get_data_path(rec)
+    ann_path = reader.get_ann_path(rec)
+    if ann_path is None:
+        raise FileNotFoundError(f"{rec} has no CT ground-truth label.")
+
+    img_nii = nib.load(str(img_path))
+    gt_nii = nib.load(str(ann_path))
+    img_native = img_nii.get_fdata().astype(np.float32)
+    gt_native = gt_nii.get_fdata().astype(np.uint8)
+
+    cfg = deepcopy(CT_TrainCfg)
+    cfg.augmentation = None
+    dataset = CARE2026_CT_Dataset(db_dir=db_dir, config=cfg, training=dataset_training, labeled=True)
+    image_iso, gt_iso = dataset._preprocess_ct(rec)
+    if gt_iso is None:
+        raise RuntimeError(f"Dataset preprocessing returned no mask for {rec}.")
+    gt_roundtrip = _resample_mask(gt_iso, gt_native.shape)
+
+    if dataset_index is None:
+        try:
+            dataset_index = dataset._records.index(rec)
+        except ValueError:
+            dataset_index = 0
+    sample = dataset[dataset_index]
+    patch_img = sample["image"][0]
+    patch_mask = sample.get("mask")
+
+    pred = None
+    pred_pp = None
+    if pred_path is not None:
+        pred = nib.load(str(pred_path)).get_fdata().astype(np.uint8)
+        pred_pp = postprocess_ct_mask(pred, CT_NUM_CLASSES)
+    elif model is not None:
+        if device is None:
+            device = next(model.parameters()).device
+        out = predict_ct(img_path, model, device=device, use_tta=use_tta)
+        pred = out.ct_mask
+        pred_pp = pred
+
+    print(f"Record: {rec}")
+    print(f"Image path: {img_path}")
+    print(f"Label path: {ann_path}")
+    print(f"Native image shape / zooms: {img_native.shape} / {img_nii.header.get_zooms()[:3]}")
+    print(f"Native label shape / zooms: {gt_native.shape} / {gt_nii.header.get_zooms()[:3]}")
+    print(f"Target spacing: {CT_TARGET_SPACING}; preprocessed shape: {image_iso.shape}")
+    print(f"Image axis codes: {nib.aff2axcodes(img_nii.affine)}")
+    print(f"Label axis codes: {nib.aff2axcodes(gt_nii.affine)}")
+    print(f"Max |image affine - label affine|: {float(np.max(np.abs(img_nii.affine - gt_nii.affine))):.6g}")
+    print("Roundtrip label Dice (native GT vs resample-to-0.5mm-back):")
+    for cls_id, name in [(1, "LA"), (2, "PV"), (3, "LAA")]:
+        d = _multiclass_dice(gt_roundtrip, gt_native, cls_id)
+        c_gt = _mask_centroid(gt_native, cls_id)
+        c_rt = _mask_centroid(gt_roundtrip, cls_id)
+        shift = None if c_gt is None or c_rt is None else c_rt - c_gt
+        shift_s = "NA" if shift is None else np.array2string(shift, precision=2)
+        print(f"  {name}: dice={d:.4f}, centroid_shift_vox={shift_s}")
+    if pred is not None:
+        print("Prediction Dice / centroid shift vs native GT:")
+        for cls_id, name in [(1, "LA"), (2, "PV"), (3, "LAA")]:
+            d = _multiclass_dice(pred, gt_native, cls_id)
+            c_gt = _mask_centroid(gt_native, cls_id)
+            c_pr = _mask_centroid(pred, cls_id)
+            shift = None if c_gt is None or c_pr is None else c_pr - c_gt
+            shift_s = "NA" if shift is None else np.array2string(shift, precision=2)
+            print(f"  {name}: dice={d:.4f}, centroid_shift_vox={shift_s}")
+
+    palette = {1: "#FF4444", 2: "#4488FF", 3: "#44FF44"}
+    class_names = {1: "LA", 2: "PV", 3: "LAA"}
+
+    views = {
+        "native_gt": (img_native, gt_native, "Native image + native GT"),
+        "roundtrip_gt": (img_native, gt_roundtrip, "Native image + GT after 0.5mm roundtrip"),
+        "preprocessed_gt": (image_iso, gt_iso, "Preprocessed 0.5mm image + GT"),
+    }
+    if patch_mask is not None:
+        views["dataset_patch"] = (patch_img, patch_mask.astype(np.uint8), f"Dataset __getitem__ patch: {sample['record']}")
+    if pred is not None:
+        views["prediction"] = (img_native, pred, "Native image + prediction")
+    if pred_pp is not None and pred_path is not None:
+        views["prediction_postprocessed"] = (img_native, pred_pp, "Native image + prediction after CT postprocess")
+
+    def _plot(view: str = "native_gt", cls: str = "all", sl: Optional[int] = None, overlay_mode: str = "filled+hatch"):
+        img, mask, title = views[view]
+        if sl is None:
+            sl = img.shape[-1] // 2
+        sl = int(np.clip(sl, 0, img.shape[-1] - 1))
+        is_filled = overlay_mode.startswith("filled")
+        use_hatch = overlay_mode == "filled+hatch"
+        cls_ids = [1, 2, 3] if cls == "all" else [int(cls)]
+
+        fig, ax = plt.subplots(figsize=(8, 8))
+        ax.imshow(img[..., sl], cmap="gray", origin="lower")
+        handles = []
+        for cls_id in cls_ids:
+            ms = (mask[..., sl] == cls_id).astype(np.uint8)
+            if ms.max() == 0:
+                continue
+            color = palette[cls_id]
+            if is_filled:
+                if use_hatch:
+                    _contourf_with_hatch(ax, ms, color, _hatch_for(cls_id))
+                else:
+                    ax.contourf(ms, levels=[0.5, 1], colors=[color], alpha=0.25, antialiased=True)
+                handles.append(mpatches.Patch(facecolor=color, alpha=0.5, edgecolor=color, label=class_names[cls_id]))
+            else:
+                ax.contour(ms, levels=[0.5], colors=[color], linewidths=1.5)
+                handles.append(mpatches.Patch(color=color, label=class_names[cls_id]))
+        ax.set_title(f"{title}  (slice {sl + 1}/{img.shape[-1]})")
+        ax.axis("off")
+        if handles:
+            ax.legend(handles=handles, loc="upper right", framealpha=0.7, fontsize="small")
+        fig.tight_layout()
+        plt.show()
+
+    if _is_notebook():
+        max_slices = max(arr[0].shape[-1] for arr in views.values())
+        interact(
+            _plot,
+            view=Dropdown(options=[(v[2], k) for k, v in views.items()], value="native_gt", description="View"),
+            cls=Dropdown(options=[("All", "all"), ("LA", "1"), ("PV", "2"), ("LAA", "3")], value="all", description="Class"),
+            sl=IntSlider(min=0, max=max_slices - 1, step=1, value=img_native.shape[-1] // 2, description="Slice"),
+            overlay_mode=Dropdown(options=["contour", "filled", "filled+hatch"], value="filled+hatch", description="Overlay"),
+        )
+    else:
+        _plot()
+
+    return {
+        "image_native": img_native,
+        "label_native": gt_native,
+        "image_iso": image_iso,
+        "label_iso": gt_iso,
+        "label_roundtrip": gt_roundtrip,
+        "dataset_sample": sample,
+        "prediction": pred,
+        "prediction_postprocessed": pred_pp,
     }
 
 
