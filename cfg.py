@@ -25,6 +25,7 @@ __all__ = [
     "MRI_Stage1_TrainCfg",
     "MRI_Stage2_TrainCfg",
     "CT_TrainCfg",
+    "CT_TrainCfgV2",
     "ModelCfg",
 ]
 
@@ -245,6 +246,91 @@ CT_TrainCfg.log_step = 10
 CT_TrainCfg.debug = False
 
 # ---------------------------------------------------------------------------
+# CT V2 training configuration (supervised-only, InstanceNorm + Mish + AdamW)
+# ---------------------------------------------------------------------------
+# Fixes the three root causes of poor CT performance:
+#   1. BatchNorm → InstanceNorm  (batch_size=2 friendly)
+#   2. ReLU → Mish              (better gradient flow for segmentation)
+#   3. SGD → AdamW              (adaptive LR handles small-batch noise)
+#
+# Semi-supervised (CPS / Mean Teacher) is removed — the consistency signal
+# was 1000× weaker than the supervised signal (0.0003 vs 0.4), meaning
+# unlabelled data contributed virtually nothing useful.  A strong supervised
+# baseline on the 50 labelled CTs is the right first step.
+
+CT_TrainCfgV2 = deepcopy(BaseCfg)
+
+CT_TrainCfgV2.task = "ct"
+CT_TrainCfgV2.backbone = "vnet_ct_v2"
+
+# Patch size (isotropic cube) after resampling to 0.5 mm isotropic
+CT_TrainCfgV2.patch_size = CT_PATCH_SIZE  # 128³
+
+# Training duration and batch
+CT_TrainCfgV2.n_epochs = 300
+CT_TrainCfgV2.batch_size = 2
+CT_TrainCfgV2.use_amp = True
+CT_TrainCfgV2.accumulate_grad_batches = 1
+
+# ── Optimizer: AdamW (matching MRI models) ──────────────────────────────
+CT_TrainCfgV2.optimizer = "adamw"
+CT_TrainCfgV2.betas = (0.9, 0.999)
+CT_TrainCfgV2.decay = 1e-2
+CT_TrainCfgV2.learning_rate = 3e-4
+CT_TrainCfgV2.lr = CT_TrainCfgV2.learning_rate
+
+# Cosine annealing schedule (matching MRI models)
+CT_TrainCfgV2.lr_scheduler = "cosine"
+CT_TrainCfgV2.lr_min = 1e-6
+
+# ── CT intensity normalisation ───────────────────────────────────────────
+CT_TrainCfgV2.normalization = CFG(
+    mode="minmax",
+    hu_min=-200.0,
+    hu_max=800.0,
+    p_low=0.5,
+    p_high=99.5,
+)
+
+# ── Augmentation (conservative — no elastic / low-res for now) ──────────
+# Elastic deformation and low-resolution simulation can distort
+# already-thin PV structures.  Start without them; add back if
+# overfitting is observed.
+CT_TrainCfgV2.augmentation = CFG(
+    flips=CFG(prob=0.5),
+    rotation=CFG(prob=0.5),
+    gamma=CFG(prob=0.5, range=[0.7, 1.5]),
+    gaussian_noise=CFG(prob=0.5, std_range=[0.0, 0.05]),
+    brightness_contrast=CFG(prob=0.5, contrast_range=[0.85, 1.15], brightness_range=[-0.1, 0.1]),
+    gaussian_blur=CFG(prob=0.2, sigma_range=[0.5, 1.0]),
+)
+
+# ── Semi-supervised: off  ────────────────────────────────────────────────
+# "supervised" mode uses only labelled data.  CPS / mean_teacher are
+# available if needed later, once the supervised baseline is solid.
+CT_TrainCfgV2.semi_supervised_mode = "supervised"
+CT_TrainCfgV2.consistency_rampup_epochs = 30
+CT_TrainCfgV2.cps_lambda_max = 1.0
+CT_TrainCfgV2.mt_ema_decay = 0.99
+CT_TrainCfgV2.mt_consistency_weight = 1.0
+
+# ── Loss weights ─────────────────────────────────────────────────────────
+# Class weights: PV weight reduced from 6.0 → 3.0.  The old 6× weight
+# caused the model to massively over-predict PV (2.23× more voxels
+# than GT, precision 0.255).
+CT_TrainCfgV2.loss_weights = CFG(
+    sup_dice=0.5,
+    sup_ce=0.5,
+    sup_boundary=0.0,
+    ce_class_weight=[0.1, 1.0, 3.0, 2.0],  # [bg, LA, PV, LAA]
+)
+
+# Checkpointing
+CT_TrainCfgV2.keep_checkpoint_max = 3
+CT_TrainCfgV2.log_step = 10
+CT_TrainCfgV2.debug = False
+
+# ---------------------------------------------------------------------------
 # Model configuration
 # ---------------------------------------------------------------------------
 
@@ -366,5 +452,32 @@ ModelCfg.nested_vnet_ct = CFG(
     ),
     output_conv=CFG(kernel_size=1),
     deep_supervision=True,
+    bottleneck_transformer=None,
+)
+
+# -- VNet for CT V2 (supervised-only, InstanceNorm + Mish) ---------------------
+# Same encoder-decoder depth as vnet_ct but with:
+#   - InstanceNorm (batch-size independent, matches MRI models)
+#   - Mish activation (smoother gradients than ReLU)
+#   - Slightly heavier dropout for regularisation on 50 labelled volumes
+
+ModelCfg.vnet_ct_v2 = CFG(
+    in_channels=1,
+    num_classes=CT_NUM_CLASSES,  # 4: BG, LA, PV, LAA
+    norm="instance",
+    activation="mish",
+    use_eca_skip=False,
+    input_conv=CFG(channels=16, kernel_size=3),
+    down_conv=CFG(
+        channels=[32, 64, 128, 256],
+        kernel_size=[3, 3, 3, 3],
+        dropout=[0.0, 0.0, 0.3, 0.3],  # slightly heavier than v1 (0.0→0.3 at deeper levels)
+    ),
+    up_conv=CFG(
+        channels=[128, 64, 32, 16],
+        kernel_size=[3, 3, 3, 3],
+        dropout=[0.0, 0.0, 0.0, 0.0],
+    ),
+    output_conv=CFG(kernel_size=1),
     bottleneck_transformer=None,
 )

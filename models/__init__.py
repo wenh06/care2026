@@ -17,7 +17,7 @@ from torch_ecg.cfg import CFG
 from torch_ecg.utils.misc import CitationMixin
 from torch_ecg.utils.utils_nn import CkptMixin, SizeMixin
 
-from cfg import CT_TrainCfg, ModelCfg, MRI_Stage1_TrainCfg, MRI_Stage2_TrainCfg
+from cfg import CT_TrainCfg, CT_TrainCfgV2, ModelCfg, MRI_Stage1_TrainCfg, MRI_Stage2_TrainCfg
 from outputs import CARE2026Outputs
 
 from .loss import CTLoss, ScarLoss, Stage1MRILoss
@@ -27,6 +27,7 @@ __all__ = [
     "CARE2026_MRI_Stage1_Model",
     "CARE2026_MRI_Stage2_Model",
     "CARE2026_CT_Model",
+    "CARE2026_CT_ModelV2",
 ]
 
 
@@ -362,6 +363,214 @@ class CARE2026_CT_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
                 )
             output.update(loss_dict)
         return output
+
+    @torch.no_grad()
+    def inference(self, img: Union[np.ndarray, torch.Tensor]) -> CARE2026Outputs:
+        original_mode = self.training
+        self.eval()
+        input_t = self._prepare_input(img)
+        output = self.forward(input_t)
+        self.train(original_mode)
+        return CARE2026Outputs(task="ct", ct_mask=output["seg_mask"].cpu().numpy().astype(np.uint8))
+
+    def _prepare_input(self, img: Union[np.ndarray, torch.Tensor, list]) -> torch.Tensor:
+        if isinstance(img, (list, tuple)):
+            img = torch.stack([i if isinstance(i, torch.Tensor) else torch.from_numpy(i) for i in img])
+        elif isinstance(img, np.ndarray):
+            img = torch.from_numpy(img)
+        img = img.to(device=self.device, dtype=self.dtype)
+        while img.ndim < 5:
+            img = img.unsqueeze(0)
+        return img
+
+    @property
+    def config(self) -> CFG:
+        return self.__config
+
+    @property
+    def train_config(self) -> CFG:
+        return self.__train_config
+
+    def save(self, path, **kwargs):
+        p = Path(str(path))
+        name = re.sub(r"(?<=\d)\.(?=\d)", "_", p.name)
+        path = str(p.parent / name)
+        return super().save(path=path, **kwargs)
+
+
+class CARE2026_CT_ModelV2(nn.Module, SizeMixin, CkptMixin, CitationMixin):
+    """CT segmentation model V2 (Task 3) — supervised-first design.
+
+    Fixes three root causes of poor CT performance vs. the original
+    :class:`CARE2026_CT_Model`:
+
+    1. **InstanceNorm** replaces BatchNorm — batch-size independent,
+       critical when training 3-D models with batch_size ≤ 4.
+    2. **Mish activation** replaces ReLU — smoother gradients, better
+       convergence on small medical-imaging datasets.
+    3. **AdamW** replaces SGD — adaptive per-parameter learning rates
+       handle the noisy gradients from small-batch 3-D training.
+
+    Supports three modes via ``semi_supervised_mode``:
+      - ``"supervised"`` (default) — single VNet, labelled data only.
+      - ``"cps"`` — Cross Pseudo Supervision with two parallel VNets.
+      - ``"mean_teacher"`` — Mean Teacher with EMA teacher.
+
+    The recommendation is to start with ``"supervised"`` on the 50
+    labelled CTs, establish a strong baseline, then optionally enable
+    semi-supervised modes.
+    """
+
+    __name__ = "CARE2026_CT_ModelV2"
+
+    def __init__(self, config: Optional[CFG] = None, train_config: Optional[CFG] = None, **kwargs: Any) -> None:
+        super().__init__()
+        self.__config = deepcopy(ModelCfg)
+        if config is not None:
+            self.__config.update(deepcopy(config))
+        self.__train_config = deepcopy(CT_TrainCfgV2)
+        if train_config is not None:
+            self.__train_config.update(deepcopy(train_config))
+
+        # Sync inference-relevant fields into config (serialised in metadata).
+        for key in ("patch_size", "normalization", "semi_supervised_mode"):
+            if key in self.__train_config and key not in self.__config:
+                self.__config[key] = self.__train_config[key]
+
+        self.mode = self.__config.get("semi_supervised_mode") or self.__train_config.get("semi_supervised_mode", "supervised")
+        self.__config["semi_supervised_mode"] = self.mode
+        if self.mode not in ("supervised", "cps", "mean_teacher"):
+            raise ValueError(f"Unknown semi_supervised_mode: {self.mode}")
+
+        # Resolve backbone: "vnet_ct_v2" (default) or "nested_vnet_ct_v2"
+        backbone = str(self.__config.get("backbone", self.__train_config.get("backbone", "vnet_ct_v2")))
+        if backbone.startswith("nested"):
+            from .nested_vnet import NestedVNet
+
+            model_cfg = (
+                self.config.nested_vnet_ct_v2 if hasattr(self.config, "nested_vnet_ct_v2") else self.config.nested_vnet_ct
+            )
+            self._make_model = lambda: NestedVNet(model_cfg)
+        else:
+            model_cfg = self.config.vnet_ct_v2 if hasattr(self.config, "vnet_ct_v2") else self.config.vnet_ct
+            self._make_model = lambda: VNet(model_cfg)
+        self._backbone = backbone
+        self._is_nested = backbone.startswith("nested")
+
+        self.model1 = self._make_model()
+        if self.mode == "cps":
+            self.model2 = self._make_model()
+        elif self.mode == "mean_teacher":
+            self.teacher = self._make_model()
+            self.teacher.load_state_dict(self.model1.state_dict())
+            for p in self.teacher.parameters():
+                p.requires_grad = False
+        self.criterion = CTLoss(self.train_config)
+        self._mt_decay = float(self.__train_config.get("mt_ema_decay", 0.99))
+
+    # ------------------------------------------------------------------
+    # Teacher EMA update (Mean Teacher mode only)
+    # ------------------------------------------------------------------
+
+    def _update_teacher(self) -> None:
+        """EMA update: θ_t ← α·θ_t + (1−α)·θ_s."""
+        if not hasattr(self, "teacher"):
+            return
+        alpha = self._mt_decay
+        with torch.no_grad():
+            for tp, sp in zip(self.teacher.parameters(), self.model1.parameters()):
+                tp.data.mul_(alpha).add_(sp.data, alpha=1.0 - alpha)
+
+    # ------------------------------------------------------------------
+    # Forward
+    # ------------------------------------------------------------------
+
+    def _ds_last(self, logits):
+        """Return the last (full-resolution) output from a NestedVNet list."""
+        return logits[-1] if isinstance(logits, (list, tuple)) else logits
+
+    def forward(
+        self, img: torch.Tensor, labels: Optional[Dict[str, torch.Tensor]] = None, cps_weight: float = 1.0
+    ) -> Dict[str, torch.Tensor]:
+        img = img.to(device=self.device, dtype=self.dtype)
+
+        if self.mode == "cps":
+            logits1, logits2 = self.model1(img), self.model2(img)
+            seg_mask = self._ds_last((self._ds_last(logits1) + self._ds_last(logits2)) / 2).argmax(dim=1)
+            output = {"logits1": logits1, "logits2": logits2, "seg_mask": seg_mask}
+        elif self.mode == "mean_teacher":
+            logits_s = self.model1(img)
+            seg_mask = self._ds_last(logits_s).argmax(dim=1)
+            output = {"logits1": logits_s, "seg_mask": seg_mask}
+            if self.training:
+                with torch.no_grad():
+                    logits_t = self.teacher(img)
+                    output["logits_t"] = logits_t
+        else:
+            # Supervised-only: single VNet, no teacher, no CPS
+            logits_s = self.model1(img)
+            seg_mask = self._ds_last(logits_s).argmax(dim=1)
+            output = {"logits1": logits_s, "seg_mask": seg_mask}
+
+        if labels is not None:
+            target = labels.get("ct_mask")
+            labeled_mask = labels.get("labeled")
+            if target is not None:
+                target = target.to(self.device)
+            if labeled_mask is not None:
+                labeled_mask = labeled_mask.to(self.device)
+
+            logits1 = output.get("logits1")
+            logits2 = output.get("logits2")
+            logits_t = output.get("logits_t") if self.mode == "mean_teacher" else None
+
+            if self._is_nested:
+                # Deep supervision: average loss across decoder levels
+                tgt_spatial = target.shape[1:]  # (H, W, D)
+                total_loss = logits1[0].sum() * 0.0
+                sup_losses, consist_losses = [], []
+                num_levels = len(logits1)
+                for level in range(num_levels):
+                    l1 = logits1[level]
+                    if l1.shape[2:] != tgt_spatial:
+                        l1 = nn.functional.interpolate(l1, size=tgt_spatial, mode="trilinear", align_corners=False)
+                    l2_lev = logits2[level] if logits2 is not None else None
+                    if l2_lev is not None and l2_lev.shape[2:] != tgt_spatial:
+                        l2_lev = nn.functional.interpolate(l2_lev, size=tgt_spatial, mode="trilinear", align_corners=False)
+                    lt_lev = logits_t[level] if logits_t is not None else None
+                    if lt_lev is not None and lt_lev.shape[2:] != tgt_spatial:
+                        lt_lev = nn.functional.interpolate(lt_lev, size=tgt_spatial, mode="trilinear", align_corners=False)
+                    ld = self.criterion(
+                        logits1=l1,
+                        logits2=l2_lev,
+                        logits_t=lt_lev,
+                        target=target,
+                        labeled_mask=labeled_mask,
+                        cps_weight=cps_weight,
+                    )
+                    sup_losses.append(ld["sup_loss"])
+                    consist_losses.append(ld["consist_loss"])
+                    total_loss = total_loss + ld["total_loss"]
+                loss_dict = {
+                    "sup_loss": sum(sup_losses) / num_levels,
+                    "consist_loss": sum(consist_losses) / num_levels,
+                    "total_loss": total_loss / num_levels,
+                }
+            else:
+                loss_dict = self.criterion(
+                    logits1=logits1,
+                    logits2=logits2,
+                    logits_t=logits_t,
+                    target=target,
+                    labeled_mask=labeled_mask,
+                    cps_weight=cps_weight,
+                )
+            output.update(loss_dict)
+        return output
+
+    # ------------------------------------------------------------------
+    # Inference
+    # ------------------------------------------------------------------
 
     @torch.no_grad()
     def inference(self, img: Union[np.ndarray, torch.Tensor]) -> CARE2026Outputs:
