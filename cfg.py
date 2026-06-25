@@ -207,7 +207,11 @@ CT_TrainCfg.normalization = CFG(
     p_high=99.5,  # for "percentile"
 )
 
-# Augmentation (nnUNet-inspired, configurable per method)
+# Augmentation — restored to best-run config (0.5234, epoch 265).
+# Note: the actual augmentations applied during that run were controlled
+# by the hardcoded `aug_prob=0.5` system (flips + rotation + intensity
+# scaling + Gaussian noise); the per-method config below reflects
+# CT_TrainCfg as saved in the checkpoint.
 CT_TrainCfg.augmentation = CFG(
     flips=CFG(prob=0.5),
     rotation=CFG(prob=0.5),
@@ -220,7 +224,7 @@ CT_TrainCfg.augmentation = CFG(
 )
 
 # Semi-supervised mode: "cps" or "mean_teacher"
-CT_TrainCfg.semi_supervised_mode = "cps"
+CT_TrainCfg.semi_supervised_mode = "mean_teacher"
 CT_TrainCfg.consistency_rampup_epochs = 30
 # CPS
 CT_TrainCfg.cps_lambda_max = 1.0
@@ -237,7 +241,7 @@ CT_TrainCfg.loss_weights = CFG(
     sup_ce=0.5,
     sup_boundary=0.0,  # set >0 to enable HausdorffERLoss (PV/LAA boundary precision)
     cps=1.0,
-    ce_class_weight=[0.2, 1.0, 6.0, 2.0],  # [bg, LA, PV, LAA] — PV 6x higher
+    ce_class_weight=[0.2, 1.0, 6.0, 2.0],  # [bg, LA, PV, LAA]
 )
 
 # Checkpointing
@@ -292,17 +296,12 @@ CT_TrainCfgV2.normalization = CFG(
     p_high=99.5,
 )
 
-# ── Augmentation (conservative — no elastic / low-res for now) ──────────
-# Elastic deformation and low-resolution simulation can distort
-# already-thin PV structures.  Start without them; add back if
-# overfitting is observed.
+# ── Augmentation — aligned with CT_TrainCfg (4-method, matching old aug) ─
 CT_TrainCfgV2.augmentation = CFG(
     flips=CFG(prob=0.5),
     rotation=CFG(prob=0.5),
     gamma=CFG(prob=0.5, range=[0.7, 1.5]),
     gaussian_noise=CFG(prob=0.5, std_range=[0.0, 0.05]),
-    brightness_contrast=CFG(prob=0.5, contrast_range=[0.85, 1.15], brightness_range=[-0.1, 0.1]),
-    gaussian_blur=CFG(prob=0.2, sigma_range=[0.5, 1.0]),
 )
 
 # ── Semi-supervised: off  ────────────────────────────────────────────────
