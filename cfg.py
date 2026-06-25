@@ -176,7 +176,8 @@ CT_TrainCfg.task = "ct"
 CT_TrainCfg.backbone = "vnet_ct"  # "vnet_ct" | "nested_vnet_ct"
 
 # Patch size (isotropic cube) after resampling to 0.5 mm isotropic
-CT_TrainCfg.patch_size = CT_PATCH_SIZE  # 128³
+CT_TrainCfg.patch_size = 160  # CT_PATCH_SIZE  # 128³ (default; try 160 for more context)
+CT_TrainCfg.fg_bias = 0.85  # 0.5  # foreground-biased patch sampling (try 0.85 for PV/LAA)
 
 # Training duration and batch
 CT_TrainCfg.n_epochs = 200
@@ -196,11 +197,11 @@ CT_TrainCfg.lr_scheduler = "poly"
 CT_TrainCfg.lr_poly_power = 0.9
 
 # CT intensity normalisation — configurable mode
-# "minmax"     : fixed HU clip then scale to [0,1]  (current default)
-# "percentile" : per-volume percentile clip then scale to [0,1]  (nnUNet-style)
+# "minmax"     : fixed HU clip then scale to [0,1]
+# "percentile" : per-volume percentile clip then scale to [0,1]  (nnUNet-style, default)
 # "zscore"     : per-volume z-score  (μ=0, σ=1), no clipping
 CT_TrainCfg.normalization = CFG(
-    mode="minmax",
+    mode="percentile",
     hu_min=-200.0,
     hu_max=800.0,  # for "minmax"
     p_low=0.5,
@@ -233,13 +234,19 @@ CT_TrainCfg.cps_lambda_max = 1.0
 CT_TrainCfg.mt_ema_decay = 0.99
 CT_TrainCfg.mt_consistency_weight = 1.0  # λ_consist in L_total = L_sup + λ·L_consist
 
-# Loss weights (supervised Dice + CE on labeled, CPS on all)
+# Loss weights (FocalTversky + optional CE + optional boundary loss).
+# FocalTversky α=0.7, β=0.3 penalises false positives more than false
+# negatives, counteracting the model's tendency to massively over-predict
+# foreground (LA 2–3×, LAA 3–4× GT).
 # Per-class CE weights: inverse-frequency to counteract LA dominance.
 # Train-set fg ratios: LA≈75% PV≈6% LAA≈19% → weights ≈ 1/ratio, norm to LA=1
 CT_TrainCfg.loss_weights = CFG(
-    sup_dice=0.5,
-    sup_ce=0.5,
-    sup_boundary=0.0,  # set >0 to enable HausdorffERLoss (PV/LAA boundary precision)
+    tversky_alpha=0.7,
+    tversky_beta=0.3,
+    tversky_gamma=0.75,
+    sup_ce=0.0,  # set >0 to add CE with class weights
+    sup_boundary=0.1,  # set >0 to enable HausdorffERLoss (PV/LAA boundary precision)
+    sup_clce=0.0,  # set >0 to enable CenterlineCELoss (PV topology preservation)
     cps=1.0,
     ce_class_weight=[0.2, 1.0, 6.0, 2.0],  # [bg, LA, PV, LAA]
 )

@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 
 from .boundary_loss import BoundaryLoss, HausdorffDTLoss, HausdorffERLoss
+from .centerline_loss import CenterlineCELoss
 from .compound_loss import DiceBoundaryLoss, DiceFocalLoss, DiceTopKLoss
 from .dice_loss import DiceCELoss, FocalTverskyLoss, SoftDiceLoss, TverskyLoss
 from .distribution_loss import FocalLoss, TopKCELoss
@@ -35,6 +36,8 @@ __all__ = [
     "DiceFocalLoss",
     "DiceBoundaryLoss",
     "DiceTopKLoss",
+    # centerline loss
+    "CenterlineCELoss",
     # task-level compound wrappers
     "Stage1MRILoss",
     "ScarLoss",
@@ -152,24 +155,42 @@ class ScarLoss(nn.Module):
 class CTLoss(nn.Module):
     """Loss for CT semi-supervised training (CPS or Mean Teacher).
 
+    Uses FocalTverskyLoss (α=0.7, β=0.3, γ=0.75 by default) to penalise
+    false positives more heavily than false negatives — critical when the
+    model over-predicts foreground (LA 2–3×, LAA 3–4× GT).  Optional CE
+    with class weights and boundary loss (HausdorffERLoss).
+
     Parameters
     ----------
     cfg : CFG
-        ``loss_weights``: sup_dice, sup_ce, cps (or mt_consist).
+        ``loss_weights``: tversky_alpha, tversky_beta, tversky_gamma,
+        sup_ce, ce_class_weight, sup_boundary, cps (or mt_consist).
     """
 
     def __init__(self, cfg) -> None:
         super().__init__()
         w = cfg.loss_weights
-        class_w = w.get("ce_class_weight", None)
-        if class_w is not None:
-            class_w = torch.tensor(class_w, dtype=torch.float32)
-        self.supervised_loss = DiceCELoss(
-            dice_weight=w.get("sup_dice", 0.5), ce_weight=w.get("sup_ce", 0.5), ce_class_weight=class_w
+        # FocalTversky: α > 0.5 penalises FP more than FN (reduce over-prediction)
+        self.supervised_loss = FocalTverskyLoss(
+            alpha=w.get("tversky_alpha", 0.7),
+            beta=w.get("tversky_beta", 0.3),
+            gamma=w.get("tversky_gamma", 0.75),
+            do_bg=False,
         )
+        # Optional CE with class weights (set sup_ce > 0 to enable)
+        self.w_ce = w.get("sup_ce", 0.0)
+        if self.w_ce > 0:
+            class_w = w.get("ce_class_weight", None)
+            if class_w is not None:
+                class_w = torch.tensor(class_w, dtype=torch.float32)
+            self.ce_loss = nn.CrossEntropyLoss(weight=class_w)
+        else:
+            self.ce_loss = None
         self.consistency_fn = nn.MSELoss()  # Mean Teacher: MSE between softmax outputs
         self.boundary_loss = HausdorffERLoss(alpha=2.0, erosions=5) if w.get("sup_boundary", 0.0) > 0 else None
         self.w_boundary = w.get("sup_boundary", 0.0)
+        self.clce_loss = CenterlineCELoss(kernel_size=5, lambda_clce=1.0) if w.get("sup_clce", 0.0) > 0 else None
+        self.w_clce = w.get("sup_clce", 0.0)
         self.w_cps = w.get("cps", 1.0)
         self.w_mt = w.get("mt_consist", 1.0)
 
@@ -184,20 +205,30 @@ class CTLoss(nn.Module):
     ) -> dict:
         sup_loss = logits1.sum() * 0.0
         boundary_loss = logits1.sum() * 0.0
+        clce_loss = logits1.sum() * 0.0
         if target is not None and labeled_mask is not None and labeled_mask.any():
+            tgt_labeled = target[labeled_mask].long()
             if logits2 is not None:
                 # CPS: supervised loss on both models
                 l1 = logits1[labeled_mask]
                 l2 = logits2[labeled_mask]
-                tgt = target[labeled_mask].long()
-                sup_loss = 0.5 * (self.supervised_loss(l1, tgt) + self.supervised_loss(l2, tgt))
+                sup_loss = 0.5 * (self.supervised_loss(l1, tgt_labeled) + self.supervised_loss(l2, tgt_labeled))
+                if self.ce_loss is not None:
+                    sup_loss = sup_loss + 0.5 * self.w_ce * (self.ce_loss(l1, tgt_labeled) + self.ce_loss(l2, tgt_labeled))
                 if self.boundary_loss is not None:
-                    boundary_loss = 0.5 * (self.boundary_loss(l1, tgt) + self.boundary_loss(l2, tgt))
+                    boundary_loss = 0.5 * (self.boundary_loss(l1, tgt_labeled) + self.boundary_loss(l2, tgt_labeled))
+                if self.clce_loss is not None:
+                    clce_loss = 0.5 * (self.clce_loss(l1, tgt_labeled) + self.clce_loss(l2, tgt_labeled))
             else:
                 # Mean Teacher: supervised loss on student only
-                sup_loss = self.supervised_loss(logits1[labeled_mask], target[labeled_mask].long())
+                l1 = logits1[labeled_mask]
+                sup_loss = self.supervised_loss(l1, tgt_labeled)
+                if self.ce_loss is not None:
+                    sup_loss = sup_loss + self.w_ce * self.ce_loss(l1, tgt_labeled)
                 if self.boundary_loss is not None:
-                    boundary_loss = self.boundary_loss(logits1[labeled_mask], target[labeled_mask].long())
+                    boundary_loss = self.boundary_loss(l1, tgt_labeled)
+                if self.clce_loss is not None:
+                    clce_loss = self.clce_loss(l1, tgt_labeled)
 
         # Consistency loss
         consist_loss = logits1.sum() * 0.0
@@ -218,4 +249,6 @@ class CTLoss(nn.Module):
         total = sup_loss + consist_loss
         if self.boundary_loss is not None:
             total = total + self.w_boundary * boundary_loss
+        if self.clce_loss is not None:
+            total = total + self.w_clce * clce_loss
         return {"sup_loss": sup_loss, "consist_loss": consist_loss, "total_loss": total}

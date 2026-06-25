@@ -475,6 +475,7 @@ class CARE2026_CT_Dataset(Dataset, ReprMixin):
             }
 
         self._patch_size: int = int(self.config.patch_size)
+        self._fg_bias: float = float(self.config.get("fg_bias", 0.5))
 
         # Per-record lazy cache: stores (image, mask_or_None) after preprocessing
         self._cache: Dict[str, Tuple[np.ndarray, Optional[np.ndarray]]] = {}
@@ -493,7 +494,7 @@ class CARE2026_CT_Dataset(Dataset, ReprMixin):
         ps = self._patch_size
         if self.training:
             aug_cfg = self.config.get("augmentation", None)
-            image_patch, mask_patch = _random_patch(image, mask, ps)
+            image_patch, mask_patch = _random_patch(image, mask, ps, fg_bias=self._fg_bias)
             image_patch, mask_patch = _augment_ct(image_patch, mask_patch, aug_cfg=aug_cfg)
         else:
             image_patch, mask_patch = _center_patch(image, mask, ps)

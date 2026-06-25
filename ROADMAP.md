@@ -447,6 +447,27 @@ To fully contain LAA within an LA-bbox crop, a **50 mm margin** is
 needed — at which point the crop volume ≈ original.  Two-stage
 coarse-to-fine is **not viable** for CT.
 
+#### 6.3.4 Loss & Sampling Improvements (2026-06-25)
+
+Switch from DiceCE to FocalTverskyLoss (α=0.7, β=0.3, γ=0.75) to
+penalise false positives and reduce foreground over-prediction.
+Add Boundary Loss (HausdorffERLoss, weight=0.1) for PV/LAA edge
+precision.  Implement clCE (CenterlineCELoss, MICCAI 2024) for
+topology preservation of thin tubular structures (PV) — disabled
+by default, enable with ``sup_clce=0.5``.
+
+Sampling: increase patch_size 128→160, fg_bias 0.5→0.85 for better
+PV coverage; switch to percentile normalisation (nnUNet-style).
+
+| # | Change | Config key | Default | Status |
+|---|--------|-----------|---------|--------|
+| 1 | FocalTverskyLoss | `tversky_alpha/beta/gamma` | 0.7/0.3/0.75 | ✅ |
+| 2 | Boundary loss | `sup_boundary` | 0.1 | ✅ |
+| 3 | clCE loss | `sup_clce` | 0.0 | ✅ implemented, disabled |
+| 4 | Percentile norm | `normalization.mode` | `"percentile"` | ✅ |
+| 5 | Larger patch + fg_bias | `patch_size` / `fg_bias` | 160 / 0.85 | ✅ |
+| 6 | NestedVNet backbone | `--backbone nested_vnet` | — | 🔄 training |
+
 **MT extended (300 epochs, 2026-06-09):**
 
 ```bash
@@ -555,12 +576,12 @@ Local metrics to track:
 5. ~~**CLAHE ablation**~~ ✅ Done — MCLAHE wired into dataset (config flag `apply_mclahe`); auto-detected at inference time.
 6. ~~**CT baseline training**~~ ✅ Done — CPS baseline + class weights + Mean Teacher all trained; MT best (0.5234 mean Dice).  V1 diagnostic (2026-06-24) identified BatchNorm + SGD + PV weight as root causes of poor performance.
 7. ~~**CT V2 experiments**~~ ✅ Done — IN+Mish+AdamW underperforms BN+ReLU+SGD in all settings (0.47 vs 0.52); config rolled back to V1 best.  Two-stage coarse-to-fine ruled out (CT structures too dispersed, bbox spans 80% of volume).
-8. **CT improvement round** — see Phase 7 for detailed plan:
-   - (1) percentile normalization — config change only
-   - (2) fg_bias↑ + patch_size↑ — config change only
-   - (3) NestedVNet deep supervision — add model config
-   - (4) clCE topology-aware loss — new loss class
-   - (5) FixMatch weak→strong consistency — trainer + model changes
+8. **CT improvement round** — (1)–(4) done, (5) planned:
+   - (1) percentile normalization ✅ — `mode="percentile"`
+   - (2) fg_bias↑ + patch_size↑ ✅ — patch=160, fg_bias=0.85
+   - (3) NestedVNet deep supervision 🔄 — training (`--backbone nested_vnet`)
+   - (4) FocalTversky + Boundary + clCE ✅ — Loss overhaul done
+   - (5) FixMatch weak→strong consistency — next if needed
 9. **Run MRI validation inference** (Tasks 1 & 2).
 10. **5-fold CV + ensemble** (Phase 8).
 11. **Extend MRI training epochs** (400+).

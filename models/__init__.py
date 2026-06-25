@@ -249,14 +249,15 @@ class CARE2026_CT_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
         if self.mode not in ("cps", "mean_teacher"):
             raise ValueError(f"Unknown semi_supervised_mode: {self.mode}")
 
-        backbone = str(self.__config.get("backbone", "vnet_ct"))
-        if backbone == "nested_vnet_ct":
+        backbone = str(self.__config.get("backbone", self.__train_config.get("backbone", "vnet_ct")))
+        self.__config["backbone"] = backbone
+        if backbone.startswith("nested"):
             from .nested_vnet import NestedVNet
 
-            model_cfg = self.config.nested_vnet_ct
+            model_cfg = self.config.get(backbone, self.config.nested_vnet_ct)
             self._make_model = lambda: NestedVNet(model_cfg)
         else:
-            model_cfg = self.config.vnet_ct
+            model_cfg = self.config.get(backbone, self.config.vnet_ct)
             self._make_model = lambda: VNet(model_cfg)
         self._backbone = backbone
         self._is_nested = backbone.startswith("nested")

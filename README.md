@@ -76,7 +76,7 @@ Data are provided in NIfTI format:
 
 - [README.md](README.md): this file — project overview, task definitions, data layout, and module descriptions.
 - [ROADMAP.md](ROADMAP.md): development roadmap covering approach design, phased implementation plan, MBAS2024 insights, experiment matrix, and next steps.
-- [cfg.py](cfg.py): centralized configuration objects (`BaseCfg`, `MRI_Stage1_TrainCfg`, `MRI_Stage2_TrainCfg`, `CT_TrainCfg`, `ModelCfg`) via `torch_ecg.cfg.CFG`. Covers optimiser, scheduler, per-task augmentation presets, loss weights, semi-supervised mode (CPS/Mean Teacher), and architecture hyper-parameters.
+- [cfg.py](cfg.py): centralized configuration objects (`BaseCfg`, `MRI_Stage1_TrainCfg`, `MRI_Stage2_TrainCfg`, `CT_TrainCfg`, `CT_TrainCfgV2`, `ModelCfg`) via `torch_ecg.cfg.CFG`. Covers optimiser, scheduler, per-task augmentation presets, loss weights, semi-supervised mode (CPS/Mean Teacher), and architecture hyper-parameters.
 - [const.py](const.py): shared project-wide constants — MRI/CT spatial shapes and spacings, class maps, dataset size counts, cache directory paths, and a `REMOTE_MODELS` placeholder for cloud-hosted checkpoint URLs.
 - [data_reader.py](data_reader.py): NIfTI data reader classes (`CARE2026_MRI`, `CARE2026_CT`) built on `torch_ecg` — file listing, label loading, LA bounding-box extraction, resampling, HU windowing, and cropped data access.
 - [dataset.py](dataset.py): PyTorch `Dataset` classes for all three tasks (`CARE2026_MRI_Stage1_Dataset`, `CARE2026_MRI_Stage2_Dataset`, `CARE2026_CT_Dataset`) with RAM caching, on-the-fly augmentation, foreground-biased patch sampling, and CLAHE support.
@@ -85,7 +85,7 @@ Data are provided in NIfTI format:
 - [pipeline.py](pipeline.py): high-level inference orchestration (`run_task1/2/3_inference`, `run_all_tasks`) plus the **unified CLI** for model loading, inference, and submission packaging. Serves as the Docker `ENTRYPOINT`.
 - [predict.py](predict.py): core volume-level inference functions — `predict_mri_two_stage()` (two-stage coarse-to-fine MRI pipeline), `predict_ct()` (sliding-window CT inference), 8-fold flip TTA, and post-processing utilities (`keep_largest_component`, `postprocess_mri_masks`, `postprocess_ct_mask`).
 - [post_docker_build.py](post_docker_build.py): downloads and caches trained model weights into the Docker image at build time (executed during `docker build`).
-- [trainer.py](trainer.py): three trainer classes (`CARE2026_MRI_Stage1_Trainer`, `CARE2026_MRI_Stage2_Trainer`, `CARE2026_CT_Trainer`) with AMP, gradient accumulation, cosine/poly LR, and a CLI for launching training runs.
+- [trainer.py](trainer.py): three trainer classes (`CARE2026_MRI_Stage1_Trainer`, `CARE2026_MRI_Stage2_Trainer`, `CARE2026_CT_Trainer`) with AMP, gradient accumulation, cosine/poly LR, and a CLI for launching training runs.  Supports `--ct-model v1|v2` and `--backbone vnet|nested_vnet`.
 - [requirements.txt](requirements.txt): full requirements for local development.
 - [requirements-docker.txt](requirements-docker.txt): requirements for the Docker image (torch pre-installed in base image).
 - [requirements-no-torch.txt](requirements-no-torch.txt): requirements excluding all torch-related packages.
@@ -97,19 +97,21 @@ Data are provided in NIfTI format:
 - [checkpoints](checkpoints): trained model weights (`.safetensors`). Canonical names: `mri_stage1_model.safetensors`, `mri_stage2_model.safetensors`, `ct_model.safetensors`; also contains epoch snapshots for rollback.
 - [log](log): training logs (`.txt` + `.csv` metrics from `torch_ecg` trainers) and TensorBoard event files.
 - [evaluate-results](evaluate-results): output directory for local validation-set evaluation metrics.
+- [scripts](scripts): diagnostic and test scripts — `diagnose_ct.py` (full per-class metrics on labelled CTs), `test_ct_inference.py` (quick smoke test).
 - [results](results): local prediction outputs and submission zip archives.
 
 ### Folders (Modules)
 
 - [models](models): model architecture definitions and high-level wrappers.
-  - [`__init__.py`](models/__init__.py): model wrapper classes — `CARE2026_MRI_Stage1_Model` (VNet for coarse LA localisation), `CARE2026_MRI_Stage2_Model` (single-head VNet for scar-only, trained on centroid-cropped region), `CARE2026_CT_Model` (VNet(s) supporting CPS dual-model and Mean Teacher semi-supervised modes). All wrappers compute loss inside `forward()` and support checkpoint save/load.
+  - [`__init__.py`](models/__init__.py): model wrapper classes — `CARE2026_MRI_Stage1_Model` (VNet for coarse LA localisation), `CARE2026_MRI_Stage2_Model` (single-head VNet for scar-only, trained on centroid-cropped region), `CARE2026_CT_Model` (VNet(s) supporting CPS dual-model and Mean Teacher semi-supervised modes), `CARE2026_CT_ModelV2` (supervised-first variant with InstanceNorm+Mish+AdamW option). All wrappers compute loss inside `forward()` and support checkpoint save/load.
   - [vnet.py](models/vnet.py): 3D V-Net backbone — `VNet` (encoder-decoder with skip connections). Supports optional `BottleneckTransformer3D` at the bottleneck and `ECAGate3D` on skip connections.
-  - [nested_vnet.py](models/nested_vnet.py): UNet++-style NestedVNet with dense skip connections and deep supervision at multiple decoder resolutions (reserved for future use).
+  - [nested_vnet.py](models/nested_vnet.py): UNet++-style NestedVNet with dense skip connections and deep supervision at multiple decoder resolutions. Used for CT via `--backbone nested_vnet`.
   - [layers.py](models/layers.py): shared 3-D building blocks — `ConvNormAct`, `ResBlock3D`, `DownBlock3D`, `UpBlock3D`, `NestedUpBlock3D`, `ECAGate3D` (efficient channel attention), `WindowedMHSA3D` (windowed multi-head self-attention), `BottleneckTransformer3D` (Swin-style transformer block).
   - [loss/](models/loss): custom loss functions for all three tasks.
-    - [`__init__.py`](models/loss/__init__.py): task-level compound loss wrappers — `Stage1MRILoss` (binary DiceCE), `ScarLoss` (Dice+Focal+spatially-weighted CE with Gaussian distance map), `CTLoss` (supervised DiceCE + CPS or Mean Teacher consistency).
+    - [`__init__.py`](models/loss/__init__.py): task-level compound loss wrappers — `Stage1MRILoss` (binary DiceCE), `ScarLoss` (Dice+Focal+spatially-weighted CE with Gaussian distance map), `CTLoss` (FocalTversky + optional CE/Boundary/clCE + CPS or Mean Teacher consistency).
     - [dice_loss.py](models/loss/dice_loss.py): `SoftDiceLoss`, `DiceCELoss`, `TverskyLoss`, `FocalTverskyLoss`.
     - [boundary_loss.py](models/loss/boundary_loss.py): `BoundaryLoss` (signed distance map), `HausdorffDTLoss` (distance-transform HD), `HausdorffERLoss` (GPU morphological erosion HD).
+    - [centerline_loss.py](models/loss/centerline_loss.py): `CenterlineCELoss` — MICCAI 2024 clCE for topology preservation of thin tubular structures (PV).
     - [compound_loss.py](models/loss/compound_loss.py): `DiceFocalLoss`, `DiceBoundaryLoss`, `DiceTopKLoss`.
     - [distribution_loss.py](models/loss/distribution_loss.py): `FocalLoss` (multi-class), `TopKCELoss`.
     - [region_loss.py](models/loss/region_loss.py): `IoULoss`, `GeneralizedDiceLoss`, `LovaszSoftmaxLoss`.
