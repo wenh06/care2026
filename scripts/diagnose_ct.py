@@ -21,7 +21,7 @@ sys.path.insert(0, os.getcwd())
 
 from const import CT_PATCH_SIZE
 from data_reader import CARE2026_CT
-from models import CARE2026_CT_Model
+from models import CARE2026_CT_Model, CARE2026_CT_ModelV2
 from predict import predict_ct
 
 
@@ -91,28 +91,36 @@ def main():
     # 1. Load model
     # ------------------------------------------------------------------
     print(f"\nLoading model from {args.checkpoint}...")
-    model, train_cfg = CARE2026_CT_Model.from_checkpoint(args.checkpoint, device=device)
+    # Auto-detect V1 vs V2 from state_dict: V1 has BatchNorm (num_batches_tracked),
+    # V2 has InstanceNorm (no num_batches_tracked).
+    import json
+
+    from safetensors import safe_open
+
+    model_cls = CARE2026_CT_Model  # default V1
+    with safe_open(args.checkpoint, framework="pt", device="cpu") as f:
+        meta = f.metadata() or {}
+        tc = json.loads(meta.get("train_config", "{}"))
+        # V1 state_dict has num_batches_tracked (BatchNorm), V2 does not (InstanceNorm)
+        has_bn = any("num_batches_tracked" in k for k in f.keys())
+        if not has_bn:
+            model_cls = CARE2026_CT_ModelV2
+
+    model, train_cfg = model_cls.from_checkpoint(args.checkpoint, device=device)
     model.eval()
 
+    print(f"  Model class: {model_cls.__name__}")
     print(f"  Mode: {model.mode}")
     print(f"  Normalization: {train_cfg.get('normalization', 'N/A')}")
 
     for k in ("backbone", "patch_size", "semi_supervised_mode", "n_epochs", "optimizer", "lr"):
         print(f"  train_cfg.{k}: {train_cfg.get(k, 'N/A')}")
-    print(f"  model num_classes: {model.config.vnet_ct.get('num_classes', 'N/A')}")
-    print(f"  model activation: {model.config.vnet_ct.get('activation', 'N/A')}")
-    print(f"  model norm: {model.config.vnet_ct.get('norm', 'N/A')}")
+    # Detect norm/activation from first conv layer
+    first_conv = model.model1.encoder.stem[0]
+    print(f"  model norm: {'batch' if hasattr(model.model1.encoder.stem[1], 'running_mean') else 'instance'}")
+    print(f"  model num_classes: {model.config[model._backbone].get('num_classes', 'N/A')}")
+    print(f"  model activation: {model.config[model._backbone].get('activation', 'N/A')}")
     print(f"  model params: {sum(p.numel() for p in model.parameters()):,}")
-
-    # Check BN running stats (first layer)
-    for name, param in model.named_parameters():
-        if "running_mean" in name:
-            rmean = param.data.cpu().numpy()
-            print(f"  {name}: mean={rmean.mean():.4f}, std={rmean.std():.4f}, min={rmean.min():.4f}, max={rmean.max():.4f}")
-        if "running_var" in name:
-            rvar = param.data.cpu().numpy()
-            print(f"  {name}: mean={rvar.mean():.4f}, std={rvar.std():.4f}, min={rvar.min():.4f}, max={rvar.max():.4f}")
-        break  # Just first one for sanity
 
     # ------------------------------------------------------------------
     # 2. Load data reader
