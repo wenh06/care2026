@@ -430,6 +430,23 @@ Next directions: foreground-aware patch sampling, larger patches,
 topology-aware losses (clCE/cbDice), FixMatch-style weak→strong
 consistency.
 
+#### 6.3.3 Two-Stage Coarse-to-Fine — Ruled Out (2026-06-25)
+
+Unlike MRI where scar tightly surrounds the LA cavity, CT structures
+are spatially dispersed.  Analysis of 50 labelled CTs:
+
+| Metric | Value |
+|--------|-------|
+| Foreground bbox / total volume | **79.9%** |
+| LA bbox / total volume | 25.3% |
+| LAA bbox / total volume | 46.0% |
+| PV centroid → LA centroid | **42.4 mm** |
+| LAA centroid → LA centroid | 23.4 mm |
+
+To fully contain LAA within an LA-bbox crop, a **50 mm margin** is
+needed — at which point the crop volume ≈ original.  Two-stage
+coarse-to-fine is **not viable** for CT.
+
 **MT extended (300 epochs, 2026-06-09):**
 
 ```bash
@@ -537,18 +554,17 @@ Local metrics to track:
 4. ~~**CT post-processing**~~ ✅ Done — `postprocess_ct_mask()` (per-class largest connected component).
 5. ~~**CLAHE ablation**~~ ✅ Done — MCLAHE wired into dataset (config flag `apply_mclahe`); auto-detected at inference time.
 6. ~~**CT baseline training**~~ ✅ Done — CPS baseline + class weights + Mean Teacher all trained; MT best (0.5234 mean Dice).  V1 diagnostic (2026-06-24) identified BatchNorm + SGD + PV weight as root causes of poor performance.
-7. ~~**CT V2 experiments**~~ ✅ Done — IN+Mish+AdamW underperforms BN+ReLU+SGD in all settings (0.47 vs 0.52); config rolled back to V1 best. Next: foreground-aware patch sampling, larger patches (160³), topology-aware loss (clCE/cbDice).
-8. **Run MRI validation inference** (Tasks 1 & 2):
-   ```bash
-   python pipeline.py \
-     --input_dir /Data1/wenh06/CARE2026-LeftAtrium \
-     --output_dir /Data1/wenh06/CARE2026-LeftAtrium/output \
-     --model_dir checkpoints/ \
-     --tasks 1,2
-   ```
-9. **5-fold CV + ensemble** (Phase 8): train 5 folds, ensemble predictions for final submission.
-10. **Extend MRI training epochs** (400+): evaluate whether extended training closes the gap toward winning-team performance.
-11. **SGD + poly LR for MRI**: test whether SGD (as used by top MBAS2024 teams) outperforms AdamW+cosine for MRI tasks.
+7. ~~**CT V2 experiments**~~ ✅ Done — IN+Mish+AdamW underperforms BN+ReLU+SGD in all settings (0.47 vs 0.52); config rolled back to V1 best.  Two-stage coarse-to-fine ruled out (CT structures too dispersed, bbox spans 80% of volume).
+8. **CT improvement round** — see Phase 7 for detailed plan:
+   - (1) percentile normalization — config change only
+   - (2) fg_bias↑ + patch_size↑ — config change only
+   - (3) NestedVNet deep supervision — add model config
+   - (4) clCE topology-aware loss — new loss class
+   - (5) FixMatch weak→strong consistency — trainer + model changes
+9. **Run MRI validation inference** (Tasks 1 & 2).
+10. **5-fold CV + ensemble** (Phase 8).
+11. **Extend MRI training epochs** (400+).
+12. **SGD + poly LR for MRI**.
 
 ---
 
