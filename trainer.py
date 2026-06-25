@@ -446,12 +446,29 @@ class CARE2026_CT_Trainer(_BaseCARE2026Trainer):
         self.val_train_loader = None
 
     def _get_cps_weight(self) -> float:
-        rampup_epochs = max(1, int(self.train_config.get("cps_rampup_epochs", 30)))
+        """Consistency weight with optional warm-up.
+
+        Returns 0 during warmup, then ramps up linearly to lambda_max.
+        """
+        warmup = max(0, int(self.train_config.get("mt_warmup_epochs", 0)))
+        if self.epoch < warmup:
+            return 0.0
+        rampup_epochs = max(1, int(self.train_config.get("mt_rampup_epochs", 30)))
         lambda_max = float(self.train_config.get("cps_lambda_max", 1.0))
-        return min(1.0, self.epoch / rampup_epochs) * lambda_max
+        t = (self.epoch - warmup) / rampup_epochs
+        return min(1.0, t) * lambda_max
+
+    def _get_clce_weight(self) -> float:
+        """clCE weight, gated by start epoch."""
+        base = float(self.train_config.loss_weights.get("sup_clce", 0.0))
+        if base <= 0:
+            return 0.0
+        start = int(self.train_config.loss_weights.get("clce_start_epoch", 0))
+        return base if self.epoch >= start else 0.0
 
     def run_one_step(self, input_tensors: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         self._current_cps_weight = self._get_cps_weight()
+        self._current_clce_weight = self._get_clce_weight()
         return self.model(
             img=input_tensors["image"],
             labels={
@@ -459,6 +476,7 @@ class CARE2026_CT_Trainer(_BaseCARE2026Trainer):
                 "labeled": input_tensors["is_labeled"],
             },
             cps_weight=self._current_cps_weight,
+            clce_weight=self._current_clce_weight,
         )
 
     @torch.no_grad()
@@ -648,10 +666,10 @@ def get_args(**kwargs: Any) -> CFG:
     parser.add_argument(
         "--ct-model",
         type=str,
-        default="v2",
+        default="v1",
         choices=["v1", "v2"],
         dest="ct_model_version",
-        help="CT model version: v1 (original BN+ReLU+SGD+CPS/MT) or v2 (IN+Mish+AdamW, supervised-first).",
+        help="CT model version: v1 (original BN+ReLU+SGD+MT) or v2 (IN+Mish+AdamW, experimental).",
     )
     args = {k: v for k, v in vars(parser.parse_args()).items() if v is not None}
     cfg.update(args)

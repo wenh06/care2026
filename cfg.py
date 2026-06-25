@@ -176,8 +176,12 @@ CT_TrainCfg.task = "ct"
 CT_TrainCfg.backbone = "vnet_ct"  # "vnet_ct" | "nested_vnet_ct"
 
 # Patch size (isotropic cube) after resampling to 0.5 mm isotropic
-CT_TrainCfg.patch_size = 160  # CT_PATCH_SIZE  # 128³ (default; try 160 for more context)
+CT_TrainCfg.patch_size = CT_PATCH_SIZE  # 128³ (default; try 160 for more context)
 CT_TrainCfg.fg_bias = 0.85  # 0.5  # foreground-biased patch sampling (try 0.85 for PV/LAA)
+# Class-aware patch sampling: per-class probabilities for patch centre.
+# None → use fg_bias + random sampling.  List of 4 floats [random, LA, PV, LAA]
+# summing to 1.0 enables explicit per-class sampling, guaranteeing PV/LAA exposure.
+CT_TrainCfg.class_sampling_probs = None  # e.g. [0.15, 0.30, 0.35, 0.20]
 
 # Training duration and batch
 CT_TrainCfg.n_epochs = 200
@@ -226,7 +230,12 @@ CT_TrainCfg.augmentation = CFG(
 
 # Semi-supervised mode: "cps" or "mean_teacher"
 CT_TrainCfg.semi_supervised_mode = "mean_teacher"
-CT_TrainCfg.consistency_rampup_epochs = 30
+# MT warm-up: pure supervised training for the first N epochs before
+# consistency loss kicks in.  Prevents early-stage noise from teacher.
+CT_TrainCfg.mt_warmup_epochs = 0  # 0 = no warmup; try 40 for stable start
+CT_TrainCfg.mt_rampup_epochs = 30  # ramp-up duration *after* warmup
+# Legacy key (used by trainer._get_cps_weight):
+CT_TrainCfg.consistency_rampup_epochs = CT_TrainCfg.mt_rampup_epochs
 # CPS
 CT_TrainCfg.cps_lambda_max = 1.0
 # Mean Teacher (Tarvainen & Valpola, NeurIPS 2017)
@@ -247,6 +256,8 @@ CT_TrainCfg.loss_weights = CFG(
     sup_ce=0.0,  # set >0 to add CE with class weights
     sup_boundary=0.1,  # set >0 to enable HausdorffERLoss (PV/LAA boundary precision)
     sup_clce=0.0,  # set >0 to enable CenterlineCELoss (PV topology preservation)
+    clce_start_epoch=0,  # delay clCE until this epoch (0 = from start; try 100)
+    clce_classes=None,  # None = all classes; e.g. [2] for PV-only topology supervision
     cps=1.0,
     ce_class_weight=[0.2, 1.0, 6.0, 2.0],  # [bg, LA, PV, LAA]
 )

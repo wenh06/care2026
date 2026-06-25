@@ -476,6 +476,8 @@ class CARE2026_CT_Dataset(Dataset, ReprMixin):
 
         self._patch_size: int = int(self.config.patch_size)
         self._fg_bias: float = float(self.config.get("fg_bias", 0.5))
+        # Class-aware patch sampling: [random, LA, PV, LAA] probs; None = use fg_bias
+        self._class_sampling_probs = self.config.get("class_sampling_probs", None)
 
         # Per-record lazy cache: stores (image, mask_or_None) after preprocessing
         self._cache: Dict[str, Tuple[np.ndarray, Optional[np.ndarray]]] = {}
@@ -494,7 +496,10 @@ class CARE2026_CT_Dataset(Dataset, ReprMixin):
         ps = self._patch_size
         if self.training:
             aug_cfg = self.config.get("augmentation", None)
-            image_patch, mask_patch = _random_patch(image, mask, ps, fg_bias=self._fg_bias)
+            if self._class_sampling_probs is not None and mask is not None:
+                image_patch, mask_patch = _class_aware_patch(image, mask, ps, probs=self._class_sampling_probs)
+            else:
+                image_patch, mask_patch = _random_patch(image, mask, ps, fg_bias=self._fg_bias)
             image_patch, mask_patch = _augment_ct(image_patch, mask_patch, aug_cfg=aug_cfg)
         else:
             image_patch, mask_patch = _center_patch(image, mask, ps)
@@ -757,6 +762,44 @@ def _random_patch(
     x0, y0, z0 = starts
     img_patch = image[x0 : x0 + ps, y0 : y0 + ps, z0 : z0 + ps]
     msk_patch = mask[x0 : x0 + ps, y0 : y0 + ps, z0 : z0 + ps] if mask is not None else None
+
+    img_patch, msk_patch = _pad_to_size(img_patch, msk_patch, ps)
+    return img_patch, msk_patch
+
+
+def _class_aware_patch(
+    image: np.ndarray,
+    mask: np.ndarray,
+    ps: int,
+    probs: list,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Extract a ``ps³`` patch with per-class centre sampling.
+
+    ``probs = [p_random, p_LA, p_PV, p_LAA]``, sum to 1.0.
+    Guarantees that thin structures (PV, LAA) get adequate exposure
+    regardless of their small volume fraction.
+    """
+    H, W, D = image.shape[:3]
+    rng = np.random.default_rng()
+
+    choice = rng.choice(4, p=probs)
+    if choice == 0:
+        # Random
+        centre = np.array([rng.integers(max(H, 1)), rng.integers(max(W, 1)), rng.integers(max(D, 1))])
+    else:
+        # Class 1=LA, 2=PV, 3=LAA
+        class_mask = mask == choice
+        if class_mask.sum() == 0:
+            # Fall back to random if class is absent
+            centre = np.array([rng.integers(max(H, 1)), rng.integers(max(W, 1)), rng.integers(max(D, 1))])
+        else:
+            coords = np.argwhere(class_mask)
+            centre = coords[rng.integers(len(coords))]
+
+    starts = np.array([np.clip(int(centre[i]) - ps // 2, 0, max(image.shape[i] - ps, 0)) for i in range(3)])
+    x0, y0, z0 = starts
+    img_patch = image[x0 : x0 + ps, y0 : y0 + ps, z0 : z0 + ps]
+    msk_patch = mask[x0 : x0 + ps, y0 : y0 + ps, z0 : z0 + ps]
 
     img_patch, msk_patch = _pad_to_size(img_patch, msk_patch, ps)
     return img_patch, msk_patch

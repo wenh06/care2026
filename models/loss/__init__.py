@@ -190,9 +190,22 @@ class CTLoss(nn.Module):
         self.boundary_loss = HausdorffERLoss(alpha=2.0, erosions=5) if w.get("sup_boundary", 0.0) > 0 else None
         self.w_boundary = w.get("sup_boundary", 0.0)
         self.clce_loss = CenterlineCELoss(kernel_size=5, lambda_clce=1.0) if w.get("sup_clce", 0.0) > 0 else None
-        self.w_clce = w.get("sup_clce", 0.0)
+        self.clce_classes = w.get("clce_classes", None)  # None=all, or [2] for PV only
         self.w_cps = w.get("cps", 1.0)
         self.w_mt = w.get("mt_consist", 1.0)
+
+    def _compute_clce(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """Compute clCE loss, optionally restricted to specific classes."""
+        if self.clce_classes is not None:
+            # Restrict to selected classes: for each class, build binary logits
+            # (bg probability + class probability) and binary target
+            total = logits.new_zeros(())
+            for cls_id in self.clce_classes:
+                bin_logits = torch.stack([logits[:, 0], logits[:, cls_id]], dim=1)  # (B,2,H,W,D)
+                bin_target = (target == cls_id).long()
+                total = total + self.clce_loss(bin_logits, bin_target)
+            return total / len(self.clce_classes)
+        return self.clce_loss(logits, target)
 
     def forward(
         self,
@@ -202,6 +215,7 @@ class CTLoss(nn.Module):
         target: Optional[torch.Tensor] = None,
         labeled_mask: Optional[torch.Tensor] = None,
         cps_weight: float = 1.0,
+        clce_weight: float = 0.0,
     ) -> dict:
         sup_loss = logits1.sum() * 0.0
         boundary_loss = logits1.sum() * 0.0
@@ -217,8 +231,8 @@ class CTLoss(nn.Module):
                     sup_loss = sup_loss + 0.5 * self.w_ce * (self.ce_loss(l1, tgt_labeled) + self.ce_loss(l2, tgt_labeled))
                 if self.boundary_loss is not None:
                     boundary_loss = 0.5 * (self.boundary_loss(l1, tgt_labeled) + self.boundary_loss(l2, tgt_labeled))
-                if self.clce_loss is not None:
-                    clce_loss = 0.5 * (self.clce_loss(l1, tgt_labeled) + self.clce_loss(l2, tgt_labeled))
+                if self.clce_loss is not None and clce_weight > 0:
+                    clce_loss = 0.5 * (self._compute_clce(l1, tgt_labeled) + self._compute_clce(l2, tgt_labeled))
             else:
                 # Mean Teacher: supervised loss on student only
                 l1 = logits1[labeled_mask]
@@ -227,8 +241,8 @@ class CTLoss(nn.Module):
                     sup_loss = sup_loss + self.w_ce * self.ce_loss(l1, tgt_labeled)
                 if self.boundary_loss is not None:
                     boundary_loss = self.boundary_loss(l1, tgt_labeled)
-                if self.clce_loss is not None:
-                    clce_loss = self.clce_loss(l1, tgt_labeled)
+                if self.clce_loss is not None and clce_weight > 0:
+                    clce_loss = self._compute_clce(l1, tgt_labeled)
 
         # Consistency loss
         consist_loss = logits1.sum() * 0.0
@@ -249,6 +263,6 @@ class CTLoss(nn.Module):
         total = sup_loss + consist_loss
         if self.boundary_loss is not None:
             total = total + self.w_boundary * boundary_loss
-        if self.clce_loss is not None:
-            total = total + self.w_clce * clce_loss
+        if self.clce_loss is not None and clce_weight > 0:
+            total = total + clce_weight * clce_loss
         return {"sup_loss": sup_loss, "consist_loss": consist_loss, "total_loss": total}

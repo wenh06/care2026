@@ -250,6 +250,11 @@ class CARE2026_CT_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
             raise ValueError(f"Unknown semi_supervised_mode: {self.mode}")
 
         backbone = str(self.__config.get("backbone", self.__train_config.get("backbone", "vnet_ct")))
+        # Normalise generic names to CT-specific config keys so that old
+        # checkpoints carrying "vnet"/"nested_vnet" (MRI dual-head configs)
+        # don't shadow the correct CT configs.
+        _ct_backbone_map = {"vnet": "vnet_ct", "nested_vnet": "nested_vnet_ct"}
+        backbone = _ct_backbone_map.get(backbone, backbone)
         self.__config["backbone"] = backbone
         if backbone.startswith("nested"):
             from .nested_vnet import NestedVNet
@@ -294,7 +299,11 @@ class CARE2026_CT_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
         return logits[-1] if isinstance(logits, (list, tuple)) else logits
 
     def forward(
-        self, img: torch.Tensor, labels: Optional[Dict[str, torch.Tensor]] = None, cps_weight: float = 1.0
+        self,
+        img: torch.Tensor,
+        labels: Optional[Dict[str, torch.Tensor]] = None,
+        cps_weight: float = 1.0,
+        clce_weight: float = 0.0,
     ) -> Dict[str, torch.Tensor]:
         img = img.to(device=self.device, dtype=self.dtype)
         if self.mode == "cps":
@@ -344,6 +353,7 @@ class CARE2026_CT_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
                         target=target,
                         labeled_mask=labeled_mask,
                         cps_weight=cps_weight,
+                        clce_weight=clce_weight,
                     )
                     sup_losses.append(ld["sup_loss"])
                     consist_losses.append(ld["consist_loss"])
@@ -361,6 +371,7 @@ class CARE2026_CT_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
                     target=target,
                     labeled_mask=labeled_mask,
                     cps_weight=cps_weight,
+                    clce_weight=clce_weight,
                 )
             output.update(loss_dict)
         return output
@@ -445,6 +456,9 @@ class CARE2026_CT_ModelV2(nn.Module, SizeMixin, CkptMixin, CitationMixin):
 
         # Resolve backbone: "vnet_ct_v2" (default) or "nested_vnet_ct_v2"
         backbone = str(self.__config.get("backbone", self.__train_config.get("backbone", "vnet_ct_v2")))
+        _ct_backbone_map_v2 = {"vnet": "vnet_ct_v2", "nested_vnet": "nested_vnet_ct_v2"}
+        backbone = _ct_backbone_map_v2.get(backbone, backbone)
+        self.__config["backbone"] = backbone
         if backbone.startswith("nested"):
             from .nested_vnet import NestedVNet
 
@@ -491,7 +505,11 @@ class CARE2026_CT_ModelV2(nn.Module, SizeMixin, CkptMixin, CitationMixin):
         return logits[-1] if isinstance(logits, (list, tuple)) else logits
 
     def forward(
-        self, img: torch.Tensor, labels: Optional[Dict[str, torch.Tensor]] = None, cps_weight: float = 1.0
+        self,
+        img: torch.Tensor,
+        labels: Optional[Dict[str, torch.Tensor]] = None,
+        cps_weight: float = 1.0,
+        clce_weight: float = 0.0,
     ) -> Dict[str, torch.Tensor]:
         img = img.to(device=self.device, dtype=self.dtype)
 
