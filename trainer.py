@@ -327,7 +327,7 @@ class CARE2026_MRI_Stage1_Trainer(_BaseCARE2026Trainer):
             drop_last=False,
             collate_fn=collate_fn_mri_stage1,
         )
-        self.val_train_loader = None
+        self.val_train_loader = self.train_loader if bool(self.train_config.get("debug", True)) else None
 
     def run_one_step(self, input_tensors: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         return self.model(
@@ -443,7 +443,7 @@ class CARE2026_CT_Trainer(_BaseCARE2026Trainer):
             drop_last=False,
             collate_fn=collate_fn_ct,
         )
-        self.val_train_loader = None
+        self.val_train_loader = self.train_loader if bool(self.train_config.get("debug", True)) else None
 
     def _get_cps_weight(self) -> float:
         """Consistency weight with optional warm-up.
@@ -593,7 +593,7 @@ class CARE2026_MRI_Stage2_Trainer(_BaseCARE2026Trainer):
             drop_last=False,
             collate_fn=collate_fn_mri,
         )
-        self.val_train_loader = None
+        self.val_train_loader = self.train_loader if bool(self.train_config.get("debug", True)) else None
 
     def run_one_step(self, input_tensors: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         return self.model(
@@ -653,7 +653,7 @@ def get_args(**kwargs: Any) -> CFG:
     parser.add_argument("--accum-steps", type=int, default=None, dest="accumulate_grad_batches")
     parser.add_argument("--use-amp", type=str2bool, default=None, dest="use_amp")
     parser.add_argument("--epochs", type=int, default=None, dest="n_epochs")
-    parser.add_argument("--debug", type=str2bool, default=False, dest="debug")
+    parser.add_argument("--debug", type=str2bool, default=True, dest="debug")
     parser.add_argument(
         "--semi-mode",
         type=str,
@@ -663,6 +663,10 @@ def get_args(**kwargs: Any) -> CFG:
         help="Semi-supervised mode for CT (Task 3).",
     )
     parser.add_argument("--mclahe", type=str2bool, default=None, dest="apply_mclahe", help="Enable MCLAHE preprocessing")
+    parser.add_argument("--optimizer", type=str, default=None, choices=["adamw", "sgd"])
+    parser.add_argument("--lr", type=float, default=None, dest="lr")
+    parser.add_argument("--lr-scheduler", type=str, default=None, choices=["cosine", "poly", "none"])
+    parser.add_argument("--val-ratio", type=float, default=None, dest="val_ratio")
     parser.add_argument(
         "--ct-model",
         type=str,
