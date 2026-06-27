@@ -246,7 +246,7 @@ class CARE2026_CT_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
         # CkptMixin.from_checkpoint() passes to __init__ as ``config``.
         self.mode = self.__config.get("semi_supervised_mode") or self.__train_config.get("semi_supervised_mode", "cps")
         self.__config["semi_supervised_mode"] = self.mode
-        if self.mode not in ("cps", "mean_teacher"):
+        if self.mode not in ("cps", "mean_teacher", "supervised"):
             raise ValueError(f"Unknown semi_supervised_mode: {self.mode}")
 
         backbone = str(self.__config.get("backbone", self.__train_config.get("backbone", "vnet_ct")))
@@ -268,14 +268,22 @@ class CARE2026_CT_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
         self._is_nested = backbone.startswith("nested")
 
         self.model1 = self._make_model()
+        # Load pretrained encoder weights (shape-matched; strict=False)
+        pretrained = self.__train_config.get("pretrained_encoder", None)
+        if pretrained:
+            from safetensors.torch import load_file as _load_sft
+
+            pretrained_sd = _load_sft(pretrained, device="cpu")
+            self.model1.load_state_dict(pretrained_sd, strict=False)
         if self.mode == "cps":
             self.model2 = self._make_model()
-        else:
-            # Mean Teacher: EMA teacher model (no grad)
+        elif self.mode == "mean_teacher":
+            # EMA teacher model (no grad)
             self.teacher = self._make_model()
             self.teacher.load_state_dict(self.model1.state_dict())
             for p in self.teacher.parameters():
                 p.requires_grad = False
+        # "supervised": single model, nothing else needed
         self.criterion = CTLoss(self.train_config)
         self._mt_decay = float(self.__train_config.get("mt_ema_decay", 0.99))
 
@@ -310,7 +318,7 @@ class CARE2026_CT_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
             logits1, logits2 = self.model1(img), self.model2(img)
             seg_mask = self._ds_last((self._ds_last(logits1) + self._ds_last(logits2)) / 2).argmax(dim=1)
             output = {"logits1": logits1, "logits2": logits2, "seg_mask": seg_mask}
-        else:
+        elif self.mode == "mean_teacher":
             logits_s = self.model1(img)
             seg_mask = self._ds_last(logits_s).argmax(dim=1)
             output = {"logits1": logits_s, "seg_mask": seg_mask}
@@ -318,6 +326,11 @@ class CARE2026_CT_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
                 with torch.no_grad():
                     logits_t = self.teacher(img)
                     output["logits_t"] = logits_t
+        else:
+            # supervised: single model
+            logits_s = self.model1(img)
+            seg_mask = self._ds_last(logits_s).argmax(dim=1)
+            output = {"logits1": logits_s, "seg_mask": seg_mask}
 
         if labels is not None:
             target = labels.get("ct_mask")
@@ -473,6 +486,12 @@ class CARE2026_CT_ModelV2(nn.Module, SizeMixin, CkptMixin, CitationMixin):
         self._is_nested = backbone.startswith("nested")
 
         self.model1 = self._make_model()
+        pretrained = self.__train_config.get("pretrained_encoder", None)
+        if pretrained:
+            from safetensors.torch import load_file as _load_sft
+
+            pretrained_sd = _load_sft(pretrained, device="cpu")
+            self.model1.load_state_dict(pretrained_sd, strict=False)
         if self.mode == "cps":
             self.model2 = self._make_model()
         elif self.mode == "mean_teacher":

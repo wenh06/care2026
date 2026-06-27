@@ -71,21 +71,27 @@ MRI_Stage1_TrainCfg.patch_shape = MRI_STAGE1_SHAPE  # (144, 144, 44)
 MRI_Stage1_TrainCfg.train_crop_hw = 0
 
 # Training duration and batch
-MRI_Stage1_TrainCfg.n_epochs = 100
+# MRI_Stage1_TrainCfg.n_epochs = 100
+MRI_Stage1_TrainCfg.n_epochs = 300  # extended for SGD convergence
 MRI_Stage1_TrainCfg.batch_size = 4  # small input → larger batch fits fine
 MRI_Stage1_TrainCfg.use_amp = True
 MRI_Stage1_TrainCfg.accumulate_grad_batches = 1
 
-# Optimizer
-MRI_Stage1_TrainCfg.optimizer = "adamw"
-MRI_Stage1_TrainCfg.betas = (0.9, 0.999)
-MRI_Stage1_TrainCfg.decay = 1e-2
-MRI_Stage1_TrainCfg.learning_rate = 3e-4
+# SGD + poly LR (MBAS2024: all top teams use SGD)
+# MRI_Stage1_TrainCfg.optimizer = "adamw"
+# MRI_Stage1_TrainCfg.betas = (0.9, 0.999)
+# MRI_Stage1_TrainCfg.decay = 1e-2
+# MRI_Stage1_TrainCfg.learning_rate = 3e-4
+# MRI_Stage1_TrainCfg.lr = MRI_Stage1_TrainCfg.learning_rate
+# MRI_Stage1_TrainCfg.lr_scheduler = "cosine"
+# MRI_Stage1_TrainCfg.lr_min = 1e-6
+MRI_Stage1_TrainCfg.optimizer = "sgd"
+MRI_Stage1_TrainCfg.momentum = 0.9
+MRI_Stage1_TrainCfg.decay = 1e-4
+MRI_Stage1_TrainCfg.learning_rate = 1e-2
 MRI_Stage1_TrainCfg.lr = MRI_Stage1_TrainCfg.learning_rate
-
-# Cosine annealing schedule
-MRI_Stage1_TrainCfg.lr_scheduler = "cosine"
-MRI_Stage1_TrainCfg.lr_min = 1e-6
+MRI_Stage1_TrainCfg.lr_scheduler = "poly"
+MRI_Stage1_TrainCfg.lr_poly_power = 0.9
 
 # Augmentation
 MRI_Stage1_TrainCfg.augmentation = CFG(
@@ -101,7 +107,7 @@ MRI_Stage1_TrainCfg.loss_weights = CFG(la_dice=1.0)
 # Checkpointing
 MRI_Stage1_TrainCfg.keep_checkpoint_max = 3
 MRI_Stage1_TrainCfg.log_step = 10
-MRI_Stage1_TrainCfg.debug = False
+MRI_Stage1_TrainCfg.debug = True  # evaluate on train set too (set False to skip)
 
 # CLAHE preprocessing (disabled by default; enable for ablation)
 MRI_Stage1_TrainCfg.apply_mclahe = False
@@ -126,18 +132,27 @@ MRI_Stage2_TrainCfg.patch_shape = MRI_STAGE2_CROP_SHAPE
 MRI_Stage2_TrainCfg.centroid_jitter = MRI_STAGE2_CENTROID_JITTER
 MRI_Stage2_TrainCfg.train_crop_hw = 128  # model input at training time
 
-MRI_Stage2_TrainCfg.n_epochs = 200
+# MRI_Stage2_TrainCfg.n_epochs = 200
+MRI_Stage2_TrainCfg.n_epochs = 400  # extended for SGD convergence
 MRI_Stage2_TrainCfg.batch_size = 4
 MRI_Stage2_TrainCfg.use_amp = True
 MRI_Stage2_TrainCfg.accumulate_grad_batches = 1
 
-MRI_Stage2_TrainCfg.optimizer = "adamw"
-MRI_Stage2_TrainCfg.betas = (0.9, 0.999)
-MRI_Stage2_TrainCfg.decay = 1e-2
-MRI_Stage2_TrainCfg.learning_rate = 3e-4
+# SGD + poly LR (MBAS2024: all top teams use SGD)
+# MRI_Stage2_TrainCfg.optimizer = "adamw"
+# MRI_Stage2_TrainCfg.betas = (0.9, 0.999)
+# MRI_Stage2_TrainCfg.decay = 1e-2
+# MRI_Stage2_TrainCfg.learning_rate = 3e-4
+# MRI_Stage2_TrainCfg.lr = MRI_Stage2_TrainCfg.learning_rate
+# MRI_Stage2_TrainCfg.lr_scheduler = "cosine"
+# MRI_Stage2_TrainCfg.lr_min = 1e-6
+MRI_Stage2_TrainCfg.optimizer = "sgd"
+MRI_Stage2_TrainCfg.momentum = 0.9
+MRI_Stage2_TrainCfg.decay = 1e-4
+MRI_Stage2_TrainCfg.learning_rate = 1e-2
 MRI_Stage2_TrainCfg.lr = MRI_Stage2_TrainCfg.learning_rate
-MRI_Stage2_TrainCfg.lr_scheduler = "cosine"
-MRI_Stage2_TrainCfg.lr_min = 1e-6
+MRI_Stage2_TrainCfg.lr_scheduler = "poly"
+MRI_Stage2_TrainCfg.lr_poly_power = 0.9
 
 # Aggressive augmentation for domain generalisation (Task 2 unseen centres)
 MRI_Stage2_TrainCfg.augmentation = CFG(
@@ -163,7 +178,7 @@ MRI_Stage2_TrainCfg.loss_weights = CFG(
 MRI_Stage2_TrainCfg.no_scar_proportion = 0.3  # fraction of no-scar (Task 2) records to include as hard negatives
 MRI_Stage2_TrainCfg.keep_checkpoint_max = 3
 MRI_Stage2_TrainCfg.log_step = 10
-MRI_Stage2_TrainCfg.debug = False
+MRI_Stage2_TrainCfg.debug = True  # evaluate on train set too (set False to skip)
 MRI_Stage2_TrainCfg.apply_mclahe = False
 
 # ---------------------------------------------------------------------------
@@ -182,6 +197,7 @@ CT_TrainCfg.fg_bias = 0.85  # 0.5  # foreground-biased patch sampling (try 0.85 
 # None → use fg_bias + random sampling.  List of 4 floats [random, LA, PV, LAA]
 # summing to 1.0 enables explicit per-class sampling, guaranteeing PV/LAA exposure.
 CT_TrainCfg.class_sampling_probs = None  # e.g. [0.15, 0.30, 0.35, 0.20]
+CT_TrainCfg.pretrained_encoder = "checkpoints/vnet_ct_nnunet_enc.safetensors"  # path to .safetensors with VNet encoder weights
 
 # Training duration and batch
 CT_TrainCfg.n_epochs = 200
@@ -229,7 +245,7 @@ CT_TrainCfg.augmentation = CFG(
 )
 
 # Semi-supervised mode: "cps" or "mean_teacher"
-CT_TrainCfg.semi_supervised_mode = "mean_teacher"
+CT_TrainCfg.semi_supervised_mode = "supervised"  # "mean_teacher"
 # MT warm-up: pure supervised training for the first N epochs before
 # consistency loss kicks in.  Prevents early-stage noise from teacher.
 CT_TrainCfg.mt_warmup_epochs = 0  # 0 = no warmup; try 40 for stable start
@@ -265,7 +281,7 @@ CT_TrainCfg.loss_weights = CFG(
 # Checkpointing
 CT_TrainCfg.keep_checkpoint_max = 3
 CT_TrainCfg.log_step = 10
-CT_TrainCfg.debug = False
+CT_TrainCfg.debug = True  # evaluate on train set too (set False to skip)
 
 # ---------------------------------------------------------------------------
 # CT V2 training configuration (supervised-only, InstanceNorm + Mish + AdamW)
@@ -345,7 +361,7 @@ CT_TrainCfgV2.loss_weights = CFG(
 # Checkpointing
 CT_TrainCfgV2.keep_checkpoint_max = 3
 CT_TrainCfgV2.log_step = 10
-CT_TrainCfgV2.debug = False
+CT_TrainCfgV2.debug = True  # evaluate on train set too (set False to skip)
 
 # ---------------------------------------------------------------------------
 # Model configuration
