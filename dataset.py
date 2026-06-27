@@ -63,8 +63,10 @@ def _build_mri_index(reader_t1, reader_t2):
 
 def _mri_train_val_split(index, val_ratio, random_seed):
     """Stratified train/val split on task label."""
-    task_labels = [item[2] for item in index]
     idx_all = list(range(len(index)))
+    if val_ratio <= 0:
+        return idx_all, []
+    task_labels = [item[2] for item in index]
     idx_train, idx_val = train_test_split(
         idx_all,
         test_size=val_ratio,
@@ -447,24 +449,29 @@ class CARE2026_CT_Dataset(Dataset, ReprMixin):
         unlabeled_recs = self._reader.unlabeled_records
 
         if labeled is True:
-            idx_train, idx_val = train_test_split(
-                labeled_recs,
-                test_size=val_ratio,
-                random_state=random_seed,
-            )
-            self._records: List[str] = idx_train if training else idx_val
+            if val_ratio > 0:
+                idx_train, idx_val = train_test_split(
+                    labeled_recs,
+                    test_size=val_ratio,
+                    random_state=random_seed,
+                )
+                self._records: List[str] = idx_train if training else idx_val
+            else:
+                self._records = labeled_recs if training else []
             self._is_labeled_map: Dict[str, bool] = {r: True for r in labeled_recs}
         elif labeled is False:
             # Unlabeled records are used for training only (no validation split)
             self._records = unlabeled_recs
             self._is_labeled_map = {r: False for r in unlabeled_recs}
         else:
-            # All records: split labeled ones, include all unlabeled in training
-            idx_train_l, idx_val_l = train_test_split(
-                labeled_recs,
-                test_size=val_ratio,
-                random_state=random_seed,
-            )
+            if val_ratio > 0:
+                idx_train_l, idx_val_l = train_test_split(
+                    labeled_recs,
+                    test_size=val_ratio,
+                    random_state=random_seed,
+                )
+            else:
+                idx_train_l, idx_val_l = labeled_recs, []
             if training:
                 self._records = idx_train_l + unlabeled_recs
             else:
