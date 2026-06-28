@@ -408,6 +408,11 @@ class CARE2026_CT_Trainer(_BaseCARE2026Trainer):
         val_r = float(self.train_config.get("val_ratio", 0.1))
         seed = int(self.train_config.get("random_seed", 42))
 
+        # No model selection when val set is empty (val_ratio=0).
+        # Base trainer saves the last model at the end of training.
+        if val_r <= 0:
+            self.train_config.monitor = None
+
         # Warmup mode: start with labeled-only, switch to all after warmup.
         # Avoids wasting compute on unlabeled data while consistency loss is 0.
         if warmup > 0 and semi_mode in ("cps", "mean_teacher"):
@@ -531,8 +536,64 @@ class CARE2026_CT_Trainer(_BaseCARE2026Trainer):
             clce_weight=self._current_clce_weight,
         )
 
+    @staticmethod
+    def _count_labeled(ds) -> int:
+        return sum(1 for r in ds._records if ds._is_labeled_map.get(r, False))
+
     @torch.no_grad()
     def evaluate(self, data_loader: DataLoader) -> Dict[str, float]:
+        # Full-volume for val set (≤20 records, matches official pipeline);
+        # patch-based otherwise.  Empty val set (val_ratio=0) returns -inf
+        # so that best_metric is never updated; last model saved at end.
+        ds = data_loader.dataset
+        n_labeled = self._count_labeled(ds)
+        if n_labeled == 0:
+            return {"ct_dice_la": 0.0, "ct_dice_pv": 0.0, "ct_dice_laa": 0.0, "ct_mean_dice": float("-inf")}
+        if data_loader is self.val_loader:
+            return self._evaluate_full_volume(data_loader)
+        return self._evaluate_patch(data_loader)
+
+    def _evaluate_full_volume(self, data_loader: DataLoader) -> Dict[str, float]:
+        """Full-volume sliding-window evaluation (matches official pipeline)."""
+        from predict import predict_ct
+
+        original_state = self.model.training
+        self.model.eval()
+        ds = data_loader.dataset
+
+        per_class_dice = {1: [], 2: [], 3: []}
+        records = [r for r in ds._records if ds._is_labeled_map.get(r, False)]
+
+        with tqdm(
+            total=len(records),
+            desc="Evaluation (full-vol)",
+            unit="vol",
+            dynamic_ncols=True,
+            mininterval=1.0,
+            leave=False,
+        ) as pbar:
+            for rec in records:
+                img_path = ds._reader.get_data_path(rec)
+                gt = ds._reader.load_ann(rec)
+                out = predict_ct(img_path, self.model, device=self.device, use_tta=False)
+                pred = out.ct_mask
+                for class_idx in [1, 2, 3]:
+                    per_class_dice[class_idx].append(_binary_dice(pred == class_idx, gt == class_idx))
+                pbar.update(1)
+
+        self.model.train(original_state)
+        ct_dice_la = float(np.mean(per_class_dice[1])) if per_class_dice[1] else 0.0
+        ct_dice_pv = float(np.mean(per_class_dice[2])) if per_class_dice[2] else 0.0
+        ct_dice_laa = float(np.mean(per_class_dice[3])) if per_class_dice[3] else 0.0
+        return {
+            "ct_dice_la": ct_dice_la,
+            "ct_dice_pv": ct_dice_pv,
+            "ct_dice_laa": ct_dice_laa,
+            "ct_mean_dice": float(np.mean([ct_dice_la, ct_dice_pv, ct_dice_laa])),
+        }
+
+    def _evaluate_patch(self, data_loader: DataLoader) -> Dict[str, float]:
+        """Patch-based evaluation (fast approximation for train set)."""
         original_state = self.model.training
         self.model.eval()
 
@@ -540,7 +601,7 @@ class CARE2026_CT_Trainer(_BaseCARE2026Trainer):
 
         with tqdm(
             total=len(data_loader.dataset),
-            desc="Evaluation",
+            desc="Evaluation (patch)",
             unit="vol",
             dynamic_ncols=True,
             mininterval=1.0,
@@ -554,7 +615,7 @@ class CARE2026_CT_Trainer(_BaseCARE2026Trainer):
 
                 for batch_idx in range(pred.shape[0]):
                     if not is_labeled[batch_idx]:
-                        continue  # skip unlabelled samples (zero masks)
+                        continue
                     for class_idx in [1, 2, 3]:
                         per_class_dice[class_idx].append(
                             _binary_dice(pred[batch_idx] == class_idx, target[batch_idx] == class_idx)
