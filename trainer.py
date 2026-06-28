@@ -454,24 +454,28 @@ class CARE2026_CT_Trainer(_BaseCARE2026Trainer):
                 collate_fn=collate_fn_ct,
             )
 
-        if val_dataset is None:
-            val_dataset = CARE2026_CT_Dataset(
-                db_dir=db_dir,
-                config=self.train_config,
-                training=False,
-                labeled=True,
-                val_ratio=val_r,
-                random_seed=seed,
+        if val_r <= 0:
+            # No val set: skip val logging, no model selection
+            self.val_loader = None
+        else:
+            if val_dataset is None:
+                val_dataset = CARE2026_CT_Dataset(
+                    db_dir=db_dir,
+                    config=self.train_config,
+                    training=False,
+                    labeled=True,
+                    val_ratio=val_r,
+                    random_seed=seed,
+                )
+            self.val_loader = DataLoader(
+                dataset=val_dataset,
+                batch_size=self.batch_size,
+                shuffle=False,
+                num_workers=num_workers,
+                pin_memory=False,
+                drop_last=False,
+                collate_fn=collate_fn_ct,
             )
-        self.val_loader = DataLoader(
-            dataset=val_dataset,
-            batch_size=self.batch_size,
-            shuffle=False,
-            num_workers=num_workers,
-            pin_memory=False,
-            drop_last=False,
-            collate_fn=collate_fn_ct,
-        )
         self.val_train_loader = self.train_loader if bool(self.train_config.get("debug", True)) else None
 
     def _make_ct_loader(self, db_dir, labeled, training, val_ratio, seed, num_workers):
@@ -542,13 +546,8 @@ class CARE2026_CT_Trainer(_BaseCARE2026Trainer):
 
     @torch.no_grad()
     def evaluate(self, data_loader: DataLoader) -> Dict[str, float]:
-        # Full-volume for val set (≤20 records, matches official pipeline);
-        # patch-based otherwise.  Empty val set (val_ratio=0) returns -inf
-        # so that best_metric is never updated; last model saved at end.
-        ds = data_loader.dataset
-        n_labeled = self._count_labeled(ds)
-        if n_labeled == 0:
-            return {"ct_dice_la": 0.0, "ct_dice_pv": 0.0, "ct_dice_laa": 0.0, "ct_mean_dice": float("-inf")}
+        # Full-volume for val set (small, matches official pipeline);
+        # patch-based otherwise.
         if data_loader is self.val_loader:
             return self._evaluate_full_volume(data_loader)
         return self._evaluate_patch(data_loader)

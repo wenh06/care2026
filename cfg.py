@@ -123,7 +123,8 @@ MRI_Stage2_TrainCfg = deepcopy(BaseCfg)
 
 MRI_Stage2_TrainCfg.task = "mri"
 MRI_Stage2_TrainCfg.stage = 2
-MRI_Stage2_TrainCfg.backbone = "vnet_stage2"  # "vnet_stage2" | "nested_vnet_stage2"
+# MRI_Stage2_TrainCfg.backbone = "vnet_stage2"
+MRI_Stage2_TrainCfg.backbone = "nested_vnet_stage2"
 
 # Volume shape: canonical → crop centred on LA centroid → resize to 128×128×44
 MRI_Stage2_TrainCfg.canonical_shape = MRI_CANONICAL_SHAPE
@@ -133,7 +134,8 @@ MRI_Stage2_TrainCfg.centroid_jitter = MRI_STAGE2_CENTROID_JITTER
 MRI_Stage2_TrainCfg.train_crop_hw = 128  # model input at training time
 
 # MRI_Stage2_TrainCfg.n_epochs = 200
-MRI_Stage2_TrainCfg.n_epochs = 400  # extended for SGD convergence
+# MRI_Stage2_TrainCfg.n_epochs = 400
+MRI_Stage2_TrainCfg.n_epochs = 600  # extended for SGD convergence
 MRI_Stage2_TrainCfg.batch_size = 4
 MRI_Stage2_TrainCfg.use_amp = True
 MRI_Stage2_TrainCfg.accumulate_grad_batches = 1
