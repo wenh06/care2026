@@ -404,36 +404,60 @@ class CARE2026_CT_Trainer(_BaseCARE2026Trainer):
         num_workers = 1 if self.device == torch.device("cpu") else 4
         db_dir = self.train_config.db_dir
         semi_mode = str(self.train_config.get("semi_supervised_mode", "cps"))
-        # supervised mode → only labelled records; cps/mean_teacher → all records
-        train_labeled = True if semi_mode == "supervised" else None
-        if train_dataset is None:
-            train_dataset = CARE2026_CT_Dataset(
-                db_dir=db_dir,
-                config=self.train_config,
+        warmup = int(self.train_config.get("mt_warmup_epochs", 0))
+        val_r = float(self.train_config.get("val_ratio", 0.1))
+        seed = int(self.train_config.get("random_seed", 42))
+
+        # Warmup mode: start with labeled-only, switch to all after warmup.
+        # Avoids wasting compute on unlabeled data while consistency loss is 0.
+        if warmup > 0 and semi_mode in ("cps", "mean_teacher"):
+            self._train_loader_labeled = self._make_ct_loader(
+                db_dir,
+                labeled=True,
                 training=True,
-                labeled=train_labeled,
-                val_ratio=float(self.train_config.get("val_ratio", 0.1)),
-                random_seed=int(self.train_config.get("random_seed", 42)),
+                val_ratio=val_r,
+                seed=seed,
+                num_workers=num_workers,
             )
+            self._train_loader_all = self._make_ct_loader(
+                db_dir,
+                labeled=None,
+                training=True,
+                val_ratio=val_r,
+                seed=seed,
+                num_workers=num_workers,
+            )
+            self.train_loader = self._train_loader_labeled
+        else:
+            train_labeled = True if semi_mode == "supervised" else None
+            if train_dataset is None:
+                train_dataset = CARE2026_CT_Dataset(
+                    db_dir=db_dir,
+                    config=self.train_config,
+                    training=True,
+                    labeled=train_labeled,
+                    val_ratio=val_r,
+                    random_seed=seed,
+                )
+            self.train_loader = DataLoader(
+                dataset=train_dataset,
+                batch_size=self.batch_size,
+                shuffle=True,
+                num_workers=num_workers,
+                pin_memory=False,
+                drop_last=False,
+                collate_fn=collate_fn_ct,
+            )
+
         if val_dataset is None:
             val_dataset = CARE2026_CT_Dataset(
                 db_dir=db_dir,
                 config=self.train_config,
                 training=False,
                 labeled=True,
-                val_ratio=float(self.train_config.get("val_ratio", 0.1)),
-                random_seed=int(self.train_config.get("random_seed", 42)),
+                val_ratio=val_r,
+                random_seed=seed,
             )
-
-        self.train_loader = DataLoader(
-            dataset=train_dataset,
-            batch_size=self.batch_size,
-            shuffle=True,
-            num_workers=num_workers,
-            pin_memory=False,  # PyTorch ≥2.9 deprecated Tensor.pin_memory(device); negligible benefit for large 3-D volumes
-            drop_last=False,
-            collate_fn=collate_fn_ct,
-        )
         self.val_loader = DataLoader(
             dataset=val_dataset,
             batch_size=self.batch_size,
@@ -444,6 +468,34 @@ class CARE2026_CT_Trainer(_BaseCARE2026Trainer):
             collate_fn=collate_fn_ct,
         )
         self.val_train_loader = self.train_loader if bool(self.train_config.get("debug", True)) else None
+
+    def _make_ct_loader(self, db_dir, labeled, training, val_ratio, seed, num_workers):
+        ds = CARE2026_CT_Dataset(
+            db_dir=db_dir,
+            config=self.train_config,
+            training=training,
+            labeled=labeled,
+            val_ratio=val_ratio,
+            random_seed=seed,
+        )
+        return DataLoader(
+            ds,
+            batch_size=self.batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            pin_memory=False,
+            drop_last=False,
+            collate_fn=collate_fn_ct,
+        )
+
+    def train_one_epoch(self, pbar) -> None:
+        # Swap to all-data loader when warmup ends
+        warmup = int(self.train_config.get("mt_warmup_epochs", 0))
+        if warmup > 0 and self.epoch == warmup and hasattr(self, "_train_loader_all"):
+            print(f"Warmup finished (epoch {self.epoch}). Switching to all-data loader.")
+            self.train_loader = self._train_loader_all
+            self.val_train_loader = self.train_loader if bool(self.train_config.get("debug", True)) else None
+        super().train_one_epoch(pbar)
 
     def _get_cps_weight(self) -> float:
         """Consistency weight with optional warm-up.
@@ -498,8 +550,11 @@ class CARE2026_CT_Trainer(_BaseCARE2026Trainer):
                 out = self.model(img=input_tensors["image"])
                 pred = out["seg_mask"].detach().cpu().numpy()
                 target = input_tensors["mask"].numpy()
+                is_labeled = input_tensors["is_labeled"].numpy()
 
                 for batch_idx in range(pred.shape[0]):
+                    if not is_labeled[batch_idx]:
+                        continue  # skip unlabelled samples (zero masks)
                     for class_idx in [1, 2, 3]:
                         per_class_dice[class_idx].append(
                             _binary_dice(pred[batch_idx] == class_idx, target[batch_idx] == class_idx)
@@ -667,6 +722,7 @@ def get_args(**kwargs: Any) -> CFG:
     parser.add_argument("--lr", type=float, default=None, dest="lr")
     parser.add_argument("--lr-scheduler", type=str, default=None, choices=["cosine", "poly", "none"])
     parser.add_argument("--val-ratio", type=float, default=None, dest="val_ratio")
+    parser.add_argument("--random-seed", type=int, default=None, dest="random_seed", help="Random seed for reproducibility")
     parser.add_argument(
         "--ct-model",
         type=str,
@@ -733,6 +789,19 @@ if __name__ == "__main__":
     try:
         trainer.train()
     except KeyboardInterrupt:
+        # Save best model, matching normal completion behaviour
+        if trainer.best_metric > -np.inf:
+            from torch_ecg.utils.misc import get_date_str
+
+            save_suffix = f"metric_{trainer.best_eval_res[trainer.train_config.monitor]:.2f}"
+            save_folder = f"BestModel_{trainer.save_prefix}{trainer.best_epoch}_{get_date_str()}_{save_suffix}"
+            save_path = Path(train_config.get("model_dir", "checkpoints")) / save_folder
+            # Restore best weights and save
+            trainer._model.load_state_dict(trainer.best_state_dict)
+            trainer._model.save(path=str(save_path), train_config=train_config)
+            print(
+                f"\nSaved best model (epoch {trainer.best_epoch}, {trainer.train_config.monitor}={trainer.best_metric:.4f}): {save_path}"
+            )
         try:
             sys.exit(0)
         except SystemExit:
