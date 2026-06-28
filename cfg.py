@@ -196,11 +196,13 @@ CT_TrainCfg.fg_bias = 0.85  # 0.5  # foreground-biased patch sampling (try 0.85 
 # Class-aware patch sampling: per-class probabilities for patch centre.
 # None → use fg_bias + random sampling.  List of 4 floats [random, LA, PV, LAA]
 # summing to 1.0 enables explicit per-class sampling, guaranteeing PV/LAA exposure.
-CT_TrainCfg.class_sampling_probs = None  # e.g. [0.15, 0.30, 0.35, 0.20]
-CT_TrainCfg.pretrained_encoder = "checkpoints/vnet_ct_nnunet_enc.safetensors"  # path to .safetensors with VNet encoder weights
+CT_TrainCfg.class_sampling_probs = [0.15, 0.30, 0.35, 0.20]  # [random, LA, PV, LAA]
+# CT_TrainCfg.pretrained_encoder = "checkpoints/vnet_ct_nnunet_enc.safetensors"
+CT_TrainCfg.pretrained_encoder = "checkpoints/ct_model.safetensors"  # best supervised ckpt
 
 # Training duration and batch
-CT_TrainCfg.n_epochs = 200
+# CT_TrainCfg.n_epochs = 200
+CT_TrainCfg.n_epochs = 1000
 CT_TrainCfg.batch_size = 2
 CT_TrainCfg.use_amp = True
 CT_TrainCfg.accumulate_grad_batches = 1
@@ -245,11 +247,11 @@ CT_TrainCfg.augmentation = CFG(
 )
 
 # Semi-supervised mode: "cps" or "mean_teacher"
-CT_TrainCfg.semi_supervised_mode = "supervised"  # "mean_teacher"
-# MT warm-up: pure supervised training for the first N epochs before
-# consistency loss kicks in.  Prevents early-stage noise from teacher.
-CT_TrainCfg.mt_warmup_epochs = 0  # 0 = no warmup; try 40 for stable start
-CT_TrainCfg.mt_rampup_epochs = 30  # ramp-up duration *after* warmup
+# CT_TrainCfg.semi_supervised_mode = "supervised"
+CT_TrainCfg.semi_supervised_mode = "mean_teacher"
+# Warm-up: run pure supervised first, then ramp up MT consistency
+CT_TrainCfg.mt_warmup_epochs = 300  # 0 = no warmup
+CT_TrainCfg.mt_rampup_epochs = 100  # ramp-up duration *after* warmup
 # Legacy key (used by trainer._get_cps_weight):
 CT_TrainCfg.consistency_rampup_epochs = CT_TrainCfg.mt_rampup_epochs
 # CPS
