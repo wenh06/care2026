@@ -274,6 +274,9 @@ class CARE2026_CT_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
             from safetensors.torch import load_file as _load_sft
 
             pretrained_sd = _load_sft(pretrained, device="cpu")
+            # Strip "model1." prefix when loading a full model checkpoint
+            if any(k.startswith("model1.") for k in pretrained_sd):
+                pretrained_sd = {k[len("model1.") :]: v for k, v in pretrained_sd.items() if k.startswith("model1.")}
             self.model1.load_state_dict(pretrained_sd, strict=False)
         if self.mode == "cps":
             self.model2 = self._make_model()
@@ -491,6 +494,8 @@ class CARE2026_CT_ModelV2(nn.Module, SizeMixin, CkptMixin, CitationMixin):
             from safetensors.torch import load_file as _load_sft
 
             pretrained_sd = _load_sft(pretrained, device="cpu")
+            if any(k.startswith("model1.") for k in pretrained_sd):
+                pretrained_sd = {k[len("model1.") :]: v for k, v in pretrained_sd.items() if k.startswith("model1.")}
             self.model1.load_state_dict(pretrained_sd, strict=False)
         if self.mode == "cps":
             self.model2 = self._make_model()
