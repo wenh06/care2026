@@ -462,17 +462,11 @@ PV coverage; switch to percentile normalisation (nnUNet-style).
 | # | Change | Config key | Default | Status |
 |---|--------|-----------|---------|--------|
 | 1 | FocalTverskyLoss | `tversky_alpha/beta/gamma` | 0.7/0.3/0.75 | ✅ |
-| 2 | Boundary loss | `sup_boundary` | 0.1 | ✅ |
-| 3 | clCE loss (delayed, PV-only) | `sup_clce`, `clce_start_epoch`, `clce_classes` | 0.0 / 0 / None | ✅ |
-| 4 | Percentile norm | `normalization.mode` | `"percentile"` | ✅ |
-| 5 | MT warm-up | `mt_warmup_epochs`, `mt_rampup_epochs` | 0 / 30 | ✅ |
-| 6 | Class-aware patch sampling | `class_sampling_probs` | None | ✅ |
-| 7 | NestedVNet backbone | `--backbone nested_vnet` | — | 🔄 training |
-| 8 | `--ct-model` default v1 (was v2) | — | v1 | ✅ V2 confirmed worse |
-| 9 | Backbone name normalisation (vnet→vnet_ct) | — | — | ✅ fix checkpoint loading |
-| 4 | Percentile norm | `normalization.mode` | `"percentile"` | ✅ |
-| 5 | Larger patch + fg_bias | `patch_size` / `fg_bias` | 160 / 0.85 | ✅ |
-| 6 | NestedVNet backbone | `--backbone nested_vnet` | — | 🔄 training |
+| 2 | Boundary loss + clCE | `sup_boundary` / `sup_clce` | 0.1 / 0.0 | ✅ |
+| 3 | Percentile norm + class sampling + warm-up | — | — | ✅ |
+| 4 | Pretrained encoder (nnUNet weight transfer) | `pretrained_encoder` | `ct_basemodel.safetensors` | ✅ |
+| 5 | Full-volume CT val eval + val_ratio=0 | — | — | ✅ |
+| 6 | Backbone stored in model_config | — | — | ✅ checkpoint migration done |
 
 **MT extended (300 epochs, 2026-06-09):**
 
@@ -550,7 +544,7 @@ Local metrics to track:
 | **Connected-component post-processing** — keep largest component per class | Eliminate segmentation leakage | 🔴 High | ✅ Done (`keep_largest_component`, `postprocess_mri_masks`, `postprocess_ct_mask` in `predict.py`) |
 | **Test-time augmentation (TTA)** — flip + 90° rotations, average logits | Low-cost accuracy boost; especially useful for Task 2 domain generalisation | 🔴 High | ✅ Done (8-fold flip TTA in `predict.py`; toggle via `--tta` flag) |
 | **5-fold CV + ensemble** — train 5 folds, ensemble predictions | Expected +1–2 pp DSC; mandatory for final submission | 🟡 Medium (Phase 8) | ⏳ |
-| **SGD + polynomial LR for MRI** (vs. AdamW) | Winning teams used SGD lr=0.01; compare convergence | 🟡 Medium | ⏳ (CT uses SGD+poly; MRI still AdamW+cosine) |
+| **SGD + polynomial LR for MRI** (vs. AdamW) | Winning teams used SGD lr=0.01; compare convergence | 🟡 Medium | ✅ Done — S1 0.88→0.93, S2 0.44→0.48 |
 | **Slice-position encoding** — append z-coordinate channel to input | Help model handle hard superior/inferior slices | 🟡 Medium | ⏳ |
 | **Histogram matching / intensity standardisation** | Domain-shift mitigation for Task 2 unseen centers without changing the model | 🟡 Medium | ⏳ |
 | **UMamba backbone** — replace VNet encoder with Mamba SSM | Near-ResUNet accuracy, more efficient; possible scar segmentation alternative | 🟢 Low | ⏳ |
@@ -587,8 +581,9 @@ Local metrics to track:
    - Next experiment: enable warm-up=40 + class_sampling=[.15,.30,.35,.20] + clCE after epoch 100.
 9. **Run MRI validation inference** (Tasks 1 & 2).
 10. **5-fold CV + ensemble** (Phase 8).
-11. **Extend MRI training epochs** (400+).
-12. **SGD + poly LR for MRI**.
+11. **Extend MRI training epochs** (400+) — S1 300ep, S2 600ep done.  S2 NestedVNet 600ep retraining.
+12. ~~**SGD + poly LR for MRI**~~ ✅ S1 0.93, S2 0.48.
+13. **CT**: pretrained encoder → 0.81 val (e800).  e800_val0 (no val split) train 0.84.  PV/LAA trade-off between autodl and local runs — ensemble may help.
 
 ---
 
