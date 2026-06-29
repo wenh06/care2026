@@ -581,9 +581,8 @@ Local metrics to track:
    - Next experiment: enable warm-up=40 + class_sampling=[.15,.30,.35,.20] + clCE after epoch 100.
 9. **Run MRI validation inference** (Tasks 1 & 2).
 10. **5-fold CV + ensemble** (Phase 8).
-11. **Extend MRI training epochs** (400+) — S1 300ep, S2 600ep done.  S2 NestedVNet 600ep retraining.
-12. ~~**SGD + poly LR for MRI**~~ ✅ S1 0.93, S2 0.48.
-13. **CT**: pretrained encoder → 0.81 val (e800).  e800_val0 (no val split) train 0.84.  PV/LAA trade-off between autodl and local runs — ensemble may help.
+11. **MRI S2 backbone expansion**: added vnet_l and nested_vnet_l with blocks support.  Deep supervision identified as NestedVNet training blocker — disabled by default.
+12. **CT**: pretrained encoder + MT → 0.81 val (e800).  PV/LAA trade-off — ensemble script available.
 
 ---
 
