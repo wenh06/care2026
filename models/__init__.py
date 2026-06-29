@@ -13,6 +13,7 @@ from typing import Any, Dict, Optional, Union
 import numpy as np
 import torch
 import torch.nn as nn
+from safetensors.torch import load_file as _load_sft
 from torch_ecg.cfg import CFG
 from torch_ecg.utils.misc import CitationMixin
 from torch_ecg.utils.utils_nn import CkptMixin, SizeMixin
@@ -135,7 +136,10 @@ class CARE2026_MRI_Stage2_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
             if key in self.__train_config and key not in self.__config:
                 self.__config[key] = self.__train_config[key]
         # Single-head VNet or NestedVNet, scar only (2 classes: bg + scar)
-        backbone = str(self.__config.get("backbone", self.__train_config.get("backbone", "vnet_stage2")))
+        backbone = str(self.__config.get("backbone") or self.__train_config.get("backbone", "vnet_stage2"))
+        _mri_backbone_map = {"vnet": "vnet_stage2", "nested_vnet": "nested_vnet_stage2"}
+        backbone = _mri_backbone_map.get(backbone, backbone)
+        self.__config["backbone"] = backbone  # persist in model_config
         if backbone == "nested_vnet_stage2":
             from .nested_vnet import NestedVNet
 
@@ -249,13 +253,10 @@ class CARE2026_CT_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
         if self.mode not in ("cps", "mean_teacher", "supervised"):
             raise ValueError(f"Unknown semi_supervised_mode: {self.mode}")
 
-        backbone = str(self.__config.get("backbone", self.__train_config.get("backbone", "vnet_ct")))
-        # Normalise generic names to CT-specific config keys so that old
-        # checkpoints carrying "vnet"/"nested_vnet" (MRI dual-head configs)
-        # don't shadow the correct CT configs.
+        backbone = str(self.__config.get("backbone") or self.__train_config.get("backbone", "vnet_ct"))
         _ct_backbone_map = {"vnet": "vnet_ct", "nested_vnet": "nested_vnet_ct"}
         backbone = _ct_backbone_map.get(backbone, backbone)
-        self.__config["backbone"] = backbone
+        self.__config["backbone"] = backbone  # persist in model_config
         if backbone.startswith("nested"):
             from .nested_vnet import NestedVNet
 
@@ -271,22 +272,17 @@ class CARE2026_CT_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
         # Load pretrained encoder weights (shape-matched; strict=False)
         pretrained = self.__train_config.get("pretrained_encoder", None)
         if pretrained:
-            from safetensors.torch import load_file as _load_sft
-
             pretrained_sd = _load_sft(pretrained, device="cpu")
-            # Strip "model1." prefix when loading a full model checkpoint
             if any(k.startswith("model1.") for k in pretrained_sd):
                 pretrained_sd = {k[len("model1.") :]: v for k, v in pretrained_sd.items() if k.startswith("model1.")}
             self.model1.load_state_dict(pretrained_sd, strict=False)
         if self.mode == "cps":
             self.model2 = self._make_model()
         elif self.mode == "mean_teacher":
-            # EMA teacher model (no grad)
             self.teacher = self._make_model()
             self.teacher.load_state_dict(self.model1.state_dict())
             for p in self.teacher.parameters():
                 p.requires_grad = False
-        # "supervised": single model, nothing else needed
         self.criterion = CTLoss(self.train_config)
         self._mt_decay = float(self.__train_config.get("mt_ema_decay", 0.99))
 
@@ -298,12 +294,6 @@ class CARE2026_CT_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
         with torch.no_grad():
             for tp, sp in zip(self.teacher.parameters(), self.model1.parameters()):
                 tp.data.mul_(alpha).add_(sp.data, alpha=1.0 - alpha)
-
-    def _ds_loss(self, loss_fn, logits_list, target, **kw):
-        """Average loss across deep-supervision levels (no-op for single-output models)."""
-        if isinstance(logits_list, (list, tuple)):
-            return sum(loss_fn(lo, target, **kw) for lo in logits_list) / len(logits_list)
-        return loss_fn(logits_list, target, **kw)
 
     def _ds_last(self, logits):
         """Return the last (full-resolution) output from a NestedVNet list."""
@@ -423,7 +413,23 @@ class CARE2026_CT_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
         p = Path(str(path))
         name = re.sub(r"(?<=\d)\.(?=\d)", "_", p.name)
         path = str(p.parent / name)
-        return super().save(path=path, **kwargs)
+        # Strip teacher/model2 to halve checkpoint size, and mark config
+        # as supervised so from_checkpoint(strict=True) doesn't expect them.
+        saved_mode = self.__config.get("semi_supervised_mode")
+        restored = {}
+        for attr in ("teacher", "model2"):
+            if hasattr(self, attr):
+                restored[attr] = getattr(self, attr)
+                delattr(self, attr)
+        if restored:
+            self.__config["semi_supervised_mode"] = "supervised"
+        try:
+            return super().save(path=path, **kwargs)
+        finally:
+            for attr, m in restored.items():
+                setattr(self, attr, m)
+            if saved_mode is not None:
+                self.__config["semi_supervised_mode"] = saved_mode
 
 
 class CARE2026_CT_ModelV2(nn.Module, SizeMixin, CkptMixin, CitationMixin):
@@ -491,8 +497,6 @@ class CARE2026_CT_ModelV2(nn.Module, SizeMixin, CkptMixin, CitationMixin):
         self.model1 = self._make_model()
         pretrained = self.__train_config.get("pretrained_encoder", None)
         if pretrained:
-            from safetensors.torch import load_file as _load_sft
-
             pretrained_sd = _load_sft(pretrained, device="cpu")
             if any(k.startswith("model1.") for k in pretrained_sd):
                 pretrained_sd = {k[len("model1.") :]: v for k, v in pretrained_sd.items() if k.startswith("model1.")}
@@ -607,21 +611,18 @@ class CARE2026_CT_ModelV2(nn.Module, SizeMixin, CkptMixin, CitationMixin):
                     target=target,
                     labeled_mask=labeled_mask,
                     cps_weight=cps_weight,
+                    clce_weight=clce_weight,
                 )
             output.update(loss_dict)
         return output
 
-    # ------------------------------------------------------------------
-    # Inference
-    # ------------------------------------------------------------------
-
     @torch.no_grad()
     def inference(self, img: Union[np.ndarray, torch.Tensor]) -> CARE2026Outputs:
-        original_mode = self.training
+        original_state = self.training
         self.eval()
         input_t = self._prepare_input(img)
         output = self.forward(input_t)
-        self.train(original_mode)
+        self.train(original_state)
         return CARE2026Outputs(task="ct", ct_mask=output["seg_mask"].cpu().numpy().astype(np.uint8))
 
     def _prepare_input(self, img: Union[np.ndarray, torch.Tensor, list]) -> torch.Tensor:
