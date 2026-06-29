@@ -137,16 +137,21 @@ class CARE2026_MRI_Stage2_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
                 self.__config[key] = self.__train_config[key]
         # Single-head VNet or NestedVNet, scar only (2 classes: bg + scar)
         backbone = str(self.__config.get("backbone") or self.__train_config.get("backbone", "vnet_stage2"))
-        _mri_backbone_map = {"vnet": "vnet_stage2", "nested_vnet": "nested_vnet_stage2"}
+        _mri_backbone_map = {
+            "vnet": "vnet_stage2",
+            "nested_vnet": "nested_vnet_stage2",
+            "vnet_l": "vnet_stage2_l",
+            "nested_vnet_l": "nested_vnet_stage2_l",
+        }
         backbone = _mri_backbone_map.get(backbone, backbone)
-        self.__config["backbone"] = backbone  # persist in model_config
-        if backbone == "nested_vnet_stage2":
+        self.__config["backbone"] = backbone
+        if backbone.startswith("nested"):
             from .nested_vnet import NestedVNet
 
-            self.backbone = NestedVNet(self.config.nested_vnet_stage2)
+            self.backbone = NestedVNet(self.config.get(backbone, self.config.nested_vnet_stage2))
             self._is_nested = True
         else:
-            self.backbone = VNet(self.config.vnet_stage2)
+            self.backbone = VNet(self.config.get(backbone, self.config.vnet_stage2))
             self._is_nested = False
         self.criterion = ScarLoss(self.train_config)
 

@@ -17,7 +17,7 @@ import torch.nn as nn
 from torch_ecg.cfg import CFG
 from torch_ecg.utils import SizeMixin
 
-from .layers import BottleneckTransformer3D, ConvNormAct, DownBlock3D, UpBlock3D
+from .layers import BottleneckTransformer3D, ConvNormAct, DownBlock3D, ResBlock3D, UpBlock3D
 
 __all__ = ["VNet", "_SegEncoder3D", "_upsample_to"]
 
@@ -42,19 +42,29 @@ class _SegEncoder3D(nn.Module):
         ic, dc = input_conv, down_conv
         self.stem = ConvNormAct(in_channels, ic.channels, kernel_size=ic.kernel_size, norm=norm, activation=activation)
         enc_in = [ic.channels] + list(dc.channels[:-1])
-        self.down_blocks = nn.ModuleList(
-            [
-                DownBlock3D(
-                    in_channels=enc_in[i],
-                    out_channels=dc.channels[i],
+        n_blocks = dc.get("blocks", [1] * len(dc.channels))
+        self.down_blocks = nn.ModuleList()
+        for i in range(len(dc.channels)):
+            db = DownBlock3D(
+                in_channels=enc_in[i],
+                out_channels=dc.channels[i],
+                kernel_size=dc.kernel_size[i],
+                norm=norm,
+                activation=activation,
+                dropout=dc.dropout[i],
+            )
+            extras = [
+                ResBlock3D(
+                    dc.channels[i],
+                    dc.channels[i],
                     kernel_size=dc.kernel_size[i],
                     norm=norm,
                     activation=activation,
                     dropout=dc.dropout[i],
                 )
-                for i in range(len(dc.channels))
+                for _ in range(1, int(n_blocks[i]))
             ]
-        )
+            self.down_blocks.append(nn.Sequential(db, *extras) if extras else db)
         self._enc_channels: List[int] = [ic.channels] + list(dc.channels)
         self.bottleneck_transformer: nn.Module = bottleneck_transformer or nn.Identity()
 
@@ -68,6 +78,19 @@ class _SegEncoder3D(nn.Module):
         return skips
 
 
+class _DecoderBlock(nn.Module):
+    """UpBlock3D + optional extra ResBlocks, packed as a single module."""
+
+    def __init__(self, up_block, extra_blocks):
+        super().__init__()
+        self.up_block = up_block
+        self.extra = extra_blocks
+
+    def forward(self, x, skip):
+        out = self.up_block(x, skip)
+        return self.extra(out)
+
+
 def _make_decoder(
     enc_channels: List[int],
     up_conv: CFG,
@@ -75,24 +98,38 @@ def _make_decoder(
     activation: str,
     use_eca: bool = False,
 ) -> nn.ModuleList:
-    """Build a ModuleList of UpBlock3D for one decoder."""
-    blocks = []
+    """Build a ModuleList of _DecoderBlock (UpBlock3D + optional ResBlock3D)."""
+    n_blocks = up_conv.get("blocks", [1] * len(up_conv.channels))
+    layers = nn.ModuleList()
     for i in range(len(up_conv.channels)):
         in_ch = enc_channels[-1] if i == 0 else up_conv.channels[i - 1]
         skip_ch = enc_channels[-(i + 2)]
-        blocks.append(
-            UpBlock3D(
-                in_channels=in_ch,
-                skip_channels=skip_ch,
-                out_channels=up_conv.channels[i],
+        ub = UpBlock3D(
+            in_channels=in_ch,
+            skip_channels=skip_ch,
+            out_channels=up_conv.channels[i],
+            kernel_size=up_conv.kernel_size[i],
+            norm=norm,
+            activation=activation,
+            dropout=up_conv.dropout[i],
+            use_eca=use_eca,
+        )
+        extras = [
+            ResBlock3D(
+                up_conv.channels[i],
+                up_conv.channels[i],
                 kernel_size=up_conv.kernel_size[i],
                 norm=norm,
                 activation=activation,
                 dropout=up_conv.dropout[i],
-                use_eca=use_eca,
             )
-        )
-    return nn.ModuleList(blocks)
+            for _ in range(1, int(n_blocks[i]))
+        ]
+        if extras:
+            layers.append(_DecoderBlock(ub, nn.Sequential(*extras)))
+        else:
+            layers.append(ub)
+    return layers
 
 
 class VNet(nn.Module, SizeMixin):

@@ -396,12 +396,10 @@ ModelCfg.vnet_stage1 = CFG(
 )
 
 # -- Single-head V-Net for MRI Stage 2 (scar-only, cropped region) ------------
-# Stage 1 provides the LA cavity mask and centroid; Stage 2 is a single-head
-# VNet trained on the centroid-cropped region (128×128×44) to segment scar only.
 
 ModelCfg.vnet_stage2 = CFG(
     in_channels=1,
-    num_classes=2,  # binary: background + scar
+    num_classes=2,
     norm="instance",
     activation="mish",
     use_eca_skip=False,
@@ -420,11 +418,36 @@ ModelCfg.vnet_stage2 = CFG(
     bottleneck_transformer=None,
 )
 
+# -- Large V-Net for MRI Stage 2 (wider + deeper) -------------------------------
+
+ModelCfg.vnet_stage2_l = CFG(
+    in_channels=1,
+    num_classes=2,
+    norm="instance",
+    activation="mish",
+    use_eca_skip=False,
+    input_conv=CFG(channels=16, kernel_size=5),
+    down_conv=CFG(
+        channels=[32, 64, 128, 256],
+        kernel_size=[3, 3, 3, 3],
+        blocks=[1, 2, 2, 2],
+        dropout=[0.0, 0.0, 0.3, 0.3],
+    ),
+    up_conv=CFG(
+        channels=[256, 128, 64, 32],
+        kernel_size=[3, 3, 3, 3],
+        blocks=[2, 2, 1, 1],
+        dropout=[0.0, 0.0, 0.0, 0.0],
+    ),
+    output_conv=CFG(kernel_size=1),
+    bottleneck_transformer=None,
+)
+
 # -- Nested V-Net (UNet++) for MRI Stage 2 (deep supervision variant) ---------
 
 ModelCfg.nested_vnet_stage2 = CFG(
     in_channels=1,
-    num_classes=2,  # binary: background + scar
+    num_classes=2,
     norm="instance",
     activation="mish",
     use_eca_skip=False,
@@ -440,7 +463,33 @@ ModelCfg.nested_vnet_stage2 = CFG(
         dropout=[0.0, 0.0, 0.0, 0.0],
     ),
     output_conv=CFG(kernel_size=1),
-    deep_supervision=True,
+    deep_supervision=False,
+    bottleneck_transformer=None,
+)
+
+# -- Large Nested V-Net (UNet++) for MRI Stage 2 (wider + deeper) --------------
+
+ModelCfg.nested_vnet_stage2_l = CFG(
+    in_channels=1,
+    num_classes=2,
+    norm="instance",
+    activation="mish",
+    use_eca_skip=False,
+    input_conv=CFG(channels=16, kernel_size=5),
+    down_conv=CFG(
+        channels=[32, 64, 128, 256],
+        kernel_size=[3, 3, 3, 3],
+        blocks=[1, 2, 2, 2],
+        dropout=[0.0, 0.0, 0.3, 0.3],
+    ),
+    up_conv=CFG(
+        channels=[256, 128, 64, 32],
+        kernel_size=[3, 3, 3, 3],
+        blocks=[2, 2, 1, 1],
+        dropout=[0.3, 0.3, 0.0, 0.0],
+    ),
+    output_conv=CFG(kernel_size=1),
+    deep_supervision=False,
     bottleneck_transformer=None,
 )
 
@@ -456,11 +505,13 @@ ModelCfg.vnet_ct = CFG(
     down_conv=CFG(
         channels=[32, 64, 128, 256],
         kernel_size=[3, 3, 3, 3],
+        blocks=[1, 2, 2, 2],
         dropout=[0.0, 0.0, 0.0, 0.2],
     ),
     up_conv=CFG(
-        channels=[128, 64, 32, 16],
+        channels=[256, 128, 64, 32],
         kernel_size=[3, 3, 3, 3],
+        blocks=[2, 2, 1, 1],
         dropout=[0.0, 0.0, 0.0, 0.0],
     ),
     output_conv=CFG(kernel_size=1),
@@ -479,15 +530,17 @@ ModelCfg.nested_vnet_ct = CFG(
     down_conv=CFG(
         channels=[32, 64, 128, 256],
         kernel_size=[3, 3, 3, 3],
+        blocks=[1, 2, 2, 2],
         dropout=[0.0, 0.0, 0.0, 0.2],
     ),
     up_conv=CFG(
-        channels=[128, 64, 32, 16],
+        channels=[256, 128, 64, 32],
         kernel_size=[3, 3, 3, 3],
+        blocks=[2, 2, 1, 1],
         dropout=[0.0, 0.0, 0.0, 0.0],
     ),
     output_conv=CFG(kernel_size=1),
-    deep_supervision=True,
+    deep_supervision=False,
     bottleneck_transformer=None,
 )
 

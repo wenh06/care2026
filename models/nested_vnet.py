@@ -17,7 +17,7 @@ import torch.nn as nn
 from torch_ecg.cfg import CFG
 from torch_ecg.utils import SizeMixin
 
-from .layers import BottleneckTransformer3D, NestedUpBlock3D
+from .layers import BottleneckTransformer3D, NestedUpBlock3D, ResBlock3D
 from .vnet import _SegEncoder3D, _upsample_to
 
 __all__ = ["NestedVNet"]
@@ -101,27 +101,29 @@ class NestedVNet(nn.Module, SizeMixin):
         out_chan = list(up_cfg.channels[::-1])  # e.g. [16, 32, 64, 128]
 
         # ---- UNet++ decoder nodes -----------------------------------------------
-        # x_blocks[i] stores nn.ModuleList for row i (i from shallow to deep).
-        # Only rows 0..(num_levels-1) have decoder nodes (bottleneck row has none).
+        n_blocks = up_cfg.get("blocks", [1] * num_levels)
         self.decoder_blocks = nn.ModuleList()
         for i in range(num_levels):
             row = nn.ModuleList()
             for j in range(1, num_levels - i + 1):
-                # in_channels: from node (i+1, j-1)
                 in_ch = enc_ch[i + 1] if j == 1 else out_chan[i + 1]
-                # skip channels: enc[i] + (j-1) * out_chan[i]
                 total_skip = enc_ch[i] + (j - 1) * out_chan[i]
-                block = NestedUpBlock3D(
+                ks = int(up_cfg.kernel_size[num_levels - 1 - i])
+                do = float(up_cfg.dropout[num_levels - 1 - i])
+                nub = NestedUpBlock3D(
                     in_channels=in_ch,
                     total_skip_channels=total_skip,
                     out_channels=out_chan[i],
-                    kernel_size=int(up_cfg.kernel_size[num_levels - 1 - i]),
+                    kernel_size=ks,
                     norm=norm,
                     activation=act,
-                    dropout=float(up_cfg.dropout[num_levels - 1 - i]),
+                    dropout=do,
                     use_eca=use_eca,
                 )
-                row.append(block)
+                blocks = [nub]
+                for _ in range(1, int(n_blocks[num_levels - 1 - i])):
+                    blocks.append(ResBlock3D(out_chan[i], out_chan[i], kernel_size=ks, norm=norm, activation=act, dropout=do))
+                row.append(nn.Sequential(*blocks) if len(blocks) > 1 else nub)
             self.decoder_blocks.append(row)
 
         # ---- deep supervision heads ---------------------------------------------
@@ -151,7 +153,15 @@ class NestedVNet(nn.Module, SizeMixin):
             for i in range(num_levels - j + 1):  # rows that have this column
                 up = _upsample_to(x_blocks[i + 1][j - 1], x_blocks[i][0])
                 skips = [x_blocks[i][k] for k in range(j)]  # columns 0..j-1
-                x_blocks[i][j] = self.decoder_blocks[i][j - 1](up, skips)
+                cell = self.decoder_blocks[i][j - 1]
+                if isinstance(cell, nn.Sequential):
+                    # First sub-block is NestedUpBlock3D (takes up + skips);
+                    # subsequent are ResBlock3D (single tensor).
+                    x_blocks[i][j] = cell[0](up, skips)
+                    for sub in cell[1:]:
+                        x_blocks[i][j] = sub(x_blocks[i][j])
+                else:
+                    x_blocks[i][j] = cell(up, skips)
 
         # Deep supervision: rightmost node of each decoder row
         # Order: coarsest → finest (consistent with nnUNet convention)

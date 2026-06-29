@@ -777,7 +777,7 @@ def get_args(**kwargs: Any) -> CFG:
         help="MRI pipeline stage: 1 = coarse LA localisation, 2 = fine segmentation (default).",
     )
     parser.add_argument("--db-dir", dest="db_dir", required=True)
-    parser.add_argument("--backbone", default=None, choices=["vnet", "nested_vnet"])
+    parser.add_argument("--backbone", default=None, choices=["vnet", "nested_vnet", "vnet_l", "nested_vnet_l"])
     parser.add_argument("-b", "--batch-size", type=int, default=None, dest="batch_size")
     parser.add_argument("--accum-steps", type=int, default=None, dest="accumulate_grad_batches")
     parser.add_argument("--use-amp", type=str2bool, default=None, dest="use_amp")
