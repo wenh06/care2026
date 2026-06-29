@@ -293,35 +293,42 @@ class CARE2026_MRI_Stage1_Trainer(_BaseCARE2026Trainer):
     ) -> None:
         num_workers = 1 if self.device == torch.device("cpu") else 4
         db_dir = self.train_config.db_dir
+        val_r = float(self.train_config.get("val_ratio", 0.1))
+        seed = int(self.train_config.get("random_seed", 42))
+        if val_r <= 0:
+            self.train_config.monitor = None
         if train_dataset is None:
             train_dataset = CARE2026_MRI_Stage1_Dataset(
                 db_dir=db_dir,
                 config=self.train_config,
                 training=True,
-                val_ratio=float(self.train_config.get("val_ratio", 0.1)),
-                random_seed=int(self.train_config.get("random_seed", 42)),
+                val_ratio=val_r,
+                random_seed=seed,
             )
-        if val_dataset is None:
-            val_dataset = CARE2026_MRI_Stage1_Dataset(
-                db_dir=db_dir,
-                config=self.train_config,
-                training=False,
-                val_ratio=float(self.train_config.get("val_ratio", 0.1)),
-                random_seed=int(self.train_config.get("random_seed", 42)),
+        if val_r <= 0:
+            self.val_loader = None
+        else:
+            if val_dataset is None:
+                val_dataset = CARE2026_MRI_Stage1_Dataset(
+                    db_dir=db_dir,
+                    config=self.train_config,
+                    training=False,
+                    val_ratio=val_r,
+                    random_seed=seed,
+                )
+            self.val_loader = DataLoader(
+                dataset=val_dataset,
+                batch_size=self.batch_size,
+                shuffle=False,
+                num_workers=num_workers,
+                pin_memory=False,
+                drop_last=False,
+                collate_fn=collate_fn_mri_stage1,
             )
         self.train_loader = DataLoader(
             dataset=train_dataset,
             batch_size=self.batch_size,
             shuffle=True,
-            num_workers=num_workers,
-            pin_memory=False,  # PyTorch ≥2.9 deprecated Tensor.pin_memory(device); negligible benefit for large 3-D volumes
-            drop_last=False,
-            collate_fn=collate_fn_mri_stage1,
-        )
-        self.val_loader = DataLoader(
-            dataset=val_dataset,
-            batch_size=self.batch_size,
-            shuffle=False,
             num_workers=num_workers,
             pin_memory=False,
             drop_last=False,
@@ -673,36 +680,43 @@ class CARE2026_MRI_Stage2_Trainer(_BaseCARE2026Trainer):
     def _setup_dataloaders(self, train_dataset=None, val_dataset=None) -> None:
         num_workers = 1 if self.device == torch.device("cpu") else 4
         db_dir = self.train_config.db_dir
+        val_r = float(self.train_config.get("val_ratio", 0.1))
+        seed = int(self.train_config.get("random_seed", 42))
+        if val_r <= 0:
+            self.train_config.monitor = None
         if train_dataset is None:
             train_dataset = CARE2026_MRI_Stage2_Dataset(
                 db_dir=db_dir,
                 config=self.train_config,
                 training=True,
-                val_ratio=float(self.train_config.get("val_ratio", 0.1)),
-                random_seed=int(self.train_config.get("random_seed", 42)),
+                val_ratio=val_r,
+                random_seed=seed,
                 no_scar_proportion=float(self.train_config.get("no_scar_proportion", 0.3)),
             )
-        if val_dataset is None:
-            val_dataset = CARE2026_MRI_Stage2_Dataset(
-                db_dir=db_dir,
-                config=self.train_config,
-                training=False,
-                val_ratio=float(self.train_config.get("val_ratio", 0.1)),
-                random_seed=int(self.train_config.get("random_seed", 42)),
+        if val_r <= 0:
+            self.val_loader = None
+        else:
+            if val_dataset is None:
+                val_dataset = CARE2026_MRI_Stage2_Dataset(
+                    db_dir=db_dir,
+                    config=self.train_config,
+                    training=False,
+                    val_ratio=val_r,
+                    random_seed=seed,
+                )
+            self.val_loader = DataLoader(
+                val_dataset,
+                batch_size=self.batch_size,
+                shuffle=False,
+                num_workers=num_workers,
+                pin_memory=False,
+                drop_last=False,
+                collate_fn=collate_fn_mri,
             )
         self.train_loader = DataLoader(
             train_dataset,
             batch_size=self.batch_size,
             shuffle=True,
-            num_workers=num_workers,
-            pin_memory=False,
-            drop_last=False,
-            collate_fn=collate_fn_mri,
-        )
-        self.val_loader = DataLoader(
-            val_dataset,
-            batch_size=self.batch_size,
-            shuffle=False,
             num_workers=num_workers,
             pin_memory=False,
             drop_last=False,
@@ -763,7 +777,7 @@ def get_args(**kwargs: Any) -> CFG:
         help="MRI pipeline stage: 1 = coarse LA localisation, 2 = fine segmentation (default).",
     )
     parser.add_argument("--db-dir", dest="db_dir", required=True)
-    parser.add_argument("--backbone", default="vnet", choices=["vnet", "nested_vnet"])
+    parser.add_argument("--backbone", default=None, choices=["vnet", "nested_vnet"])
     parser.add_argument("-b", "--batch-size", type=int, default=None, dest="batch_size")
     parser.add_argument("--accum-steps", type=int, default=None, dest="accumulate_grad_batches")
     parser.add_argument("--use-amp", type=str2bool, default=None, dest="use_amp")
