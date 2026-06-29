@@ -123,8 +123,7 @@ MRI_Stage2_TrainCfg = deepcopy(BaseCfg)
 
 MRI_Stage2_TrainCfg.task = "mri"
 MRI_Stage2_TrainCfg.stage = 2
-# MRI_Stage2_TrainCfg.backbone = "vnet_stage2"
-MRI_Stage2_TrainCfg.backbone = "nested_vnet_stage2"
+MRI_Stage2_TrainCfg.backbone = "vnet_stage2"  # "vnet_stage2" | "nested_vnet_stage2" (use --backbone nested_vnet)
 
 # Volume shape: canonical → crop centred on LA centroid → resize to 128×128×44
 MRI_Stage2_TrainCfg.canonical_shape = MRI_CANONICAL_SHAPE
@@ -200,7 +199,7 @@ CT_TrainCfg.fg_bias = 0.85  # 0.5  # foreground-biased patch sampling (try 0.85 
 # summing to 1.0 enables explicit per-class sampling, guaranteeing PV/LAA exposure.
 CT_TrainCfg.class_sampling_probs = [0.15, 0.30, 0.35, 0.20]  # [random, LA, PV, LAA]
 # CT_TrainCfg.pretrained_encoder = "checkpoints/vnet_ct_nnunet_enc.safetensors"
-CT_TrainCfg.pretrained_encoder = "checkpoints/ct_model.safetensors"  # best supervised ckpt
+CT_TrainCfg.pretrained_encoder = "checkpoints/ct_basemodel.safetensors"  # best supervised ckpt
 
 # Training duration and batch
 # CT_TrainCfg.n_epochs = 200
