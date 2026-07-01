@@ -68,12 +68,27 @@ _TTA_FLIP_AXES: List[Tuple[int, ...]] = [
 # ---------------------------------------------------------------------------
 
 
-def _make_gaussian_weight(patch_size: int, sigma_scale: float = 0.125) -> np.ndarray:
-    """Gaussian weight map for a cubic patch of side *patch_size*."""
-    sigma = patch_size * sigma_scale
-    coords = np.arange(patch_size) - patch_size / 2.0 + 0.5
-    g1d = np.exp(-(coords**2) / (2 * sigma**2))
-    g3d = g1d[:, None, None] * g1d[None, :, None] * g1d[None, None, :]
+def _make_gaussian_weight(patch_shape: Union[int, Sequence[int]], sigma_scale: float = 0.125) -> np.ndarray:
+    """Gaussian weight map for a 3-D patch.
+
+    Parameters
+    ----------
+    patch_shape : int or tuple of 3 ints
+        Patch side length(s).  If int, a cubic patch is assumed.
+    sigma_scale : float
+        Sigma = side * sigma_scale per axis.
+    """
+    if isinstance(patch_shape, int):
+        patch_shape = (patch_shape, patch_shape, patch_shape)
+    ph, pw, pd = patch_shape
+    g3d = np.ones((ph, pw, pd), dtype=np.float32)
+    for axis, length in enumerate(patch_shape):
+        sigma = length * sigma_scale
+        coords = np.arange(length) - length / 2.0 + 0.5
+        g1d = np.exp(-(coords**2) / (2 * sigma**2))
+        shape = [1, 1, 1]
+        shape[axis] = length
+        g3d = g3d * g1d.reshape(shape)
     g3d = g3d / g3d.max()
     return g3d.astype(np.float32)
 
@@ -460,8 +475,8 @@ def predict_mri_two_stage(
 def sliding_window_inference(
     volume: np.ndarray,
     model_fn,
-    patch_size: int,
-    stride: int,
+    patch_size: Union[int, Sequence[int]],
+    stride: Union[int, Sequence[int]],
     n_classes: int,
     device: torch.device,
     use_gaussian: bool = True,
@@ -471,63 +486,60 @@ def sliding_window_inference(
     Parameters
     ----------
     volume : (H, W, D) float32 numpy array
-        Pre-processed image (already HU-clipped and normalised to [0,1]).
+        Pre-processed image.
     model_fn : callable
-        Function ``(tensor: (1,1,ps,ps,ps)) → softmax: (n_classes,ps,ps,ps)``
-        that runs the model and returns class probabilities as a numpy array.
-    patch_size : int
-        Cubic patch side length (voxels).
-    stride : int
-        Step between patch centres.
+        ``(tensor: (1,1,*patch)) → softmax: (n_classes,*patch)``
+    patch_size : int or (int, int, int)
+        Patch shape.  If int, cubic patch is assumed.
+    stride : int or (int, int, int)
+        Step between patch centres.  If int, same stride on all axes.
     n_classes : int
-        Number of output classes.
     device : torch.device
-        Inference device.
-    use_gaussian : bool, default True
-        Weight overlapping patches by a Gaussian map (smoother boundaries).
+    use_gaussian : bool
 
     Returns
     -------
     numpy.ndarray of shape (H, W, D)
         Predicted class label per voxel.
     """
+    if isinstance(patch_size, int):
+        patch_size = (patch_size, patch_size, patch_size)
+    if isinstance(stride, int):
+        stride = (stride, stride, stride)
+    ps_h, ps_w, ps_d = patch_size
+    st_h, st_w, st_d = stride
     H, W, D = volume.shape
-    ps = patch_size
 
-    # Pad volume so every dimension is a multiple of stride (or at least ≥ ps)
-    def _pad_dim(sz: int) -> int:
+    def _pad_dim(sz: int, ps: int, st: int) -> int:
         if sz < ps:
             return ps - sz
-        rem = (sz - ps) % stride
-        return (stride - rem) % stride
+        rem = (sz - ps) % st
+        return (st - rem) % st
 
-    pH, pW, pD = _pad_dim(H), _pad_dim(W), _pad_dim(D)
+    pH, pW, pD = _pad_dim(H, ps_h, st_h), _pad_dim(W, ps_w, st_w), _pad_dim(D, ps_d, st_d)
     vol_pad = np.pad(volume, ((0, pH), (0, pW), (0, pD)), mode="constant", constant_values=0.0)
     H2, W2, D2 = vol_pad.shape
 
-    weight_map = _make_gaussian_weight(ps) if use_gaussian else np.ones((ps, ps, ps), dtype=np.float32)
+    weight_map = _make_gaussian_weight(patch_size) if use_gaussian else np.ones(patch_size, dtype=np.float32)
 
     prob_acc = np.zeros((n_classes, H2, W2, D2), dtype=np.float32)
     weight_acc = np.zeros((H2, W2, D2), dtype=np.float32)
 
-    xs = list(range(0, H2 - ps + 1, stride))
-    ys = list(range(0, W2 - ps + 1, stride))
-    zs = list(range(0, D2 - ps + 1, stride))
+    xs = list(range(0, H2 - ps_h + 1, st_h))
+    ys = list(range(0, W2 - ps_w + 1, st_w))
+    zs = list(range(0, D2 - ps_d + 1, st_d))
 
     for x in xs:
         for y in ys:
             for z in zs:
-                patch = vol_pad[x : x + ps, y : y + ps, z : z + ps]
+                patch = vol_pad[x : x + ps_h, y : y + ps_w, z : z + ps_d]
                 t = torch.from_numpy(patch).unsqueeze(0).unsqueeze(0).to(device, dtype=torch.float32)
-                prob = model_fn(t)  # (n_classes, ps, ps, ps)
-                prob_acc[:, x : x + ps, y : y + ps, z : z + ps] += prob * weight_map
-                weight_acc[x : x + ps, y : y + ps, z : z + ps] += weight_map
+                prob = model_fn(t)  # (n_classes, ps_h, ps_w, ps_d)
+                prob_acc[:, x : x + ps_h, y : y + ps_w, z : z + ps_d] += prob * weight_map
+                weight_acc[x : x + ps_h, y : y + ps_w, z : z + ps_d] += weight_map
 
-    # Avoid division by zero in un-touched regions
     weight_acc = np.maximum(weight_acc, 1e-8)
     prob_acc /= weight_acc
-
-    # Trim padding back to original shape
     prob_acc = prob_acc[:, :H, :W, :D]
     return prob_acc.argmax(axis=0).astype(np.uint8)
 
@@ -539,25 +551,21 @@ def _run_ct_model(
 ) -> np.ndarray:
     """Run CT model on a single patch, return softmax probabilities.
 
-    Works for both CPS (model1+model2 average) and Mean Teacher
-    (model1 only at inference).
-
-    Parameters
-    ----------
-    patch_tensor : (1, 1, ps, ps, ps) float32 tensor
-    device : inference device
-
-    Returns
-    -------
-    numpy.ndarray of shape (n_classes, ps, ps, ps)
+    Handles both standard models (logits1=tensor) and nnUNet-style
+    models with deep supervision (logits1=list), taking the
+    full-resolution output (logits[0] for PlainConvUNet).
     """
     patch_tensor = patch_tensor.to(device, dtype=torch.float32)
     out = model.forward(patch_tensor)
     if "logits2" in out:
-        prob = torch.softmax((out["logits1"] + out["logits2"]) / 2.0, dim=1)
+        logits = (out["logits1"] + out["logits2"]) / 2.0
     else:
-        prob = torch.softmax(out["logits1"], dim=1)
-    return prob.squeeze(0).detach().cpu().numpy()  # (n_classes, ps, ps, ps)
+        logits = out["logits1"]
+    # Deep supervision: list → take full-resolution output
+    if isinstance(logits, (list, tuple)):
+        logits = logits[0]
+    prob = torch.softmax(logits, dim=1)
+    return prob.squeeze(0).detach().cpu().numpy()
 
 
 def _ct_tta_model_fn(model: torch.nn.Module, device: torch.device, use_tta: bool):
@@ -584,51 +592,46 @@ def predict_ct(
     model: torch.nn.Module,
     device: Optional[torch.device] = None,
     use_tta: bool = True,
-    patch_size: int = 128,
-    stride: Optional[int] = None,
+    patch_size: Union[int, Sequence[int]] = 128,
+    stride: Union[int, Sequence[int], None] = None,
 ) -> CARE2026Outputs:
-    """Sliding-window CT inference with resampling to/from 0.5 mm isotropic space.
+    """Sliding-window CT inference.
 
-    Steps:
-
-    1. Load CT and record the original shape and affine.
-    2. HU clip to ``[CT_HU_MIN, CT_HU_MAX]`` and normalise to ``[0, 1]``.
-    3. Resample to 0.5 mm isotropic (matching training preprocessing).
-    4. Sliding-window inference (optional TTA).
-    5. Resample the predicted label map back to the original shape.
-    6. Return a :class:`CARE2026Outputs` with the original affine attached.
-
-    Parameters
-    ----------
-    img_path : path-like
-        Path to the CT NIfTI file.
-    model : CARE2026_CT_Model
-        Trained CPS model (must already be in eval mode on the correct device).
-    device : torch.device, optional
-        Inference device.  Defaults to the model's current device.
-    use_tta : bool, default True
-        Whether to apply 8-fold flip TTA per patch.
-    patch_size : int, default 128
-        Cubic patch side length (voxels in 0.5 mm isotropic space).
-    stride : int, optional
-        Sliding-window stride.  Defaults to ``patch_size // 2``.
-
-    Returns
-    -------
-    CARE2026Outputs
-        ``ct_mask`` in the **original** voxel space.  ``source_affine`` and
-        ``source_header`` are populated for NIfTI export.
+    For nnUNet models (``CARE2026_CT_nnUNet``), delegates to the built-in
+    ``nnUNetPredictor`` which handles all preprocessing, normalization,
+    sliding window, and resampling.
     """
+    # ── nnUNet path: use the built-in predictor ───────────────────────
+    if hasattr(model, "predict") and hasattr(model, "_predictor"):
+        nii = nib.load(str(img_path))
+        image_raw = nii.get_fdata().astype(np.float32)
+        zooms = tuple(nii.header.get_zooms()[:3])
+        pred = model.predict(image_raw, zooms)
+        # skip postprocess_ct_mask — nnUNet's Gaussian-weighted sliding
+        # window produces clean predictions; connected-component filtering
+        # would destroy multi-lobed structures (LAA, PV).
+        return CARE2026Outputs(
+            task="ct",
+            ct_mask=pred,
+            source_affine=nii.affine,
+            source_header=nii.header,
+        )
+
     if device is None:
         device = next(model.parameters()).device
 
     # Read inference parameters from model config (synced from train_config at init)
     mcfg = getattr(model, "config", {}) or {}
-    if patch_size is None:
-        patch_size = int(mcfg.get("patch_size", CT_PATCH_SIZE))
-    patch_size = patch_size or 128
+    # Support non-isotropic patch_shape (e.g. nnUNet [112,112,192])
+    _ps = mcfg.get("patch_shape", mcfg.get("patch_size", CT_PATCH_SIZE))
+    if isinstance(_ps, int):
+        _ps = (_ps, _ps, _ps)
+    if patch_size is None or patch_size == 128:
+        patch_size = tuple(int(p) for p in _ps)
+    if isinstance(patch_size, int):
+        patch_size = (patch_size, patch_size, patch_size)
     if stride is None:
-        stride = patch_size // 2
+        stride = tuple(max(1, p // 2) for p in patch_size)
 
     nii = nib.load(str(img_path))
     image_raw = nii.get_fdata().astype(np.float32)  # (H, W, D)
@@ -658,8 +661,9 @@ def predict_ct(
         image = np.clip(image_raw, hu_min, hu_max)
         image = (image - hu_min) / (hu_max - hu_min)
 
-    # Resample to 0.5 mm isotropic
-    target_spacing = np.array(CT_TARGET_SPACING, dtype=np.float64)
+    # Resample to target spacing (from model config or default isotropic)
+    target_spacing_cfg = mcfg.get("target_spacing", CT_TARGET_SPACING)
+    target_spacing = np.array(target_spacing_cfg, dtype=np.float64)
     iso_shape = tuple(int(np.round(orig_shape[i] * zooms[i] / target_spacing[i])) for i in range(3))
     image_iso = CARE2026_CT.resample_data(image, iso_shape)
 

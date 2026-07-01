@@ -21,7 +21,15 @@ from torch_ecg.components.trainer import BaseTrainer
 from torch_ecg.utils.misc import str2bool
 from tqdm.auto import tqdm
 
-from cfg import CT_TrainCfg, CT_TrainCfgV2, ModelCfg, MRI_Stage1_TrainCfg, MRI_Stage2_TrainCfg
+from cfg import (
+    CT_TrainCfg,
+    CT_TrainCfg_MT_nnUNet,
+    CT_TrainCfg_nnUNet,
+    CT_TrainCfgV2,
+    ModelCfg,
+    MRI_Stage1_TrainCfg,
+    MRI_Stage2_TrainCfg,
+)
 from dataset import (
     CARE2026_CT_Dataset,
     CARE2026_MRI_Stage1_Dataset,
@@ -30,7 +38,14 @@ from dataset import (
     collate_fn_mri,
     collate_fn_mri_stage1,
 )
-from models import CARE2026_CT_Model, CARE2026_CT_ModelV2, CARE2026_MRI_Stage1_Model, CARE2026_MRI_Stage2_Model
+from models import (
+    CARE2026_CT_Model,
+    CARE2026_CT_ModelV2,
+    CARE2026_CT_MT_nnUNet,
+    CARE2026_CT_nnUNet,
+    CARE2026_MRI_Stage1_Model,
+    CARE2026_MRI_Stage2_Model,
+)
 
 __all__ = [
     "CARE2026_MRI_Stage1_Trainer",
@@ -801,9 +816,9 @@ def get_args(**kwargs: Any) -> CFG:
         "--ct-model",
         type=str,
         default="v1",
-        choices=["v1", "v2"],
+        choices=["v1", "v2", "nnunet", "nnunet_mt"],
         dest="ct_model_version",
-        help="CT model version: v1 (original BN+ReLU+SGD+MT) or v2 (IN+Mish+AdamW, experimental).",
+        help="CT model version: v1, v2, nnunet, nnunet_mt (Mean Teacher + PlainConvUNet).",
     )
     args = {k: v for k, v in vars(parser.parse_args()).items() if v is not None}
     cfg.update(args)
@@ -836,7 +851,17 @@ if __name__ == "__main__":
             trainer_cls = CARE2026_MRI_Stage2_Trainer
     else:
         ct_version = args.get("ct_model_version", "v2")
-        if ct_version == "v2":
+        if ct_version == "nnunet_mt":
+            train_config = CFG(deepcopy(CT_TrainCfg_MT_nnUNet))
+            train_config.update(args)
+            model_config = deepcopy(ModelCfg)
+            model = CARE2026_CT_MT_nnUNet(config=model_config, train_config=train_config)
+        elif ct_version == "nnunet":
+            train_config = CFG(deepcopy(CT_TrainCfg_nnUNet))
+            train_config.update(args)
+            model_config = deepcopy(ModelCfg)
+            model = CARE2026_CT_nnUNet(config=model_config, train_config=train_config)
+        elif ct_version == "v2":
             train_config = CFG(deepcopy(CT_TrainCfgV2))
             train_config.update(args)
             model_config = deepcopy(ModelCfg)

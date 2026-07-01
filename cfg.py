@@ -26,6 +26,9 @@ __all__ = [
     "MRI_Stage2_TrainCfg",
     "CT_TrainCfg",
     "CT_TrainCfgV2",
+    "CT_TrainCfg_nnUNet",
+    "CT_TrainCfg_MT_nnUNet",
+    "NNUNET_CT_ARCH_CONFIG",
     "ModelCfg",
 ]
 
@@ -618,4 +621,137 @@ ModelCfg.vnet_ct_v2 = CFG(
     ),
     output_conv=CFG(kernel_size=1),
     bottleneck_transformer=None,
+)
+
+# ---------------------------------------------------------------------------
+# nnUNet CT architecture config — from nnUNetv2_plan_and_preprocess
+# Dataset500_CARE2026CT 3d_fullres.  6 encoder stages (vs. VNet's 4),
+# last stride [1,1,2] preserves XY, deep supervision always on.
+# ---------------------------------------------------------------------------
+
+NNUNET_CT_ARCH_CONFIG = dict(
+    n_stages=6,
+    features_per_stage=[32, 64, 128, 256, 320, 320],
+    kernel_sizes=[[3, 3, 3]] * 6,
+    strides=[[1, 1, 1], [2, 2, 2], [2, 2, 2], [2, 2, 2], [2, 2, 2], [1, 1, 2]],
+    n_conv_per_stage=[2, 2, 2, 2, 2, 2],
+    n_conv_per_stage_decoder=[2, 2, 2, 2, 2],
+    conv_bias=True,
+    norm_op_kwargs=dict(eps=1e-5, affine=True),
+    nonlin_kwargs=dict(inplace=True),
+)
+
+# ---------------------------------------------------------------------------
+# CT nnUNet training / inference configuration
+# ---------------------------------------------------------------------------
+# Wraps nnUNet's PlainConvUNet (ResEnc U-Net) as the backbone.
+# Designed for inference with pretrained nnUNet weights from
+# nnUNetv2_train.  Uses non-isotropic patch [112,112,192] and
+# CTNormalization (percentile clip → z-score).
+
+CT_TrainCfg_nnUNet = deepcopy(BaseCfg)
+
+CT_TrainCfg_nnUNet.task = "ct"
+CT_TrainCfg_nnUNet.backbone = "nnunet"
+
+# Non-isotropic patch matching nnUNet plan (more Z context for PV/LAA)
+CT_TrainCfg_nnUNet.patch_shape = [112, 112, 192]
+
+# Training duration and batch (matching nnUNet plan)
+CT_TrainCfg_nnUNet.n_epochs = 1000
+CT_TrainCfg_nnUNet.batch_size = 2
+CT_TrainCfg_nnUNet.use_amp = True
+CT_TrainCfg_nnUNet.accumulate_grad_batches = 1
+
+# SGD + poly LR (matching nnUNet recipe)
+CT_TrainCfg_nnUNet.optimizer = "sgd"
+CT_TrainCfg_nnUNet.momentum = 0.99
+CT_TrainCfg_nnUNet.decay = 3e-5
+CT_TrainCfg_nnUNet.learning_rate = 1e-2
+CT_TrainCfg_nnUNet.lr = CT_TrainCfg_nnUNet.learning_rate
+CT_TrainCfg_nnUNet.lr_scheduler = "poly"
+CT_TrainCfg_nnUNet.lr_poly_power = 0.9
+
+# nnUNet CTNormalization: per-volume percentile clip → global z-score
+CT_TrainCfg_nnUNet.normalization = CFG(
+    mode="nnunet",
+    p_low=0.5,
+    p_high=99.5,
+    # Global foreground stats from plan.json (fallback if per-volume fails)
+    global_clip_min=1122.0,
+    global_clip_max=2018.0,
+    global_mean=1542.61,
+    global_std=188.64,
+)
+
+# Architecture config — stored in model_config metadata so
+# from_checkpoint can reconstruct PlainConvUNet.
+CT_TrainCfg_nnUNet.arch_config = NNUNET_CT_ARCH_CONFIG
+
+# Augmentation (nnUNet-style, extensive)
+CT_TrainCfg_nnUNet.augmentation = CFG(
+    flips=CFG(prob=0.5),
+    rotation=CFG(prob=0.5),
+    gamma=CFG(prob=0.5, range=[0.7, 1.5]),
+    gaussian_noise=CFG(prob=0.5, std_range=[0.0, 0.05]),
+    brightness_contrast=CFG(prob=0.5, contrast_range=[0.85, 1.15], brightness_range=[-0.1, 0.1]),
+    gaussian_blur=CFG(prob=0.2, sigma_range=[0.5, 1.0]),
+    elastic_deformation=CFG(prob=0.2, alpha_range=[0, 200], sigma_range=[9, 13]),
+    low_resolution=CFG(prob=0.2, zoom_range=[0.5, 1.0]),
+)
+
+# Loss — Dice + CE matching nnUNet
+CT_TrainCfg_nnUNet.loss_weights = CFG(
+    sup_dice=0.5,
+    sup_ce=0.5,
+    ce_class_weight=[0.1, 1.0, 6.0, 2.0],  # [bg, LA, PV, LAA]
+)
+
+# Supervised-only (nnUNet doesn't use semi-supervised)
+CT_TrainCfg_nnUNet.semi_supervised_mode = "supervised"
+
+# Checkpointing
+CT_TrainCfg_nnUNet.keep_checkpoint_max = 3
+CT_TrainCfg_nnUNet.log_step = 10
+CT_TrainCfg_nnUNet.debug = True
+
+# Class-aware patch sampling
+CT_TrainCfg_nnUNet.fg_bias = 0.85
+CT_TrainCfg_nnUNet.class_sampling_probs = [0.15, 0.30, 0.35, 0.20]
+
+# nnUNet target spacing (near-isotropic, Z preserved)
+CT_TrainCfg_nnUNet.target_spacing = [0.5, 0.496, 0.496]
+
+# nnUNet results directory (contains plans.json, dataset.json, fold_*/)
+CT_TrainCfg_nnUNet.nnunet_model_dir = (
+    None  # e.g. "tmp/nnUNet_results/Dataset500_CARE2026CT/nnUNetTrainer__nnUNetPlans__3d_fullres"
+)
+CT_TrainCfg_nnUNet.nnunet_folds = (0,)  # which folds to ensemble
+CT_TrainCfg_nnUNet.nnunet_checkpoint = "checkpoint_best.pth"
+
+# ---------------------------------------------------------------------------
+# CT Mean Teacher with nnUNet backbone (PlainConvUNet)
+# ---------------------------------------------------------------------------
+# Uses nnUNet's 6-stage PlainConvUNet as student/teacher, initialized
+# from a pretrained nnUNet checkpoint.  Mean Teacher consistency loss
+# on 100 unlabeled CTs; warmup first N epochs with supervised-only.
+
+CT_TrainCfg_MT_nnUNet = deepcopy(CT_TrainCfg_nnUNet)
+
+# Override: semi-supervised mode
+CT_TrainCfg_MT_nnUNet.semi_supervised_mode = "mean_teacher"
+CT_TrainCfg_MT_nnUNet.mt_warmup_epochs = 200  # supervised warmup
+CT_TrainCfg_MT_nnUNet.mt_rampup_epochs = 100  # ramp-up duration
+CT_TrainCfg_MT_nnUNet.mt_ema_decay = 0.99
+CT_TrainCfg_MT_nnUNet.mt_consistency_weight = 1.0  # λ in L = L_sup + λ*L_consist
+
+# Pretrained nnUNet weights for the student (same format as nnUNet checkpoint .pth)
+CT_TrainCfg_MT_nnUNet.pretrained_encoder = None  # e.g. "tmp/nnUNet_results/.../fold_0/checkpoint_best.pth"
+
+# Loss: Dice + CE for supervised, MSE for consistency
+CT_TrainCfg_MT_nnUNet.loss_weights = CFG(
+    sup_dice=0.5,
+    sup_ce=0.5,
+    consist=1.0,
+    ce_class_weight=[0.1, 1.0, 6.0, 2.0],
 )

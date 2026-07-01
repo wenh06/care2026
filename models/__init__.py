@@ -6,9 +6,10 @@ The Trainer reads out_tensors["total_loss"] and calls loss.backward().
 """
 
 import re
+from collections import OrderedDict
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional, Sequence, Union
 
 import numpy as np
 import torch
@@ -18,7 +19,16 @@ from torch_ecg.cfg import CFG
 from torch_ecg.utils.misc import CitationMixin
 from torch_ecg.utils.utils_nn import CkptMixin, SizeMixin
 
-from cfg import CT_TrainCfg, CT_TrainCfgV2, ModelCfg, MRI_Stage1_TrainCfg, MRI_Stage2_TrainCfg
+from cfg import (
+    CT_TrainCfg,
+    CT_TrainCfg_MT_nnUNet,
+    CT_TrainCfg_nnUNet,
+    CT_TrainCfgV2,
+    ModelCfg,
+    MRI_Stage1_TrainCfg,
+    MRI_Stage2_TrainCfg,
+)
+from const import CT_NUM_CLASSES
 from outputs import CARE2026Outputs
 
 from .loss import CTLoss, ScarLoss, Stage1MRILoss
@@ -29,6 +39,8 @@ __all__ = [
     "CARE2026_MRI_Stage2_Model",
     "CARE2026_CT_Model",
     "CARE2026_CT_ModelV2",
+    "CARE2026_CT_nnUNet",
+    "CARE2026_CT_MT_nnUNet",
 ]
 
 
@@ -654,3 +666,365 @@ class CARE2026_CT_ModelV2(nn.Module, SizeMixin, CkptMixin, CitationMixin):
         name = re.sub(r"(?<=\d)\.(?=\d)", "_", p.name)
         path = str(p.parent / name)
         return super().save(path=path, **kwargs)
+
+
+class CARE2026_CT_nnUNet(nn.Module, SizeMixin, CkptMixin, CitationMixin):
+    """CT model using nnUNet's full inference pipeline (Task 3).
+
+    Wraps ``nnUNetPredictor`` for preprocessing, normalization, sliding
+    window, and resampling — exactly matching the nnUNet training recipe.
+    """
+
+    __name__ = "CARE2026_CT_nnUNet"
+
+    def __init__(
+        self,
+        config: Optional[CFG] = None,
+        train_config: Optional[CFG] = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__()
+        self.__config = deepcopy(ModelCfg)
+        if config is not None:
+            self.__config.update(deepcopy(config))
+        self.__train_config = deepcopy(CT_TrainCfg_nnUNet)
+        if train_config is not None:
+            self.__train_config.update(deepcopy(train_config))
+
+        for key in ("patch_shape", "normalization", "target_spacing", "arch_config"):
+            if key in self.__train_config and key not in self.__config:
+                self.__config[key] = deepcopy(self.__train_config[key])
+        self.__config["backbone"] = "nnunet"
+
+        # ── Initialise nnUNetPredictor ───────────────────────────────
+        from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
+
+        model_dir = self.__train_config.get("nnunet_model_dir", None)
+        if model_dir is None:
+            raise ValueError("CT_TrainCfg_nnUNet.nnunet_model_dir must be set to the nnUNet results directory.")
+
+        folds = self.__train_config.get("nnunet_folds", (0,))
+        ckpt_name = self.__train_config.get("nnunet_checkpoint", "checkpoint_best.pth")
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        self._predictor = nnUNetPredictor(
+            tile_step_size=0.5,
+            use_gaussian=True,
+            use_mirroring=False,  # we handle TTA separately
+            perform_everything_on_device=True,
+            device=device,
+            verbose=False,
+            verbose_preprocessing=False,
+            allow_tqdm=False,
+        )
+        self._predictor.initialize_from_trained_model_folder(
+            str(model_dir),
+            use_folds=folds,
+            checkpoint_name=ckpt_name,
+        )
+        # Expose the network as backbone for compatibility
+        self.backbone = self._predictor.network
+
+        self.criterion = CTLoss(self.train_config)
+
+    # ------------------------------------------------------------------
+    # Forward (patch-based, for training compatibility)
+    # ------------------------------------------------------------------
+
+    def forward(
+        self,
+        img: torch.Tensor,
+        labels: Optional[Dict[str, torch.Tensor]] = None,
+        cps_weight: float = 1.0,
+        clce_weight: float = 0.0,
+    ) -> Dict[str, torch.Tensor]:
+        img = img.to(device=self.device, dtype=self.dtype)
+        logits = self.backbone(img)
+        if isinstance(logits, (list, tuple)):
+            seg_mask = logits[0].argmax(dim=1)
+        else:
+            seg_mask = logits.argmax(dim=1)
+        output: Dict[str, torch.Tensor] = {"logits1": logits, "seg_mask": seg_mask}
+
+        if labels is not None:
+            target = labels.get("ct_mask")
+            if target is not None:
+                target = target.to(self.device)
+            if isinstance(logits, (list, tuple)):
+                tgt_spatial = target.shape[1:]
+                total_loss = logits[0].sum() * 0.0
+                num_levels = len(logits)
+                sup_losses = []
+                for level in range(num_levels):
+                    l1 = logits[level]
+                    if l1.shape[2:] != tgt_spatial:
+                        l1 = nn.functional.interpolate(l1, size=tgt_spatial, mode="trilinear", align_corners=False)
+                    ld = self.criterion(
+                        logits1=l1,
+                        logits2=None,
+                        logits_t=None,
+                        target=target,
+                        labeled_mask=None,
+                        cps_weight=0.0,
+                        clce_weight=clce_weight,
+                    )
+                    sup_losses.append(ld["sup_loss"])
+                    total_loss = total_loss + ld["total_loss"]
+                output.update({"sup_loss": sum(sup_losses) / num_levels, "total_loss": total_loss / num_levels})
+            else:
+                loss_dict = self.criterion(
+                    logits1=logits,
+                    logits2=None,
+                    logits_t=None,
+                    target=target,
+                    labeled_mask=None,
+                    cps_weight=0.0,
+                    clce_weight=clce_weight,
+                )
+                output.update(loss_dict)
+        return output
+
+    # ------------------------------------------------------------------
+    # Full-volume inference (uses nnUNetPredictor for correctness)
+    # ------------------------------------------------------------------
+
+    @torch.no_grad()
+    def predict(self, image_npy: np.ndarray, spacing: Sequence[float]) -> np.ndarray:
+        """Run full-volume prediction using nnUNet's pipeline.
+
+        Parameters
+        ----------
+        image_npy : np.ndarray, shape (H, W, D), float32
+            Raw CT volume in original voxel space.
+        spacing : (float, float, float)
+            Voxel spacing in mm (x, y, z).
+
+        Returns
+        -------
+        np.ndarray, shape (H, W, D), uint8
+            Predicted multi-class mask (0-3).
+        """
+        self._predictor.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # nnUNet's NibabelIOWithReorient transposes nibabel's (x,y,z)
+        # to SimpleITK's (z,y,x) ordering.  We must do the same for the
+        # raw numpy array and reverse the transpose on the output.
+        if image_npy.ndim == 3:
+            image_npy = np.transpose(image_npy, (2, 1, 0))  # (x,y,z) → (z,y,x)
+        spacing_nnunet = (float(spacing[2]), float(spacing[1]), float(spacing[0]))
+        ret = self._predictor.predict_from_list_of_npy_arrays(
+            image_or_list_of_images=image_npy[None].astype(np.float32),
+            segs_from_prev_stage_or_list_of_segs_from_prev_stage=None,
+            properties_or_list_of_properties={"spacing": spacing_nnunet},
+            truncated_ofname=None,
+            num_processes=1,
+            save_probabilities=False,
+            num_processes_segmentation_export=1,
+        )
+        pred = ret[0].astype(np.uint8)
+        # Reverse the transpose: (z,y,x) → (x,y,z)
+        pred = np.transpose(pred, (2, 1, 0))
+        return pred
+
+    # ------------------------------------------------------------------
+    # Standard helpers (interface compatibility)
+    # ------------------------------------------------------------------
+
+    @torch.no_grad()
+    def inference(self, img: Union[np.ndarray, torch.Tensor]) -> CARE2026Outputs:
+        raise NotImplementedError("Use predict() or predict_ct() for nnUNet models.")
+
+    def _prepare_input(self, img: Union[np.ndarray, torch.Tensor, list]) -> torch.Tensor:
+        if isinstance(img, (list, tuple)):
+            img = torch.stack([i if isinstance(i, torch.Tensor) else torch.from_numpy(i) for i in img])
+        elif isinstance(img, np.ndarray):
+            img = torch.from_numpy(img)
+        return img.to(device=self.device, dtype=self.dtype).unsqueeze(0).unsqueeze(0) if img.ndim < 5 else img
+
+    @property
+    def config(self) -> CFG:
+        return self.__config
+
+    @property
+    def train_config(self) -> CFG:
+        return self.__train_config
+
+    def save(self, path, **kwargs):
+        p = Path(str(path))
+        name = re.sub(r"(?<=\d)\.(?=\d)", "_", p.name)
+        path = str(p.parent / name)
+        return super().save(path=path, **kwargs)
+
+
+class CARE2026_CT_MT_nnUNet(nn.Module, SizeMixin, CkptMixin, CitationMixin):
+    """Mean Teacher CT model with nnUNet PlainConvUNet backbone."""
+
+    __name__ = "CARE2026_CT_MT_nnUNet"
+
+    def __init__(
+        self,
+        config: Optional[CFG] = None,
+        train_config: Optional[CFG] = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__()
+        self.__config = deepcopy(ModelCfg)
+        if config is not None:
+            self.__config.update(deepcopy(config))
+        self.__train_config = deepcopy(CT_TrainCfg_MT_nnUNet)
+        if train_config is not None:
+            self.__train_config.update(deepcopy(train_config))
+
+        for key in ("patch_shape", "normalization", "target_spacing", "arch_config", "semi_supervised_mode"):
+            if key in self.__train_config and key not in self.__config:
+                self.__config[key] = deepcopy(self.__train_config[key])
+        self.__config["backbone"] = "nnunet_mt"
+
+        self.mode = self.__config.get("semi_supervised_mode") or self.__train_config.get("semi_supervised_mode", "mean_teacher")
+        self.__config["semi_supervised_mode"] = self.mode
+
+        from dynamic_network_architectures.architectures.unet import PlainConvUNet
+
+        arch_cfg = deepcopy(self.__config.get("arch_config", self.__train_config.get("arch_config", {})))
+
+        def _make_nnunet():
+            return PlainConvUNet(
+                input_channels=1,
+                n_stages=int(arch_cfg["n_stages"]),
+                features_per_stage=list(arch_cfg["features_per_stage"]),
+                conv_op=nn.Conv3d,
+                kernel_sizes=[list(k) for k in arch_cfg["kernel_sizes"]],
+                strides=[list(s) for s in arch_cfg["strides"]],
+                n_conv_per_stage=list(arch_cfg["n_conv_per_stage"]),
+                n_conv_per_stage_decoder=list(arch_cfg["n_conv_per_stage_decoder"]),
+                num_classes=CT_NUM_CLASSES,
+                conv_bias=bool(arch_cfg.get("conv_bias", True)),
+                norm_op=nn.InstanceNorm3d,
+                norm_op_kwargs=dict(arch_cfg.get("norm_op_kwargs", {"eps": 1e-5, "affine": True})),
+                dropout_op=None,
+                nonlin=nn.LeakyReLU,
+                nonlin_kwargs=dict(arch_cfg.get("nonlin_kwargs", {"inplace": True})),
+                deep_supervision=True,
+            )
+
+        self.model1 = _make_nnunet()
+
+        pretrained = self.__train_config.get("pretrained_encoder", None)
+        if pretrained and Path(pretrained).exists():
+            ckpt = torch.load(str(pretrained), map_location="cpu", weights_only=False)
+            weights = ckpt["network_weights"]
+            if any(k.startswith("module.") for k in weights):
+                weights = OrderedDict((k[7:], v) for k, v in weights.items())
+            self.model1.load_state_dict(weights, strict=True)
+
+        if self.mode == "mean_teacher":
+            self.teacher = _make_nnunet()
+            self.teacher.load_state_dict(self.model1.state_dict())
+            for p in self.teacher.parameters():
+                p.requires_grad = False
+
+        self.criterion = CTLoss(self.train_config)
+        self._mt_decay = float(self.__train_config.get("mt_ema_decay", 0.99))
+
+    def _update_teacher(self) -> None:
+        alpha = self._mt_decay
+        with torch.no_grad():
+            for tp, sp in zip(self.teacher.parameters(), self.model1.parameters()):
+                tp.data.mul_(alpha).add_(sp.data, alpha=1.0 - alpha)
+
+    def _ds_last(self, logits):
+        return logits[0] if isinstance(logits, (list, tuple)) else logits
+
+    def _ds_to_single(self, logits, target_spatial):
+        """Average deep supervision logits upsampled to target spatial size."""
+        if not isinstance(logits, (list, tuple)):
+            return logits
+        upsampled = []
+        for lo in logits:
+            if lo.shape[2:] != target_spatial:
+                lo = nn.functional.interpolate(lo, size=target_spatial, mode="trilinear", align_corners=False)
+            upsampled.append(lo)
+        return sum(upsampled) / len(upsampled)
+
+    def forward(
+        self,
+        img: torch.Tensor,
+        labels: Optional[Dict[str, torch.Tensor]] = None,
+        cps_weight: float = 1.0,
+        clce_weight: float = 0.0,
+    ) -> Dict[str, torch.Tensor]:
+        img = img.to(device=self.device, dtype=self.dtype)
+        logits_s = self.model1(img)
+        seg_mask = self._ds_last(logits_s).argmax(dim=1)
+        output: Dict[str, torch.Tensor] = {"logits1": logits_s, "seg_mask": seg_mask}
+
+        if self.training and self.mode == "mean_teacher":
+            with torch.no_grad():
+                output["logits_t"] = self.teacher(img)
+
+        if labels is not None:
+            target = labels.get("ct_mask")
+            labeled_mask = labels.get("labeled")
+            if target is not None:
+                target = target.to(self.device)
+            if labeled_mask is not None:
+                labeled_mask = labeled_mask.to(self.device)
+            # CTLoss expects single tensor, not deep supervision list
+            tgt_spatial = target.shape[1:]
+            logits1_for_loss = self._ds_to_single(logits_s, tgt_spatial)
+            logits_t_for_loss = self._ds_to_single(output["logits_t"], tgt_spatial) if "logits_t" in output else None
+            loss_dict = self.criterion(
+                logits1=logits1_for_loss,
+                logits2=None,
+                logits_t=logits_t_for_loss,
+                target=target,
+                labeled_mask=labeled_mask,
+                cps_weight=cps_weight,
+                clce_weight=clce_weight,
+            )
+            output.update(loss_dict)
+        return output
+
+    @torch.no_grad()
+    def inference(self, img: Union[np.ndarray, torch.Tensor]) -> CARE2026Outputs:
+        original_state = self.training
+        self.eval()
+        input_t = self._prepare_input(img)
+        output = self.forward(input_t)
+        self.train(original_state)
+        return CARE2026Outputs(task="ct", ct_mask=output["seg_mask"].cpu().numpy().astype(np.uint8))
+
+    def _prepare_input(self, img: Union[np.ndarray, torch.Tensor, list]) -> torch.Tensor:
+        if isinstance(img, (list, tuple)):
+            img = torch.stack([i if isinstance(i, torch.Tensor) else torch.from_numpy(i) for i in img])
+        elif isinstance(img, np.ndarray):
+            img = torch.from_numpy(img)
+        img = img.to(device=self.device, dtype=self.dtype)
+        while img.ndim < 5:
+            img = img.unsqueeze(0)
+        return img
+
+    @property
+    def config(self) -> CFG:
+        return self.__config
+
+    @property
+    def train_config(self) -> CFG:
+        return self.__train_config
+
+    def save(self, path, **kwargs):
+        p = Path(str(path))
+        name = re.sub(r"(?<=\d)\.(?=\d)", "_", p.name)
+        # PlainConvUNet shares tensors encoder↔decoder; force .pth to use
+        # torch.save (safetensors errors on shared memory tensors).
+        path = str(p.parent / name) + ".pth"
+        restored = {}
+        if hasattr(self, "teacher"):
+            restored["teacher"] = self.teacher
+            del self.teacher
+            self.__config["semi_supervised_mode"] = "supervised"
+        try:
+            return super().save(path=path, train_config=self.train_config, **kwargs)
+        finally:
+            for attr, m in restored.items():
+                setattr(self, attr, m)
+            self.__config["semi_supervised_mode"] = self.mode
