@@ -310,7 +310,7 @@ if __name__ == "__main__":
     from torch_ecg.utils.misc import str2bool
 
     from cfg import BaseCfg
-    from models import CARE2026_CT_Model, CARE2026_MRI_Stage1_Model, CARE2026_MRI_Stage2_Model
+    from models import CARE2026_CT_Model, CARE2026_CT_nnUNet, CARE2026_MRI_Stage1_Model, CARE2026_MRI_Stage2_Model
 
     parser = argparse.ArgumentParser(description="CARE2026 Left Atrium — end-to-end inference + submission packaging")
     parser.add_argument(
@@ -434,18 +434,29 @@ if __name__ == "__main__":
             warnings.warn(f"MRI Stage-2 checkpoint not found in {model_dir}. Tasks 1 & 2 will be skipped.")
 
     if 3 in tasks:
-        ct_ckpt = model_dir / "ct_model.safetensors"
-        if not ct_ckpt.exists():
-            candidates = sorted(model_dir.glob("BestModel_*-ct*.safetensors"), key=lambda p: p.stat().st_mtime)
-            if candidates:
-                ct_ckpt = candidates[-1]
-        if ct_ckpt.exists():
-            ct_model, aux_ct = CARE2026_CT_Model.from_checkpoint(str(ct_ckpt), device=device)
-            ct_model.train_config.update(aux_ct)
+        # Prefer nnUNet model if the directory exists
+        nnunet_dir = model_dir / "ct_model"
+        if (nnunet_dir / "plans.json").exists():
+            from cfg import CT_TrainCfg_nnUNet as _nnunet_cfg
+
+            _tc = dict(_nnunet_cfg)
+            _tc["nnunet_model_dir"] = str(nnunet_dir)
+            ct_model = CARE2026_CT_nnUNet(train_config=_tc)
             ct_model = ct_model.to(device).eval()
-            _print_model_config(ct_model, "CT", ct_ckpt)
+            print(f"[CT] nnUNet model from {nnunet_dir}")
         else:
-            warnings.warn(f"CT model checkpoint not found in {model_dir}. Task 3 will be skipped.")
+            ct_ckpt = model_dir / "ct_model.safetensors"
+            if not ct_ckpt.exists():
+                candidates = sorted(model_dir.glob("BestModel_*-ct*.safetensors"), key=lambda p: p.stat().st_mtime)
+                if candidates:
+                    ct_ckpt = candidates[-1]
+            if ct_ckpt.exists():
+                ct_model, aux_ct = CARE2026_CT_Model.from_checkpoint(str(ct_ckpt), device=device)
+                ct_model.train_config.update(aux_ct)
+                ct_model = ct_model.to(device).eval()
+                _print_model_config(ct_model, "CT", ct_ckpt)
+            else:
+                warnings.warn(f"CT model checkpoint not found in {model_dir}. Task 3 will be skipped.")
 
     run_all_tasks(
         mri_stage1_model=mri_stage1_model,

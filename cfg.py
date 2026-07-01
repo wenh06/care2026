@@ -722,10 +722,10 @@ CT_TrainCfg_nnUNet.class_sampling_probs = [0.15, 0.30, 0.35, 0.20]
 # nnUNet target spacing (near-isotropic, Z preserved)
 CT_TrainCfg_nnUNet.target_spacing = [0.5, 0.496, 0.496]
 
-# nnUNet results directory — auto-discovers trainer/folds/checkpoint at any level
-CT_TrainCfg_nnUNet.nnunet_model_dir = None  # e.g. "checkpoints/nnUNet_results/Dataset500_CARE2026CT"
-CT_TrainCfg_nnUNet.nnunet_folds = None  # None = auto-detect; else (0,) or (0,1,2,3,4)
-CT_TrainCfg_nnUNet.nnunet_checkpoint = None  # None = auto-detect (checkpoint_best > final > latest)
+# nnUNet results directory — auto-discovers trainer/folds/checkpoint
+CT_TrainCfg_nnUNet.nnunet_model_dir = "checkpoints/ct_model"
+CT_TrainCfg_nnUNet.nnunet_folds = None  # None = auto-detect
+CT_TrainCfg_nnUNet.nnunet_checkpoint = None  # None = auto-detect
 
 # ---------------------------------------------------------------------------
 # CT Mean Teacher with nnUNet backbone (PlainConvUNet)

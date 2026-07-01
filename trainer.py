@@ -815,10 +815,10 @@ def get_args(**kwargs: Any) -> CFG:
     parser.add_argument(
         "--ct-model",
         type=str,
-        default="v1",
+        default="nnunet",
         choices=["v1", "v2", "nnunet", "nnunet_mt"],
         dest="ct_model_version",
-        help="CT model version: v1, v2, nnunet, nnunet_mt (Mean Teacher + PlainConvUNet).",
+        help="CT model version: nnunet (default), v1, v2, nnunet_mt.",
     )
     args = {k: v for k, v in vars(parser.parse_args()).items() if v is not None}
     cfg.update(args)
@@ -850,7 +850,7 @@ if __name__ == "__main__":
             model = CARE2026_MRI_Stage2_Model(config=model_config, train_config=train_config)
             trainer_cls = CARE2026_MRI_Stage2_Trainer
     else:
-        ct_version = args.get("ct_model_version", "v2")
+        ct_version = args.get("ct_model_version", "nnunet")
         if ct_version == "nnunet_mt":
             train_config = CFG(deepcopy(CT_TrainCfg_MT_nnUNet))
             train_config.update(args)
