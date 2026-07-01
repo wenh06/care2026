@@ -641,7 +641,14 @@ def predict_ct(
     # Normalise according to the model config (synced from train_config at init)
     norm_cfg = mcfg.get("normalization", CFG(mode="minmax"))
     mode = str(norm_cfg.get("mode", "minmax"))
-    if mode == "percentile":
+    if mode == "nnunet":
+        image = np.clip(
+            image_raw,
+            float(norm_cfg["global_clip_min"]),
+            float(norm_cfg["global_clip_max"]),
+        )
+        image = (image - float(norm_cfg["global_mean"])) / max(float(norm_cfg["global_std"]), 1e-8)
+    elif mode == "percentile":
         p_low = float(norm_cfg.get("p_low", 0.5))
         p_high = float(norm_cfg.get("p_high", 99.5))
         v_low = float(np.percentile(image_raw, p_low))

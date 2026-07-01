@@ -96,6 +96,25 @@ def _resolve_nnunet_dir(model_dir: Union[str, Path]) -> Path:
     return model_dir, folds, ckpt_path
 
 
+def _load_nnunet_norm(trainer_dir: Path) -> dict:
+    """Read CTNormalization params from nnUNet's plans.json.
+
+    Returns a dict suitable for ``config["normalization"]`` or
+    ``train_config["normalization"]``.
+    """
+    import json
+
+    plans = json.loads((trainer_dir / "plans.json").read_text())
+    props = plans["foreground_intensity_properties_per_channel"]["0"]
+    return {
+        "mode": "nnunet",
+        "global_clip_min": float(props["percentile_00_5"]),
+        "global_clip_max": float(props["percentile_99_5"]),
+        "global_mean": float(props["mean"]),
+        "global_std": float(props["std"]),
+    }
+
+
 class CARE2026_MRI_Stage1_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
     """Single-head VNet for coarse LA cavity localisation (Stage 1).
 
@@ -756,6 +775,10 @@ class CARE2026_CT_nnUNet(nn.Module, SizeMixin, CkptMixin, CitationMixin):
             raise ValueError("CT_TrainCfg_nnUNet.nnunet_model_dir must be set.")
 
         trainer_dir, auto_folds, auto_ckpt = _resolve_nnunet_dir(model_dir)
+        # Read normalization from nnUNet's plans.json
+        norm = _load_nnunet_norm(trainer_dir)
+        self.__config["normalization"] = CFG(norm)
+        self.__train_config["normalization"] = CFG(norm)
         folds = self.__train_config.get("nnunet_folds") or auto_folds or (0,)
         if isinstance(folds, str):
             folds = tuple(int(f.strip()) for f in folds.split(","))
@@ -971,7 +994,11 @@ class CARE2026_CT_MT_nnUNet(nn.Module, SizeMixin, CkptMixin, CitationMixin):
         if pretrained:
             pretrained_path = Path(pretrained)
             if pretrained_path.is_dir():
-                _, _, auto_ckpt = _resolve_nnunet_dir(pretrained_path)
+                trainer_dir, _, auto_ckpt = _resolve_nnunet_dir(pretrained_path)
+                # Read normalization from nnUNet's plans.json
+                norm = _load_nnunet_norm(trainer_dir)
+                self.__config["normalization"] = CFG(norm)
+                self.__train_config["normalization"] = CFG(norm)
                 if auto_ckpt:
                     pretrained_path = auto_ckpt
             if pretrained_path.exists():
