@@ -723,9 +723,7 @@ CT_TrainCfg_nnUNet.class_sampling_probs = [0.15, 0.30, 0.35, 0.20]
 CT_TrainCfg_nnUNet.target_spacing = [0.5, 0.496, 0.496]
 
 # nnUNet results directory (contains plans.json, dataset.json, fold_*/)
-CT_TrainCfg_nnUNet.nnunet_model_dir = (
-    None  # e.g. "tmp/nnUNet_results/Dataset500_CARE2026CT/nnUNetTrainer__nnUNetPlans__3d_fullres"
-)
+CT_TrainCfg_nnUNet.nnunet_model_dir = None
 CT_TrainCfg_nnUNet.nnunet_folds = (0,)  # which folds to ensemble
 CT_TrainCfg_nnUNet.nnunet_checkpoint = "checkpoint_best.pth"
 
