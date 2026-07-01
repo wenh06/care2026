@@ -44,6 +44,58 @@ __all__ = [
 ]
 
 
+def _resolve_nnunet_dir(model_dir: Union[str, Path]) -> Path:
+    """Auto-discover nnUNet trainer directory and available folds.
+
+    Accepts any level of the nnUNet results tree::
+
+        results/                                          # results root
+        results/Dataset500/                               # dataset level
+        results/Dataset500/nnUNetTrainer__.../            # trainer level
+
+    Returns ``(trainer_dir, folds, ckpt_path)``.
+    """
+    model_dir = Path(model_dir).expanduser().resolve()
+    if not model_dir.exists():
+        raise FileNotFoundError(f"nnUNet directory not found: {model_dir}")
+
+    # Walk down to find the trainer dir (contains plans.json)
+    if not (model_dir / "plans.json").exists():
+        # Try nnUNetTrainer__* subdir
+        trainers = sorted(model_dir.glob("nnUNetTrainer__*"))
+        if trainers:
+            model_dir = trainers[0]
+        elif not (model_dir / "plans.json").exists():
+            # Try one level deeper: Dataset*/nnUNetTrainer__*
+            for ds_dir in sorted(model_dir.glob("Dataset*")):
+                sub_trainers = sorted(ds_dir.glob("nnUNetTrainer__*"))
+                if sub_trainers:
+                    model_dir = sub_trainers[0]
+                    break
+            else:
+                raise FileNotFoundError(f"Cannot find nnUNet trainer dir (plans.json) under {model_dir}")
+
+    if not (model_dir / "plans.json").exists():
+        raise FileNotFoundError(f"plans.json not found in {model_dir}")
+
+    # Auto-detect available folds
+    fold_dirs = sorted(model_dir.glob("fold_*"))
+    folds = tuple(int(f.name.split("_")[1]) for f in fold_dirs if f.is_dir())
+
+    # Auto-detect a checkpoint
+    ckpt_path = None
+    for ckpt_name in ("checkpoint_best.pth", "checkpoint_final.pth", "checkpoint_latest.pth"):
+        for search_dir in ([fold_dirs[0]] if fold_dirs else []) + [model_dir]:
+            candidate = search_dir / ckpt_name
+            if candidate.exists():
+                ckpt_path = candidate
+                break
+        if ckpt_path:
+            break
+
+    return model_dir, folds, ckpt_path
+
+
 class CARE2026_MRI_Stage1_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
     """Single-head VNet for coarse LA cavity localisation (Stage 1).
 
@@ -696,21 +748,28 @@ class CARE2026_CT_nnUNet(nn.Module, SizeMixin, CkptMixin, CitationMixin):
                 self.__config[key] = deepcopy(self.__train_config[key])
         self.__config["backbone"] = "nnunet"
 
-        # ── Initialise nnUNetPredictor ───────────────────────────────
+        # ── Resolve nnUNet directory ─────────────────────────────────
         from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
 
         model_dir = self.__train_config.get("nnunet_model_dir", None)
         if model_dir is None:
-            raise ValueError("CT_TrainCfg_nnUNet.nnunet_model_dir must be set to the nnUNet results directory.")
+            raise ValueError("CT_TrainCfg_nnUNet.nnunet_model_dir must be set.")
 
-        folds = self.__train_config.get("nnunet_folds", (0,))
-        ckpt_name = self.__train_config.get("nnunet_checkpoint", "checkpoint_best.pth")
+        trainer_dir, auto_folds, auto_ckpt = _resolve_nnunet_dir(model_dir)
+        folds = self.__train_config.get("nnunet_folds") or auto_folds or (0,)
+        if isinstance(folds, str):
+            folds = tuple(int(f.strip()) for f in folds.split(","))
+        if isinstance(folds, list):
+            folds = tuple(folds)
+        ckpt_name = self.__train_config.get("nnunet_checkpoint") or auto_ckpt.name if auto_ckpt else "checkpoint_best.pth"
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.__config["nnunet_trainer_dir"] = str(trainer_dir)
+        self.__config["nnunet_folds"] = folds
 
         self._predictor = nnUNetPredictor(
             tile_step_size=0.5,
             use_gaussian=True,
-            use_mirroring=False,  # we handle TTA separately
+            use_mirroring=False,
             perform_everything_on_device=True,
             device=device,
             verbose=False,
@@ -718,7 +777,7 @@ class CARE2026_CT_nnUNet(nn.Module, SizeMixin, CkptMixin, CitationMixin):
             allow_tqdm=False,
         )
         self._predictor.initialize_from_trained_model_folder(
-            str(model_dir),
+            str(trainer_dir),
             use_folds=folds,
             checkpoint_name=ckpt_name,
         )
@@ -909,12 +968,18 @@ class CARE2026_CT_MT_nnUNet(nn.Module, SizeMixin, CkptMixin, CitationMixin):
         self.model1 = _make_nnunet()
 
         pretrained = self.__train_config.get("pretrained_encoder", None)
-        if pretrained and Path(pretrained).exists():
-            ckpt = torch.load(str(pretrained), map_location="cpu", weights_only=False)
-            weights = ckpt["network_weights"]
-            if any(k.startswith("module.") for k in weights):
-                weights = OrderedDict((k[7:], v) for k, v in weights.items())
-            self.model1.load_state_dict(weights, strict=True)
+        if pretrained:
+            pretrained_path = Path(pretrained)
+            if pretrained_path.is_dir():
+                _, _, auto_ckpt = _resolve_nnunet_dir(pretrained_path)
+                if auto_ckpt:
+                    pretrained_path = auto_ckpt
+            if pretrained_path.exists():
+                ckpt = torch.load(str(pretrained_path), map_location="cpu", weights_only=False)
+                weights = ckpt["network_weights"]
+                if any(k.startswith("module.") for k in weights):
+                    weights = OrderedDict((k[7:], v) for k, v in weights.items())
+                self.model1.load_state_dict(weights, strict=True)
 
         if self.mode == "mean_teacher":
             self.teacher = _make_nnunet()
@@ -933,17 +998,6 @@ class CARE2026_CT_MT_nnUNet(nn.Module, SizeMixin, CkptMixin, CitationMixin):
 
     def _ds_last(self, logits):
         return logits[0] if isinstance(logits, (list, tuple)) else logits
-
-    def _ds_to_single(self, logits, target_spatial):
-        """Average deep supervision logits upsampled to target spatial size."""
-        if not isinstance(logits, (list, tuple)):
-            return logits
-        upsampled = []
-        for lo in logits:
-            if lo.shape[2:] != target_spatial:
-                lo = nn.functional.interpolate(lo, size=target_spatial, mode="trilinear", align_corners=False)
-            upsampled.append(lo)
-        return sum(upsampled) / len(upsampled)
 
     def forward(
         self,
@@ -968,14 +1022,11 @@ class CARE2026_CT_MT_nnUNet(nn.Module, SizeMixin, CkptMixin, CitationMixin):
                 target = target.to(self.device)
             if labeled_mask is not None:
                 labeled_mask = labeled_mask.to(self.device)
-            # CTLoss expects single tensor, not deep supervision list
-            tgt_spatial = target.shape[1:]
-            logits1_for_loss = self._ds_to_single(logits_s, tgt_spatial)
-            logits_t_for_loss = self._ds_to_single(output["logits_t"], tgt_spatial) if "logits_t" in output else None
+            # Pass raw logits — CTLoss handles deep supervision per-level
             loss_dict = self.criterion(
-                logits1=logits1_for_loss,
+                logits1=logits_s,
                 logits2=None,
-                logits_t=logits_t_for_loss,
+                logits_t=output.get("logits_t"),
                 target=target,
                 labeled_mask=labeled_mask,
                 cps_weight=cps_weight,

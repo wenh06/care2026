@@ -155,42 +155,67 @@ class ScarLoss(nn.Module):
 class CTLoss(nn.Module):
     """Loss for CT semi-supervised training (CPS or Mean Teacher).
 
-    Uses FocalTverskyLoss (α=0.7, β=0.3, γ=0.75 by default) to penalise
-    false positives more heavily than false negatives — critical when the
-    model over-predicts foreground (LA 2–3×, LAA 3–4× GT).  Optional CE
-    with class weights and boundary loss (HausdorffERLoss).
+    Supports two supervised loss modes (configurable via ``loss_weights.loss_mode``):
+
+    - ``"focal_tversky"`` (default): FocalTverskyLoss(α=0.7, β=0.3, γ=0.75).
+      Penalises false positives to reduce foreground over-prediction.
+    - ``"dice_ce"`` (nnUNet): DiceCELoss with configurable weights.
+      Matches nnUNet's native training recipe.
+
+    Optional: CE, boundary loss (HausdorffERLoss), clCE.
 
     Parameters
     ----------
     cfg : CFG
-        ``loss_weights``: tversky_alpha, tversky_beta, tversky_gamma,
-        sup_ce, ce_class_weight, sup_boundary, cps (or mt_consist).
+        ``loss_weights`` keys: loss_mode, tversky_alpha/beta/gamma,
+        sup_dice, sup_ce, ce_class_weight, sup_boundary, sup_clce,
+        clce_classes, cps, mt_consist, deep_supervision.
     """
 
     def __init__(self, cfg) -> None:
         super().__init__()
         w = cfg.loss_weights
-        # FocalTversky: α > 0.5 penalises FP more than FN (reduce over-prediction)
-        self.supervised_loss = FocalTverskyLoss(
-            alpha=w.get("tversky_alpha", 0.7),
-            beta=w.get("tversky_beta", 0.3),
-            gamma=w.get("tversky_gamma", 0.75),
-            do_bg=False,
-        )
-        # Optional CE with class weights (set sup_ce > 0 to enable)
-        self.w_ce = w.get("sup_ce", 0.0)
-        if self.w_ce > 0:
+        self._loss_mode = w.get("loss_mode", "focal_tversky")
+        self._deep_sup = w.get("deep_supervision", False)
+
+        if self._loss_mode == "dice_ce":
+            # nnUNet-style: Dice + CE
+            dice_w = w.get("sup_dice", 0.5)
+            ce_w = w.get("sup_ce", 0.5)
             class_w = w.get("ce_class_weight", None)
             if class_w is not None:
                 class_w = torch.tensor(class_w, dtype=torch.float32)
-            self.ce_loss = nn.CrossEntropyLoss(weight=class_w)
-        else:
+            self.supervised_loss = DiceCELoss(
+                dice_weight=dice_w,
+                ce_weight=ce_w,
+                do_bg=False,
+                ce_class_weight=class_w,
+            )
+            self.w_ce = 0.0  # CE already included in DiceCELoss
             self.ce_loss = None
-        self.consistency_fn = nn.MSELoss()  # Mean Teacher: MSE between softmax outputs
+        else:
+            # FocalTversky: α > 0.5 penalises FP more than FN
+            self.supervised_loss = FocalTverskyLoss(
+                alpha=w.get("tversky_alpha", 0.7),
+                beta=w.get("tversky_beta", 0.3),
+                gamma=w.get("tversky_gamma", 0.75),
+                do_bg=False,
+            )
+            # Optional CE (separate from FocalTversky)
+            self.w_ce = w.get("sup_ce", 0.0)
+            if self.w_ce > 0:
+                class_w = w.get("ce_class_weight", None)
+                if class_w is not None:
+                    class_w = torch.tensor(class_w, dtype=torch.float32)
+                self.ce_loss = nn.CrossEntropyLoss(weight=class_w)
+            else:
+                self.ce_loss = None
+
+        self.consistency_fn = nn.MSELoss()
         self.boundary_loss = HausdorffERLoss(alpha=2.0, erosions=5) if w.get("sup_boundary", 0.0) > 0 else None
         self.w_boundary = w.get("sup_boundary", 0.0)
         self.clce_loss = CenterlineCELoss(kernel_size=5, lambda_clce=1.0) if w.get("sup_clce", 0.0) > 0 else None
-        self.clce_classes = w.get("clce_classes", None)  # None=all, or [2] for PV only
+        self.clce_classes = w.get("clce_classes", None)
         self.w_cps = w.get("cps", 1.0)
         self.w_mt = w.get("mt_consist", 1.0)
 
@@ -207,6 +232,28 @@ class CTLoss(nn.Module):
             return total / len(self.clce_classes)
         return self.clce_loss(logits, target)
 
+    def _sup_loss(self, logits: torch.Tensor, tgt: torch.Tensor) -> torch.Tensor:
+        """Supervised loss on a single logits tensor (per-level or single)."""
+        loss = self.supervised_loss(logits, tgt)
+        if self.ce_loss is not None:
+            loss = loss + self.w_ce * self.ce_loss(logits, tgt)
+        return loss
+
+    def _maybe_deep_sup_loss(self, logits, tgt: torch.Tensor) -> torch.Tensor:
+        """If *logits* is a deep supervision list, compute per-level loss (nnUNet style).
+        Otherwise, return single-level supervised loss.
+        """
+        if isinstance(logits, (list, tuple)) and self._deep_sup:
+            tgt_spatial = tgt.shape[1:]
+            total = logits[0].sum() * 0.0
+            n = len(logits)
+            for lo in logits:
+                if lo.shape[2:] != tgt_spatial:
+                    lo = nn.functional.interpolate(lo, size=tgt_spatial, mode="trilinear", align_corners=False)
+                total = total + self._sup_loss(lo, tgt)
+            return total / n
+        return self._sup_loss(logits, tgt)
+
     def forward(
         self,
         logits1: torch.Tensor,
@@ -217,47 +264,52 @@ class CTLoss(nn.Module):
         cps_weight: float = 1.0,
         clce_weight: float = 0.0,
     ) -> dict:
-        sup_loss = logits1.sum() * 0.0
-        boundary_loss = logits1.sum() * 0.0
-        clce_loss = logits1.sum() * 0.0
+        sup_loss = logits1.sum() * 0.0 if not isinstance(logits1, (list, tuple)) else logits1[0].sum() * 0.0
+        boundary_loss = sup_loss * 0.0
+        clce_loss = sup_loss * 0.0
+
         if target is not None and labeled_mask is not None and labeled_mask.any():
             tgt_labeled = target[labeled_mask].long()
             if logits2 is not None:
-                # CPS: supervised loss on both models
-                l1 = logits1[labeled_mask]
-                l2 = logits2[labeled_mask]
-                sup_loss = 0.5 * (self.supervised_loss(l1, tgt_labeled) + self.supervised_loss(l2, tgt_labeled))
-                if self.ce_loss is not None:
-                    sup_loss = sup_loss + 0.5 * self.w_ce * (self.ce_loss(l1, tgt_labeled) + self.ce_loss(l2, tgt_labeled))
+                # CPS: supervised loss on both models (no deep sup for CPS)
+                l1 = logits1[labeled_mask] if not isinstance(logits1, (list, tuple)) else logits1[0][labeled_mask]
+                l2 = logits2[labeled_mask] if not isinstance(logits2, (list, tuple)) else logits2[0][labeled_mask]
+                sup_loss = 0.5 * (self._sup_loss(l1, tgt_labeled) + self._sup_loss(l2, tgt_labeled))
                 if self.boundary_loss is not None:
                     boundary_loss = 0.5 * (self.boundary_loss(l1, tgt_labeled) + self.boundary_loss(l2, tgt_labeled))
                 if self.clce_loss is not None and clce_weight > 0:
                     clce_loss = 0.5 * (self._compute_clce(l1, tgt_labeled) + self._compute_clce(l2, tgt_labeled))
             else:
-                # Mean Teacher: supervised loss on student only
-                l1 = logits1[labeled_mask]
-                sup_loss = self.supervised_loss(l1, tgt_labeled)
-                if self.ce_loss is not None:
-                    sup_loss = sup_loss + self.w_ce * self.ce_loss(l1, tgt_labeled)
+                if isinstance(logits1, (list, tuple)) and self._deep_sup:
+                    # Apply labeled_mask to each level's logits
+                    l1_labeled = [lo[labeled_mask] for lo in logits1]
+                    sup_loss = self._maybe_deep_sup_loss(l1_labeled, tgt_labeled)
+                else:
+                    l1_tensor = logits1[labeled_mask] if not isinstance(logits1, (list, tuple)) else logits1
+                    sup_loss = self._sup_loss(l1_tensor, tgt_labeled)
                 if self.boundary_loss is not None:
-                    boundary_loss = self.boundary_loss(l1, tgt_labeled)
+                    l1_bd = logits1[0][labeled_mask] if isinstance(logits1, (list, tuple)) else logits1[labeled_mask]
+                    boundary_loss = self.boundary_loss(l1_bd, tgt_labeled)
                 if self.clce_loss is not None and clce_weight > 0:
-                    clce_loss = self._compute_clce(l1, tgt_labeled)
+                    l1_cl = logits1[0][labeled_mask] if isinstance(logits1, (list, tuple)) else logits1[labeled_mask]
+                    clce_loss = self._compute_clce(l1_cl, tgt_labeled)
 
-        # Consistency loss
-        consist_loss = logits1.sum() * 0.0
-        if logits_t is not None:
-            # Mean Teacher: MSE(student_softmax, teacher_softmax)
+        # Consistency loss (on full-resolution output only)
+        l1_consist = logits1[0] if isinstance(logits1, (list, tuple)) else logits1
+        l2_consist = logits2[0] if isinstance(logits2, (list, tuple)) else logits2 if logits2 is not None else None
+        lt_consist = logits_t[0] if isinstance(logits_t, (list, tuple)) else logits_t if logits_t is not None else None
+
+        consist_loss = l1_consist.sum() * 0.0
+        if lt_consist is not None:
             consist_loss = (
-                self.w_mt * cps_weight * self.consistency_fn(torch.softmax(logits1, dim=1), torch.softmax(logits_t, dim=1))
+                self.w_mt * cps_weight * self.consistency_fn(torch.softmax(l1_consist, dim=1), torch.softmax(lt_consist, dim=1))
             )
-        elif logits2 is not None:
-            # CPS: cross-pseudo-label CE
+        elif l2_consist is not None:
             with torch.no_grad():
-                pseudo1 = logits1.argmax(dim=1)
-                pseudo2 = logits2.argmax(dim=1)
-            cps1 = nn.functional.cross_entropy(logits1, pseudo2)
-            cps2 = nn.functional.cross_entropy(logits2, pseudo1)
+                pseudo1 = l1_consist.argmax(dim=1)
+                pseudo2 = l2_consist.argmax(dim=1)
+            cps1 = nn.functional.cross_entropy(l1_consist, pseudo2)
+            cps2 = nn.functional.cross_entropy(l2_consist, pseudo1)
             consist_loss = self.w_cps * cps_weight * 0.5 * (cps1 + cps2)
 
         total = sup_loss + consist_loss

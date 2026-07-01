@@ -722,10 +722,10 @@ CT_TrainCfg_nnUNet.class_sampling_probs = [0.15, 0.30, 0.35, 0.20]
 # nnUNet target spacing (near-isotropic, Z preserved)
 CT_TrainCfg_nnUNet.target_spacing = [0.5, 0.496, 0.496]
 
-# nnUNet results directory (contains plans.json, dataset.json, fold_*/)
-CT_TrainCfg_nnUNet.nnunet_model_dir = None
-CT_TrainCfg_nnUNet.nnunet_folds = (0,)  # which folds to ensemble
-CT_TrainCfg_nnUNet.nnunet_checkpoint = "checkpoint_best.pth"
+# nnUNet results directory — auto-discovers trainer/folds/checkpoint at any level
+CT_TrainCfg_nnUNet.nnunet_model_dir = None  # e.g. "checkpoints/nnUNet_results/Dataset500_CARE2026CT"
+CT_TrainCfg_nnUNet.nnunet_folds = None  # None = auto-detect; else (0,) or (0,1,2,3,4)
+CT_TrainCfg_nnUNet.nnunet_checkpoint = None  # None = auto-detect (checkpoint_best > final > latest)
 
 # ---------------------------------------------------------------------------
 # CT Mean Teacher with nnUNet backbone (PlainConvUNet)
@@ -746,10 +746,12 @@ CT_TrainCfg_MT_nnUNet.mt_consistency_weight = 1.0  # λ in L = L_sup + λ*L_cons
 # Pretrained nnUNet weights for the student (same format as nnUNet checkpoint .pth)
 CT_TrainCfg_MT_nnUNet.pretrained_encoder = None  # e.g. "tmp/nnUNet_results/.../fold_0/checkpoint_best.pth"
 
-# Loss: Dice + CE for supervised, MSE for consistency
+# Loss: Dice+CE matching nnUNet, deep supervision per-level, MSE consistency
 CT_TrainCfg_MT_nnUNet.loss_weights = CFG(
-    sup_dice=0.5,
-    sup_ce=0.5,
-    consist=1.0,
+    loss_mode="dice_ce",  # nnUNet-style DiceCELoss (vs "focal_tversky" for VNet)
+    sup_dice=1.0,  # Dice weight in DiceCELoss
+    sup_ce=1.0,  # CE weight in DiceCELoss
+    consist=1.0,  # MT consistency weight
+    deep_supervision=True,  # per-level loss (nnUNet style)
     ce_class_weight=[0.1, 1.0, 6.0, 2.0],
 )
