@@ -9,7 +9,7 @@ Provides dataset implementations for all three tasks:
 
 from copy import deepcopy
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import nibabel as nib
 import numpy as np
@@ -489,7 +489,9 @@ class CARE2026_CT_Dataset(Dataset, ReprMixin):
                 **{r: False for r in unlabeled_recs},
             }
 
-        self._patch_size: int = int(self.config.patch_size)
+        _ps = self.config.get("patch_shape", self.config.patch_size)
+        self._patch_shape: Tuple[int, int, int] = (_ps, _ps, _ps) if isinstance(_ps, int) else tuple(_ps)
+        self._patch_size: int = int(self._patch_shape[0])  # legacy compat
         self._fg_bias: float = float(self.config.get("fg_bias", 0.5))
         # Class-aware patch sampling: [random, LA, PV, LAA] probs; None = use fg_bias
         self._class_sampling_probs = self.config.get("class_sampling_probs", None)
@@ -508,7 +510,7 @@ class CARE2026_CT_Dataset(Dataset, ReprMixin):
 
         image, mask = self._get_preprocessed(rec)
 
-        ps = self._patch_size
+        ps = self._patch_shape
         if self.training:
             aug_cfg = self.config.get("augmentation", None)
             if self._class_sampling_probs is not None and mask is not None:
@@ -520,7 +522,7 @@ class CARE2026_CT_Dataset(Dataset, ReprMixin):
             image_patch, mask_patch = _center_patch(image, mask, ps)
 
         out: Dict = {
-            "image": image_patch[np.newaxis].astype(np.float32),  # (1, ps, ps, ps)
+            "image": image_patch[np.newaxis].astype(np.float32),  # (1, *ps)
             "is_labeled": is_labeled,
             "record": rec,
         }
@@ -551,7 +553,16 @@ class CARE2026_CT_Dataset(Dataset, ReprMixin):
         norm_cfg = self.config.get("normalization", {})
         mode = str(norm_cfg.get("mode", "minmax"))
 
-        if mode == "percentile":
+        if mode == "nnunet":
+            # nnUNet CTNormalization: clip to global foreground percentiles,
+            # then z-score with global training-set stats.
+            clip_min = float(norm_cfg.get("global_clip_min", 1122.0))
+            clip_max = float(norm_cfg.get("global_clip_max", 2018.0))
+            global_mean = float(norm_cfg.get("global_mean", 1542.61))
+            global_std = float(norm_cfg.get("global_std", 188.64))
+            image = np.clip(image, clip_min, clip_max)
+            image = (image - global_mean) / max(global_std, 1e-8)
+        elif mode == "percentile":
             p_low = float(norm_cfg.get("p_low", 0.5))
             p_high = float(norm_cfg.get("p_high", 99.5))
             v_low = float(np.percentile(image, p_low))
@@ -571,9 +582,9 @@ class CARE2026_CT_Dataset(Dataset, ReprMixin):
             image = np.clip(image, hu_min, hu_max)
             image = (image - hu_min) / (hu_max - hu_min)
 
-        # Compute target shape for isotropic resampling
+        # Compute target shape (supports non-isotropic spacing from config)
         native_shape = np.array(image.shape[:3], dtype=np.float64)
-        target_spacing = np.array(CT_TARGET_SPACING, dtype=np.float64)
+        target_spacing = np.array(self.config.get("target_spacing", CT_TARGET_SPACING), dtype=np.float64)
         target_shape = tuple(int(np.round(native_shape[i] * zooms[i] / target_spacing[i])) for i in range(3))
 
         image = CARE2026_CT.resample_data(image, target_shape)
@@ -598,11 +609,14 @@ class CARE2026_CT_Dataset(Dataset, ReprMixin):
 def _pad_to_size(
     image: np.ndarray,
     mask: Optional[np.ndarray],
-    ps: int,
+    ps: Union[int, Sequence[int]],
 ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
-    """Zero-pad *image* (and *mask*) to ``ps × ps × ps`` if any dim is smaller."""
+    """Zero-pad *image* (and *mask*) to ``ps`` if any dim is smaller."""
+    if isinstance(ps, int):
+        ps = (ps, ps, ps)
+    ph, pw, pd = ps
     H, W, D = image.shape[:3]
-    pad = [(0, max(ps - H, 0)), (0, max(ps - W, 0)), (0, max(ps - D, 0))]
+    pad = [(0, max(ph - H, 0)), (0, max(pw - W, 0)), (0, max(pd - D, 0))]
     if any(p[1] > 0 for p in pad):
         image = np.pad(image, pad, mode="constant", constant_values=0.0)
         if mask is not None:
@@ -775,10 +789,13 @@ def _crop_hw_train(
 def _random_patch(
     image: np.ndarray,
     mask: Optional[np.ndarray],
-    ps: int,
+    ps: Union[int, Sequence[int]],
     fg_bias: float = 0.5,
 ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
-    """Extract a random ``ps³`` patch with foreground-biased centre sampling."""
+    """Extract a random patch with foreground-biased centre sampling."""
+    if isinstance(ps, int):
+        ps = (ps, ps, ps)
+    ph, pw, pd = ps
     H, W, D = image.shape[:3]
     rng = np.random.default_rng()
 
@@ -788,10 +805,10 @@ def _random_patch(
     else:
         centre = np.array([rng.integers(max(H, 1)), rng.integers(max(W, 1)), rng.integers(max(D, 1))])
 
-    starts = np.array([np.clip(int(centre[i]) - ps // 2, 0, max(image.shape[i] - ps, 0)) for i in range(3)])
+    starts = np.array([np.clip(int(centre[i]) - ps[i] // 2, 0, max(image.shape[i] - ps[i], 0)) for i in range(3)])
     x0, y0, z0 = starts
-    img_patch = image[x0 : x0 + ps, y0 : y0 + ps, z0 : z0 + ps]
-    msk_patch = mask[x0 : x0 + ps, y0 : y0 + ps, z0 : z0 + ps] if mask is not None else None
+    img_patch = image[x0 : x0 + ph, y0 : y0 + pw, z0 : z0 + pd]
+    msk_patch = mask[x0 : x0 + ph, y0 : y0 + pw, z0 : z0 + pd] if mask is not None else None
 
     img_patch, msk_patch = _pad_to_size(img_patch, msk_patch, ps)
     return img_patch, msk_patch
@@ -800,37 +817,34 @@ def _random_patch(
 def _class_aware_patch(
     image: np.ndarray,
     mask: np.ndarray,
-    ps: int,
+    ps: Union[int, Sequence[int]],
     probs: list,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Extract a ``ps³`` patch with per-class centre sampling.
+    """Extract a patch with per-class centre sampling.
 
     ``probs = [p_random, p_LA, p_PV, p_LAA]``, sum to 1.0.
-    Guarantees that thin structures (PV, LAA) get adequate exposure
-    regardless of their small volume fraction.
     """
+    if isinstance(ps, int):
+        ps = (ps, ps, ps)
+    ph, pw, pd = ps
     H, W, D = image.shape[:3]
     rng = np.random.default_rng()
 
     choice = rng.choice(4, p=probs)
     if choice == 0:
-        # Random
         centre = np.array([rng.integers(max(H, 1)), rng.integers(max(W, 1)), rng.integers(max(D, 1))])
     else:
-        # Class 1=LA, 2=PV, 3=LAA
         class_mask = mask == choice
         if class_mask.sum() == 0:
-            # Fall back to random if class is absent
             centre = np.array([rng.integers(max(H, 1)), rng.integers(max(W, 1)), rng.integers(max(D, 1))])
         else:
             coords = np.argwhere(class_mask)
             centre = coords[rng.integers(len(coords))]
 
-    starts = np.array([np.clip(int(centre[i]) - ps // 2, 0, max(image.shape[i] - ps, 0)) for i in range(3)])
+    starts = np.array([np.clip(int(centre[i]) - ps[i] // 2, 0, max(image.shape[i] - ps[i], 0)) for i in range(3)])
     x0, y0, z0 = starts
-    img_patch = image[x0 : x0 + ps, y0 : y0 + ps, z0 : z0 + ps]
-    msk_patch = mask[x0 : x0 + ps, y0 : y0 + ps, z0 : z0 + ps]
-
+    img_patch = image[x0 : x0 + ph, y0 : y0 + pw, z0 : z0 + pd]
+    msk_patch = mask[x0 : x0 + ph, y0 : y0 + pw, z0 : z0 + pd]
     img_patch, msk_patch = _pad_to_size(img_patch, msk_patch, ps)
     return img_patch, msk_patch
 
@@ -838,13 +852,16 @@ def _class_aware_patch(
 def _center_patch(
     image: np.ndarray,
     mask: Optional[np.ndarray],
-    ps: int,
+    ps: Union[int, Sequence[int]],
 ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
-    """Extract the centre crop of size ``ps³`` (used for validation)."""
+    """Extract centre crop of size *ps* (used for validation)."""
+    if isinstance(ps, int):
+        ps = (ps, ps, ps)
+    ph, pw, pd = ps
     H, W, D = image.shape[:3]
-    x0, y0, z0 = max((H - ps) // 2, 0), max((W - ps) // 2, 0), max((D - ps) // 2, 0)
-    img_patch = image[x0 : x0 + ps, y0 : y0 + ps, z0 : z0 + ps]
-    msk_patch = mask[x0 : x0 + ps, y0 : y0 + ps, z0 : z0 + ps] if mask is not None else None
+    x0, y0, z0 = max((H - ph) // 2, 0), max((W - pw) // 2, 0), max((D - pd) // 2, 0)
+    img_patch = image[x0 : x0 + ph, y0 : y0 + pw, z0 : z0 + pd]
+    msk_patch = mask[x0 : x0 + ph, y0 : y0 + pw, z0 : z0 + pd] if mask is not None else None
     img_patch, msk_patch = _pad_to_size(img_patch, msk_patch, ps)
     return img_patch, msk_patch
 
