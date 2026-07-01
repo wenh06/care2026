@@ -123,7 +123,8 @@ MRI_Stage2_TrainCfg = deepcopy(BaseCfg)
 
 MRI_Stage2_TrainCfg.task = "mri"
 MRI_Stage2_TrainCfg.stage = 2
-MRI_Stage2_TrainCfg.backbone = "vnet_stage2"  # "vnet_stage2" | "nested_vnet_stage2" (use --backbone nested_vnet)
+# MRI_Stage2_TrainCfg.backbone = "vnet_stage2"
+MRI_Stage2_TrainCfg.backbone = "vnet_stage2_2ch"  # "vnet_stage2" | "nested_vnet_stage2" | "vnet_stage2_2ch"
 
 # Volume shape: canonical → crop centred on LA centroid → resize to 128×128×44
 MRI_Stage2_TrainCfg.canonical_shape = MRI_CANONICAL_SHAPE
@@ -251,7 +252,7 @@ CT_TrainCfg.augmentation = CFG(
 # CT_TrainCfg.semi_supervised_mode = "supervised"
 CT_TrainCfg.semi_supervised_mode = "mean_teacher"
 # Warm-up: run pure supervised first, then ramp up MT consistency
-CT_TrainCfg.mt_warmup_epochs = 300  # 0 = no warmup
+CT_TrainCfg.mt_warmup_epochs = 400  # 0 = no warmup
 CT_TrainCfg.mt_rampup_epochs = 100  # ramp-up duration *after* warmup
 # Legacy key (used by trainer._get_cps_weight):
 CT_TrainCfg.consistency_rampup_epochs = CT_TrainCfg.mt_rampup_epochs
@@ -274,9 +275,9 @@ CT_TrainCfg.loss_weights = CFG(
     tversky_gamma=0.75,
     sup_ce=0.0,  # set >0 to add CE with class weights
     sup_boundary=0.1,  # set >0 to enable HausdorffERLoss (PV/LAA boundary precision)
-    sup_clce=0.0,  # set >0 to enable CenterlineCELoss (PV topology preservation)
-    clce_start_epoch=0,  # delay clCE until this epoch (0 = from start; try 100)
-    clce_classes=None,  # None = all classes; e.g. [2] for PV-only topology supervision
+    sup_clce=0.2,  # set >0 to enable CenterlineCELoss (PV topology preservation)
+    clce_start_epoch=100,  # delay clCE until this epoch (0 = from start; try 100)
+    clce_classes=[2],  # None = all classes; e.g. [2] for PV-only topology supervision
     cps=1.0,
     ce_class_weight=[0.2, 1.0, 6.0, 2.0],  # [bg, LA, PV, LAA]
 )
@@ -422,6 +423,54 @@ ModelCfg.vnet_stage2 = CFG(
 
 ModelCfg.vnet_stage2_l = CFG(
     in_channels=1,
+    num_classes=2,
+    norm="instance",
+    activation="mish",
+    use_eca_skip=False,
+    input_conv=CFG(channels=16, kernel_size=5),
+    down_conv=CFG(
+        channels=[32, 64, 128, 256],
+        kernel_size=[3, 3, 3, 3],
+        blocks=[1, 2, 2, 2],
+        dropout=[0.0, 0.0, 0.3, 0.3],
+    ),
+    up_conv=CFG(
+        channels=[256, 128, 64, 32],
+        kernel_size=[3, 3, 3, 3],
+        blocks=[2, 2, 1, 1],
+        dropout=[0.0, 0.0, 0.0, 0.0],
+    ),
+    output_conv=CFG(kernel_size=1),
+    bottleneck_transformer=None,
+)
+
+# -- VNet for MRI Stage 2 with anatomical prior channel (distance transform) -----
+
+ModelCfg.vnet_stage2_2ch = CFG(
+    in_channels=2,
+    num_classes=2,
+    norm="instance",
+    activation="mish",
+    use_eca_skip=False,
+    input_conv=CFG(channels=16, kernel_size=5),
+    down_conv=CFG(
+        channels=[32, 64, 128, 256],
+        kernel_size=[3, 3, 3, 3],
+        dropout=[0.0, 0.0, 0.3, 0.3],
+    ),
+    up_conv=CFG(
+        channels=[128, 64, 32, 16],
+        kernel_size=[3, 3, 3, 3],
+        dropout=[0.0, 0.0, 0.0, 0.0],
+    ),
+    output_conv=CFG(kernel_size=1),
+    bottleneck_transformer=None,
+)
+
+# -- Large VNet 2ch -------------------------------------------------------------
+
+ModelCfg.vnet_stage2_2ch_l = CFG(
+    in_channels=2,
     num_classes=2,
     norm="instance",
     activation="mish",

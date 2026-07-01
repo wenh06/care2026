@@ -142,6 +142,7 @@ class CARE2026_MRI_Stage2_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
             "nested_vnet": "nested_vnet_stage2",
             "vnet_l": "vnet_stage2_l",
             "nested_vnet_l": "nested_vnet_stage2_l",
+            "vnet_2ch_l": "vnet_stage2_2ch_l",
         }
         backbone = _mri_backbone_map.get(backbone, backbone)
         self.__config["backbone"] = backbone

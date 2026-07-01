@@ -319,7 +319,7 @@ def predict_mri_two_stage(
     apply_mclahe: Optional[bool] = None,
     centroid: Optional[Tuple[int, int, int]] = None,
     s1_threshold: float = 0.5,
-    s2_threshold: float = 0.5,
+    s2_threshold: float = 0.7,
     canonical_shape: Optional[Tuple[int, int, int]] = None,
     stage1_shape: Optional[Tuple[int, int, int]] = None,
     stage2_crop_shape: Optional[Tuple[int, int, int]] = None,
@@ -411,8 +411,26 @@ def predict_mri_two_stage(
 
     crop_h, crop_w, crop_d = crop.shape
     img_s2_norm = _zscore(crop)
-    img_s2_resized = _resample_3d(img_s2_norm, (s2_hw, s2_hw, crop_d))
-    t_s2 = torch.from_numpy(img_s2_resized).unsqueeze(0).unsqueeze(0)
+
+    # If model expects 2-channel input, generate SDF from Stage-1 LA mask
+    use_sdf = "2ch" in str(cfg2.get("backbone", ""))
+    if use_sdf:
+        from scipy.ndimage import distance_transform_edt
+
+        la_crop = la_s1_canonical[xs:xe, ys:ye, zs:ze]
+        if any(p > 0 for p in [px0, px1, py0, py1, pz0, pz1]):
+            la_crop = np.pad(la_crop, ((px0, px1), (py0, py1), (pz0, pz1)), mode="constant", constant_values=0.0)
+        sdf_out = distance_transform_edt(1 - la_crop)
+        sdf_in = distance_transform_edt(la_crop)
+        sdf = np.clip((sdf_out - sdf_in).astype(np.float32) * 0.625 / 4.0, -1.0, 1.0)
+        sdf_resized = _resample_3d(sdf, (s2_hw, s2_hw, crop_d))
+        img_s2_resized = _resample_3d(img_s2_norm, (s2_hw, s2_hw, crop_d))
+        # Stack as 2 channels: (2, H, W, D)
+        img_2ch = np.stack([img_s2_resized, sdf_resized], axis=0)
+        t_s2 = torch.from_numpy(img_2ch).unsqueeze(0)  # (1, 2, H, W, D)
+    else:
+        img_s2_resized = _resample_3d(img_s2_norm, (s2_hw, s2_hw, crop_d))
+        t_s2 = torch.from_numpy(img_s2_resized).unsqueeze(0).unsqueeze(0)
 
     stage2_model.eval()
     with torch.no_grad():

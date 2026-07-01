@@ -14,7 +14,7 @@ from typing import Dict, List, Optional, Tuple, Union
 import nibabel as nib
 import numpy as np
 import torch
-from scipy.ndimage import gaussian_filter
+from scipy.ndimage import distance_transform_edt, gaussian_filter
 from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset
 from torch_ecg.cfg import CFG
@@ -269,6 +269,7 @@ class CARE2026_MRI_Stage2_Dataset(Dataset, ReprMixin):
         self._cache_shape = tuple(self.config.get("cache_shape", MRI_STAGE2_CACHE_SHAPE))
         self._crop_shape = tuple(self.config.get("patch_shape", MRI_STAGE2_CROP_SHAPE))
         self._jitter = tuple(self.config.get("centroid_jitter", MRI_STAGE2_CENTROID_JITTER))
+        self._use_sdf = "2ch" in str(self.config.get("backbone", ""))
 
         n = len(self._indices)
         self._cache_image = np.zeros((n, 1, *self._cache_shape), dtype=np.float32)
@@ -378,6 +379,13 @@ class CARE2026_MRI_Stage2_Dataset(Dataset, ReprMixin):
                 jitter=[0, 0, 0],
                 crop_shape=self._crop_shape,
             )
+
+        if self._use_sdf:
+            # Generate signed distance field from LA mask as 2nd channel.
+            # Negative inside cavity, positive outside, zero at wall.
+            sdf = _la_sdf_channel(la_mask)
+            sdf = sdf.astype(np.float32)[np.newaxis]  # (1, H, W, D)
+            image = np.concatenate([image, sdf], axis=0)  # (2, H, W, D)
 
         return {
             "image": image,
@@ -600,6 +608,21 @@ def _pad_to_size(
         if mask is not None:
             mask = np.pad(mask, pad, mode="constant", constant_values=0)
     return image, mask
+
+
+def _la_sdf_channel(la_mask: np.ndarray, wall_mm: float = 4.0, spacing: float = 0.625) -> np.ndarray:
+    """Generate signed distance field from LA cavity mask as anatomical prior.
+
+    Negative inside the cavity (blood pool), positive outside,
+    roughly zero at the wall.  Clip and normalise to [-wall_mm, +wall_mm].
+    """
+    # Signed distance: positive outside, negative inside
+    sdf_out = distance_transform_edt(1 - la_mask)
+    sdf_in = distance_transform_edt(la_mask)
+    sdf = (sdf_out - sdf_in).astype(np.float32) * spacing
+    # Clip to the relevant wall region
+    sdf = np.clip(sdf, -wall_mm, wall_mm) / wall_mm
+    return sdf
 
 
 def _centroid_crop(
