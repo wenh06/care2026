@@ -489,6 +489,30 @@ gain over the 200-epoch MT baseline (0.4655 → 0.5234) is attributable
 to extended training (+100 epochs).  Planned: re-run with the new
 8-method configurable augmentations enabled.
 
+#### 6.3.5 nnUNet CT Breakthrough (2026-07-01)
+
+nnUNet (6-stage PlainConvUNet, 30.6M params) achieves full-volume val
+**Dice 0.945** (LA 0.976, PV 0.931, LAA 0.926) on the 50 labeled CTs,
+dramatically exceeding our VNet-based pipeline (best: 0.81 with
+pretrained encoder, 0.52 without).
+
+Root causes of VNet underperformance identified:
+- **Model capacity**: VNet 6.9M params vs nnUNet 30.6M — 4-5× gap.
+- **Architecture depth**: 4 encoder stages vs nnUNet's 6; nnUNet's last
+  stride [1,1,2] preserves XY resolution.
+- **Deep supervision**: nnUNet always uses it; we disabled it for CT.
+- **Training recipe**: SGD + polyLR 1000 epochs, 5-fold CV, EMA inference.
+
+Two paths forward:
+- `CARE2026_CT_nnUNet`: wraps nnUNetPredictor for inference-only use.
+  Axis transpose nibabel(x,y,z) ↔ nnUNet(z,y,x) is critical.
+- `CARE2026_CT_MT_nnUNet`: Mean Teacher with PlainConvUNet backbone,
+  nnUNet pretrained weights as student initialization, 100 unlabeled
+  CTs for consistency loss.  Patch [112,112,192], nnUNet normalization.
+
+Self-training script (`scripts/self_train_nnunet.py`): N-fold ensemble
+pseudo-labels on 100 unlabeled CTs → retrain nnUNet on 150 cases.
+
 ### 6.4 Validation & Submission
 
 MRI models ready (Stage 1 + Stage 2 both with CLAHE variants). CT model iterating
@@ -583,6 +607,7 @@ Local metrics to track:
 10. **5-fold CV + ensemble** (Phase 8).
 11. **MRI S2 backbone expansion**: added vnet_l and nested_vnet_l with blocks support.  Deep supervision identified as NestedVNet training blocker — disabled by default.
 12. **CT**: pretrained encoder + MT → 0.81 val (e800).  PV/LAA trade-off — ensemble script available.
+13. **nnUNet CT**: PlainConvUNet 30.6M → full-volume Dice 0.945 (LA 0.976, PV 0.931, LAA 0.926).  Wrappers: CARE2026_CT_nnUNet (inference), CARE2026_CT_MT_nnUNet (Mean Teacher).  Self-training script ready.  Blocked on fold 1-4 training completion.
 
 ---
 

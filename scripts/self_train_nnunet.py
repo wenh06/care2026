@@ -1,14 +1,8 @@
-"""Self-training pipeline: nnUNet 5-fold ensemble → pseudo-labels → retrain.
+"""Self-training: nnUNet N-fold ensemble → pseudo-labels → retrain.
 
-1. 5-fold ensemble inference on 100 unlabeled CTs → pseudo-labels
+1. N-fold ensemble inference on 100 unlabeled CTs → pseudo-labels
 2. Convert to nnUNet v2 format with 150 labeled cases (50 GT + 100 pseudo)
-3. Print nnUNet training command for AutoDL
-
-Usage:
-    python scripts/self_train_nnunet.py \
-        --db-dir /Data1/wenh06/CARE2026-LeftAtrium \
-        --nnunet-dir checkpoints/nnUNet_results/Dataset500_CARE2026CT/nnUNetTrainer__nnUNetPlans__3d_fullres \
-        --dataset-id 501
+3. Print nnUNet training commands
 """
 
 import argparse
@@ -23,6 +17,10 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+NNUNET_RAW_DEFAULT = "tmp/nnUNet_raw"
+NNUNET_PREPROCESSED_DEFAULT = "tmp/nnUNet_preprocessed"
+NNUNET_RESULTS_DEFAULT = "checkpoints/nnUNet_results"
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -32,6 +30,15 @@ def main():
         required=True,
         help="nnUNet training output (contains fold_0/..fold_4/, plans.json, dataset.json)",
     )
+    parser.add_argument("--nnunet-raw", default=NNUNET_RAW_DEFAULT, help="nnUNet_raw dir for output dataset")
+    parser.add_argument("--nnunet-preprocessed", default=NNUNET_PREPROCESSED_DEFAULT, help="For printed commands only")
+    parser.add_argument("--nnunet-results", default=NNUNET_RESULTS_DEFAULT, help="For printed commands only")
+    parser.add_argument(
+        "--folds",
+        type=str,
+        default="0,1,2,3,4",
+        help="Comma-separated folds to ensemble, e.g. '0' for single-fold pseudo-labels",
+    )
     parser.add_argument("--dataset-id", type=int, default=501, help="New nnUNet dataset ID for 150-case training")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--checkpoint", default="checkpoint_best.pth")
@@ -39,7 +46,7 @@ def main():
 
     db_dir = Path(args.db_dir)
     ct_dir = db_dir / "cardiac anatomy segmentation（CT）" / "train_data"
-    nnunet_raw = Path(os.environ.get("nnUNet_raw", "tmp/nnUNet_raw"))
+    nnunet_raw = Path(args.nnunet_raw)
 
     # ── Step 1: Collect labeled and unlabeled cases ────────────────────
     labeled_cases = []
@@ -73,9 +80,10 @@ def main():
         verbose_preprocessing=False,
         allow_tqdm=True,
     )
+    use_folds = tuple(int(f.strip()) for f in args.folds.split(","))
     predictor.initialize_from_trained_model_folder(
         args.nnunet_dir,
-        use_folds=(0, 1, 2, 3, 4),  # 5-fold ensemble
+        use_folds=use_folds,
         checkpoint_name=args.checkpoint,
     )
 
@@ -86,7 +94,7 @@ def main():
         zooms = tuple(nii.header.get_zooms()[:3])
         spacing = (float(zooms[2]), float(zooms[1]), float(zooms[0]))
 
-        # Axis transpose for nnUNet: (x,y,z) → (z,y,x)
+        # Axis transpose for nnUNet: (x,y,z) -> (z,y,x)
         img_t = np.transpose(img, (2, 1, 0))
         ret = predictor.predict_from_list_of_npy_arrays(
             image_or_list_of_images=img_t[None].astype(np.float32),
@@ -136,13 +144,15 @@ def main():
     with open(out_dir / "dataset.json", "w") as f:
         json.dump(dataset_json, f, indent=2)
 
-    nnunet_preprocessed = os.environ.get("nnUNet_preprocessed", "tmp/nnUNet_preprocessed")
-    nnunet_results = os.environ.get("nnUNet_results", "checkpoints/nnUNet_results")
+    # ── Step 4: Print commands ───────────────────────────────────────
+    raw = args.nnunet_raw
+    preproc = args.nnunet_preprocessed
+    results = args.nnunet_results
     print(f"\nCreated {out_dir} ({n_linked} training cases)")
-    print("\nNext steps on AutoDL:")
-    print(f"  export nnUNet_raw='{nnunet_raw}'")
-    print(f"  export nnUNet_preprocessed='{nnunet_preprocessed}'")
-    print(f"  export nnUNet_results='{nnunet_results}'")
+    print("\nRun the following after setting env vars:")
+    print(f"  export nnUNet_raw='{raw}'")
+    print(f"  export nnUNet_preprocessed='{preproc}'")
+    print(f"  export nnUNet_results='{results}'")
     print(f"  nnUNetv2_plan_and_preprocess -d {args.dataset_id:03d} --verify_dataset_integrity")
     print(f"  nnUNetv2_train {args.dataset_id:03d} 3d_fullres 0  # repeat for folds 1-4")
 
