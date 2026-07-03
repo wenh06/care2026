@@ -190,6 +190,13 @@ def main():
     )
     args = parser.parse_args()
 
+    # MCLAHE variant uses +10 dataset ID to keep non-MCLAHE data intact
+    if args.mclahe:
+        if args.dataset_id_task1 == 501:
+            args.dataset_id_task1 = 511
+        if args.dataset_id_task2 == 502:
+            args.dataset_id_task2 = 512
+
     db_dir = Path(args.db_dir)
     task1_dir = db_dir / "LA scar quantification（MRI）" / "train_data"
     task2_dir = db_dir / "LA cavity segmentation（MRI）" / "train_data"
