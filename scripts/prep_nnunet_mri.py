@@ -243,8 +243,9 @@ def main():
         print(f"  imagesTr: {len(list(img_dir.glob('*_0000.nii.gz')))} files")
         print(f"  labelsTr: {len(list(lbl_dir.glob('*.nii.gz')))} files")
         print(f"  ({n_task1_cases} from Task 1 dir, {n_total - n_task1_cases} from Task 2 dir)")
-        print(f"\nNext: nnUNetv2_plan_and_preprocess -d {args.dataset_id_task2:03d} --verify_dataset_integrity")
-        print(f"Then: nnUNetv2_train {args.dataset_id_task2:03d} 3d_fullres 0")
+        print(f"\nNext: nnUNetv2_plan_and_preprocess -d {args.dataset_id_task2:03d} --verify_dataset_integrity -c 3d_fullres")
+        print(f"Train single fold: nnUNetv2_train {args.dataset_id_task2:03d} 3d_fullres 0")
+        print(f"Train all folds  : for f in 0 1 2 3 4; do nnUNetv2_train {args.dataset_id_task2:03d} 3d_fullres $f; done")
 
     # ------------------------------------------------------------------
     # Dataset 501 — LA scar segmentation (Task 1): 60 cropped cases
@@ -326,8 +327,9 @@ def main():
         print(f"  Scar cases: {n_scar_cases}")
         if no_scar_cases:
             print(f"  No-scar cases: {len(no_scar_cases)} (sampled {args.no_scar_proportion:.0%} from Task 2 dir)")
-        print(f"\nNext: nnUNetv2_plan_and_preprocess -d {args.dataset_id_task1:03d} --verify_dataset_integrity")
-        print(f"Then: nnUNetv2_train {args.dataset_id_task1:03d} 3d_fullres 0")
+        print(f"\nNext: nnUNetv2_plan_and_preprocess -d {args.dataset_id_task1:03d} --verify_dataset_integrity -c 3d_fullres")
+        print(f"Train single fold: nnUNetv2_train {args.dataset_id_task1:03d} 3d_fullres 0")
+        print(f"Train all folds  : for f in 0 1 2 3 4; do nnUNetv2_train {args.dataset_id_task1:03d} 3d_fullres $f; done")
 
 
 if __name__ == "__main__":

@@ -69,8 +69,9 @@ def main():
     print(f"Created {out_dir}")
     print(f"  imagesTr: {len(list(img_dir.glob('*.nii.gz')))} files")
     print(f"  labelsTr: {len(list(lbl_dir.glob('*.nii.gz')))} files")
-    print(f"\nNext: nnUNetv2_plan_and_preprocess -d {args.dataset_id:03d} --verify_dataset_integrity")
-    print(f"Then: nnUNetv2_train {args.dataset_id:03d} 3d_fullres 0")
+    print(f"\nNext: nnUNetv2_plan_and_preprocess -d {args.dataset_id:03d} --verify_dataset_integrity -c 3d_fullres")
+    print(f"Train single fold: nnUNetv2_train {args.dataset_id:03d} 3d_fullres 0")
+    print(f"Train all folds  : for f in 0 1 2 3 4; do nnUNetv2_train {args.dataset_id:03d} 3d_fullres $f; done")
 
 
 if __name__ == "__main__":
