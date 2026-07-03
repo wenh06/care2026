@@ -350,7 +350,7 @@ Input: 144×144×44, batch_size=4.  Trained to epoch 100; checkpoint at `checkpo
 
 **CLAHE variant** also trained: `log/mri1_mclahe_train.log`, same architecture but with MCLAHE preprocessing enabled.
 
-### 6.2 MRI Stage 2 — Scar-Only Segmenter — ⏳ Needs retraining
+### 6.2 MRI Stage 2 — Scar-Only Segmenter — 🔄 Iterating
 
 ```bash
 PYTORCH_ALLOC_CONF=expandable_segments:True \
@@ -363,6 +363,22 @@ Input: 128×128×44 (resized from 256×256×44 crop), batch_size=4, AMP.
 ScarLoss with spatial weight map (w₀=5, σ=2 mm).  LA cavity from Stage 1.
 ``no_scar_proportion=0.3`` keeps ~35/130 Task-2 (no-scar) records as hard
 negatives; the ScarLoss penalises false scar predictions on these samples.
+
+**Backbone experiments (all with SGD+polyLR, CLAHE):**
+
+| Backbone | Epochs | In Channels | Task 1 G-DSC | Notes |
+|----------|--------|------------|-------------|-------|
+| `vnet_stage2` | 300 | 1 (MRI only) | **0.2189** | current best |
+| `vnet_stage2_2ch` | 600 | 2 (MRI+SDF) | 0.1882 | −3.1pp vs baseline; rolled back |
+| `vnet_stage2_l` | — | 1 | — | underperformed baseline |
+| `nested_vnet_stage2` | — | 1 | — | underperformed baseline; deep sup disabled |
+| `nested_vnet_stage2_l` | — | 1 | — | underperformed baseline |
+
+Conclusion: larger/wider backbones and 2ch SDF channel hurt Task 1 G-DSC.
+The original ``vnet_stage2`` (single-channel, 16→32→64→128→256, 6.9M params)
+with ScarLoss + SGD 300ep remains the best.  Switching to **nnUNet for MRI**
+is the most promising next direction — the 6-stage ResEnc UNet with built-in
+deep supervision may close the capacity gap without manual architecture tuning.
 
 ### 6.3 CT Semi-Supervised (Task 3) — 🔄 Iterating
 
@@ -580,34 +596,71 @@ Local metrics to track:
 
 - [x] Implement `post_docker_build.py`: cache trained weights from cloud storage (stub ready; needs cloud URLs).
 - [x] Set up Docker CI (`docker-test.yml` with `status: pre`).
-- [ ] Run full training (MRI: ≥ 400 epochs, CT: ≥ 400 epochs); save best checkpoints.
-  - Development runs: MRI Stage 1 (100 epochs) ✅, MRI Stage 2 (150 epochs) ✅; CT (200 epochs) ⏳.
-  - Final submission runs: 400+ epochs with 5-fold CV.
+- [x] CT model trained: nnUNet 5-fold ensemble → Task 3 DSC **0.9495** (validation leaderboard).
+- [x] MRI model trained: Stage 1 (SGD 300ep, CLAHE), Stage 2 vnet_stage2 1ch (SGD 300ep, CLAHE).
+- [x] Submit all-task validation predictions to official evaluation platform (Tasks 1, 2, 3).
+- [ ] MRI improvement: nnUNet for Task 1 & 2 (see Immediate Next Steps #13).
 - [ ] End-to-end inference smoke test inside Docker container.
-- [ ] Submit MRI validation predictions (Tasks 1 & 2) to official evaluation platform.
 - [ ] Set `status: alpha` in `docker-test.yml`; enable dataset download step.
-- [ ] Train CT model and submit Task 3 predictions.
 - [ ] Set `status: final` for final submission.
+- [ ] Upload final submission zip before **2026-07-10** deadline.
 
 ---
 
+## Online Validation Leaderboard (official evaluation platform)
+
+### Task 1 (LA scar quantification) — G-DSC / ACC / SEN
+
+| # | Time | G-DSC | ACC | SEN | Model |
+|---|------|-------|-----|-----|-------|
+| 1 | 2026-06-25 20:02 | 0.2092 | 0.5997 | 0.1997 | vnet_stage2 (1ch), SGD 300ep, CLAHE |
+| 2 | 2026-06-29 18:58 | **0.2189** | 0.6041 | 0.2085 | vnet_stage2 (1ch), SGD 300ep, CLAHE, thresh=0.7 |
+| 3 | 2026-07-01 22:40 | 0.1882 | 0.5766 | 0.1533 | vnet_stage2_2ch (MRI+SDF), SGD 600ep, CLAHE |
+
+### Task 2 (LA cavity segmentation) — DSC / HD (mm)
+
+| # | Time | DSC | HD | Model |
+|---|------|-----|----|-------|
+| 1 | 2026-06-25 20:02 | 0.8538 | 21.9227 | vnet_stage1, SGD 300ep |
+| 2 | 2026-06-29 18:58 | **0.8602** | **18.4552** | vnet_stage1, SGD 300ep, CLAHE |
+| 3 | 2026-07-01 22:40 | 0.8602 | 18.4552 | same as #2 (Stage 1 unchanged) |
+
+### Task 3 (LA multi-structure segmentation) — DSC / HD (mm)
+
+| # | Time | DSC | HD | Model |
+|---|------|-----|----|-------|
+| 1 | 2026-06-25 20:02 | 0.4637 | 51.8558 | VNet (BN+ReLU, 6.9M), MT, SGD 300ep |
+| 2 | 2026-06-27 22:03 | 0.6788 | 43.8951 | VNet + nnUNet pretrained enc, MT, SGD 800ep |
+| 3 | 2026-06-29 18:58 | 0.7511 | 37.953 | nnUNet PlainConvUNet (30.6M), fold_0 only, ep974 |
+| 4 | 2026-07-01 22:40 | **0.9495** | **17.9575** | nnUNet PlainConvUNet, 5-fold ensemble |
+
+---
 ## Immediate Next Steps
 
-1. ~~**Train MRI Stage 1**~~ ✅ Done — checkpoint: `checkpoints/mri_stage1_model.safetensors` (also CLAHE variant trained).
-2. ~~**Train MRI Stage 2**~~ ✅ Done — checkpoint: `checkpoints/mri_stage2_model.safetensors` (also CLAHE variant trained; epoch snapshots 147–149 retained).
-3. ~~**MRI post-processing**~~ ✅ Done — `postprocess_mri_masks()` (scar constrained within dilated LA cavity; largest connected component).
-4. ~~**CT post-processing**~~ ✅ Done — `postprocess_ct_mask()` (per-class largest connected component).
-5. ~~**CLAHE ablation**~~ ✅ Done — MCLAHE wired into dataset (config flag `apply_mclahe`); auto-detected at inference time.
-6. ~~**CT baseline training**~~ ✅ Done — CPS baseline + class weights + Mean Teacher all trained; MT best (0.5234 mean Dice).  V1 diagnostic (2026-06-24) identified BatchNorm + SGD + PV weight as root causes of poor performance.
-7. ~~**CT V2 experiments**~~ ✅ Done — IN+Mish+AdamW underperforms BN+ReLU+SGD in all settings (0.47 vs 0.52); config rolled back to V1 best.  Two-stage coarse-to-fine ruled out (CT structures too dispersed, bbox spans 80% of volume).
-8. **CT improvement round** — loss overhaul + sampling done, training NestedVNet:
-   - (1)–(6) implemented, (7) training.  V2 confirmed worse, `--ct-model` default restored to v1.
-   - Next experiment: enable warm-up=40 + class_sampling=[.15,.30,.35,.20] + clCE after epoch 100.
-9. **Run MRI validation inference** (Tasks 1 & 2).
-10. **5-fold CV + ensemble** (Phase 8).
-11. **MRI S2 backbone expansion**: added vnet_l and nested_vnet_l with blocks support.  Deep supervision identified as NestedVNet training blocker — disabled by default.
-12. **CT**: pretrained encoder + MT → 0.81 val (e800).  PV/LAA trade-off — ensemble script available.
-13. **nnUNet CT**: PlainConvUNet 30.6M → full-volume Dice 0.945 (LA 0.976, PV 0.931, LAA 0.926).  Wrappers: CARE2026_CT_nnUNet (inference), CARE2026_CT_MT_nnUNet (Mean Teacher).  Self-training script ready.  Blocked on fold 1-4 training completion.
+1. ~~**Train MRI Stage 1**~~ ✅ Done — checkpoint: `checkpoints/mri_stage1_model.safetensors` (SGD 300ep, CLAHE).
+2. ~~**Train MRI Stage 2 (1ch)**~~ ✅ Done — checkpoint: `checkpoints/mri_stage2_model.safetensors` (SGD 300ep, CLAHE).  Task 1 G-DSC 0.2189.
+3. ~~**MRI S2 backbone expansion**~~ ✅ Done — vnet_l, nested_vnet, nested_vnet_l, vnet_stage2_2ch all tested.
+   - vnet_stage2_2ch (MRI+SDF, 600ep): G-DSC 0.1882, **worse than 1ch baseline** (−3.1 pp).  Rolled back.
+   - vnet_l, nested_vnet, nested_vnet_l: also underperformed vs baseline.
+4. ~~**MRI post-processing**~~ ✅ Done — `postprocess_mri_masks()` (scar constrained within dilated LA cavity; largest connected component).
+5. ~~**CT post-processing**~~ ✅ Done — `postprocess_ct_mask()` (per-class largest connected component); nnUNet Gaussian sliding window needs no extra postprocessing.
+6. ~~**CLAHE ablation**~~ ✅ Done — MCLAHE wired into dataset; auto-detected at inference time.
+7. ~~**CT baseline training**~~ ✅ Done — CPS + class weights + Mean Teacher; MT best (0.5234).  V1 diagnostic identified BN+SGD+PV weight as root causes.
+8. ~~**CT V2 experiments**~~ ✅ Done — IN+Mish+AdamW underperforms BN+ReLU+SGD; config rolled back.  Two-stage coarse-to-fine ruled out for CT.
+9. ~~**CT VNet improvement round**~~ ✅ Done — FocalTverskyLoss, BoundaryLoss, clCE, class sampling, percentile norm, pretrained encoder.
+10. ~~**nnUNet CT fold 0**~~ ✅ Done — AutoDL ep974, full-volume val Dice 0.945.
+11. ~~**nnUNet CT fold 1-4**~~ ✅ Done — 5-fold complete.  5-fold ensemble → Task 3 DSC **0.9495**, HD 17.96.
+12. ~~**MRI validation inference**~~ ✅ Done — Tasks 1 & 2 submitted to official evaluation platform.
+13. **nnUNet for MRI (Task 1 & 2)** — 🔴 High priority:
+    - nnUNetv2 is **modality-agnostic** (works for MRI as well as CT).  Key advantages: 6-stage ResEnc UNet (vs VNet's 4), self-configuring pipeline, deep supervision, built-in 5-fold CV, proven SGD+polyLR 1000ep recipe.
+    - Task 2 (LA cavity, 190 labeled): standard binary segmentation — should work out-of-the-box.
+    - Task 1 (scar, 60 labeled): extreme class imbalance.  nnUNet default DiceCELoss may need modification; can wrap `ScarLoss` into nnUNet trainer or use nnUNet's region-based training.  Two-stage approach still applicable: nnUNet Stage 1 for LA → crop → nnUNet Stage 2 for scar.
+    - Pipeline: `scripts/prep_nnunet_mri.py` → `nnUNetv2_plan_and_preprocess` → `nnUNetv2_train` → inference via `CARE2026_MRI_nnUNet` wrapper.
+14. **CT self-training** — 🟡 Medium: nnUNet 5-fold pseudo-labels on 100 unlabeled CTs → retrain nnUNet on 150 cases.
+15. **CT Mean Teacher (nnUNet backbone)** — 🟡 Medium: `CARE2026_CT_MT_nnUNet` already implemented; training pending.
+16. **Docker end-to-end test** — 🔴 High: confirm nnUNet deps (`nnunetv2`, `dynamic_network_architectures`) in image, run smoke test.
+17. **5-fold CV + ensemble for MRI** — if switching to nnUNet, this comes for free.
+18. **Task 2 domain shift** — Center B/C unseen data; consider histogram matching, TTA (already done), test-time BN adaptation.
 
 ---
 
