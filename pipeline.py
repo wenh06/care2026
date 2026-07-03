@@ -310,7 +310,13 @@ if __name__ == "__main__":
     from torch_ecg.utils.misc import str2bool
 
     from cfg import BaseCfg
-    from models import CARE2026_CT_Model, CARE2026_CT_nnUNet, CARE2026_MRI_Stage1_Model, CARE2026_MRI_Stage2_Model
+    from models import (
+        CARE2026_CT_Model,
+        CARE2026_CT_nnUNet,
+        CARE2026_MRI_nnUNet,
+        CARE2026_MRI_Stage1_Model,
+        CARE2026_MRI_Stage2_Model,
+    )
 
     parser = argparse.ArgumentParser(description="CARE2026 Left Atrium — end-to-end inference + submission packaging")
     parser.add_argument(
@@ -374,6 +380,12 @@ if __name__ == "__main__":
     parser.add_argument("--s1_threshold", type=float, default=0.5, help="Stage-1 LA cavity probability threshold.")
     parser.add_argument("--s2_threshold", type=float, default=0.7, help="Stage-2 scar probability threshold.")
     parser.add_argument("--ct_threshold", type=float, default=0.5, help="CT multi-class probability threshold.")
+    parser.add_argument(
+        "--mri-mclahe",
+        type=str2bool,
+        default=None,
+        help="Force MCLAHE on/off for MRI nnUNet models (default: auto-detect from VNet config, False for nnUNet).",
+    )
     args = parser.parse_args()
 
     # Resolve --input_dir / --output_dir, with backward compatibility for
@@ -405,33 +417,56 @@ if __name__ == "__main__":
     mri_stage1_model, mri_stage2_model, ct_model = None, None, None
 
     if 1 in tasks or 2 in tasks:
-        # Stage-1: try canonical name first, then fall back to BestModel_* glob
-        ckpt1 = model_dir / "mri_stage1_model.safetensors"
-        if not ckpt1.exists():
-            candidates = sorted(model_dir.glob("BestModel_*-mri1*.safetensors"), key=lambda p: p.stat().st_mtime)
-            if candidates:
-                ckpt1 = candidates[-1]
-        if ckpt1.exists():
-            mri_stage1_model, aux1 = CARE2026_MRI_Stage1_Model.from_checkpoint(str(ckpt1), device=device)
-            mri_stage1_model.train_config.update(aux1)
-            mri_stage1_model = mri_stage1_model.to(device).eval()
-            _print_model_config(mri_stage1_model, "MRI Stage-1", ckpt1)
-        else:
-            warnings.warn(f"MRI Stage-1 checkpoint not found in {model_dir}. Tasks 1 & 2 will be skipped.")
+        # Determine MCLAHE for nnUNet: CLI flag overrides; VNet reads from checkpoint
+        mri_mclahe = args.mri_mclahe
 
-        # Stage-2: try canonical name first, then fall back to BestModel_* glob
-        ckpt2 = model_dir / "mri_stage2_model.safetensors"
-        if not ckpt2.exists():
-            candidates = sorted(model_dir.glob("BestModel_*-mri2*.safetensors"), key=lambda p: p.stat().st_mtime)
-            if candidates:
-                ckpt2 = candidates[-1]
-        if ckpt2.exists():
-            mri_stage2_model, aux2 = CARE2026_MRI_Stage2_Model.from_checkpoint(str(ckpt2), device=device)
-            mri_stage2_model.train_config.update(aux2)
-            mri_stage2_model = mri_stage2_model.to(device).eval()
-            _print_model_config(mri_stage2_model, "MRI Stage-2", ckpt2)
+        # --- Stage 1 (LA cavity) ---
+        s1_nnunet_dir = model_dir / "mri_cavity"
+        if (s1_nnunet_dir / "plans.json").exists():
+            _tc = {"nnunet_model_dir": str(s1_nnunet_dir)}
+            if mri_mclahe is not None:
+                mri_stage1_model = CARE2026_MRI_nnUNet(train_config=_tc, apply_mclahe=mri_mclahe)
+            else:
+                mri_stage1_model = CARE2026_MRI_nnUNet(train_config=_tc)
+            mri_stage1_model = mri_stage1_model.to(device).eval()
+            print(f"[MRI Stage-1] nnUNet model from {s1_nnunet_dir}")
         else:
-            warnings.warn(f"MRI Stage-2 checkpoint not found in {model_dir}. Tasks 1 & 2 will be skipped.")
+            ckpt1 = model_dir / "mri_stage1_model.safetensors"
+            if not ckpt1.exists():
+                candidates = sorted(model_dir.glob("BestModel_*-mri1*.safetensors"), key=lambda p: p.stat().st_mtime)
+                if candidates:
+                    ckpt1 = candidates[-1]
+            if ckpt1.exists():
+                mri_stage1_model, aux1 = CARE2026_MRI_Stage1_Model.from_checkpoint(str(ckpt1), device=device)
+                mri_stage1_model.train_config.update(aux1)
+                mri_stage1_model = mri_stage1_model.to(device).eval()
+                _print_model_config(mri_stage1_model, "MRI Stage-1", ckpt1)
+            else:
+                warnings.warn(f"MRI Stage-1 checkpoint not found in {model_dir}. Tasks 1 & 2 will be skipped.")
+
+        # --- Stage 2 (scar) ---
+        s2_nnunet_dir = model_dir / "mri_scar"
+        if (s2_nnunet_dir / "plans.json").exists():
+            _tc = {"nnunet_model_dir": str(s2_nnunet_dir)}
+            if mri_mclahe is not None:
+                mri_stage2_model = CARE2026_MRI_nnUNet(train_config=_tc, apply_mclahe=mri_mclahe)
+            else:
+                mri_stage2_model = CARE2026_MRI_nnUNet(train_config=_tc)
+            mri_stage2_model = mri_stage2_model.to(device).eval()
+            print(f"[MRI Stage-2] nnUNet model from {s2_nnunet_dir}")
+        else:
+            ckpt2 = model_dir / "mri_stage2_model.safetensors"
+            if not ckpt2.exists():
+                candidates = sorted(model_dir.glob("BestModel_*-mri2*.safetensors"), key=lambda p: p.stat().st_mtime)
+                if candidates:
+                    ckpt2 = candidates[-1]
+            if ckpt2.exists():
+                mri_stage2_model, aux2 = CARE2026_MRI_Stage2_Model.from_checkpoint(str(ckpt2), device=device)
+                mri_stage2_model.train_config.update(aux2)
+                mri_stage2_model = mri_stage2_model.to(device).eval()
+                _print_model_config(mri_stage2_model, "MRI Stage-2", ckpt2)
+            else:
+                warnings.warn(f"MRI Stage-2 checkpoint not found in {model_dir}. Tasks 1 & 2 will be skipped.")
 
     if 3 in tasks:
         # Prefer nnUNet model if the directory exists

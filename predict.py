@@ -210,29 +210,34 @@ def postprocess_ct_mask(ct_mask: np.ndarray, n_classes: int) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 
+def _is_nnunet(model: torch.nn.Module) -> bool:
+    """Return True if *model* wraps an nnUNetPredictor."""
+    return hasattr(model, "_predictor")
+
+
 def _check_model_consistency(
     stage1_model: torch.nn.Module,
     stage2_model: torch.nn.Module,
 ) -> bool:
-    """Verify Stage-1 and Stage-2 models are compatible and return ``apply_mclahe``."""
-    tc1 = getattr(stage1_model, "train_config", {}) or {}
-    tc2 = getattr(stage2_model, "train_config", {}) or {}
+    """Verify Stage-1 and Stage-2 models are compatible and return ``apply_mclahe``.
 
-    s1_mclahe = bool(tc1.get("apply_mclahe", False))
-    s2_mclahe = bool(tc2.get("apply_mclahe", False))
+    For VNet models, reads ``train_config.apply_mclahe``.
+    For nnUNet models, reads ``config.apply_mclahe`` (set at init from kwargs).
+    """
+    s1_nnunet = _is_nnunet(stage1_model)
+    s2_nnunet = _is_nnunet(stage2_model)
+
+    if s1_nnunet:
+        s1_mclahe = bool((getattr(stage1_model, "config", {}) or {}).get("apply_mclahe", False))
+    else:
+        s1_mclahe = bool((getattr(stage1_model, "train_config", {}) or {}).get("apply_mclahe", False))
+    if s2_nnunet:
+        s2_mclahe = bool((getattr(stage2_model, "config", {}) or {}).get("apply_mclahe", False))
+    else:
+        s2_mclahe = bool((getattr(stage2_model, "train_config", {}) or {}).get("apply_mclahe", False))
+
     if s1_mclahe != s2_mclahe:
-        raise ValueError(
-            f"Stage 1 and Stage 2 models disagree on apply_mclahe: "
-            f"Stage 1={s1_mclahe}, Stage 2={s2_mclahe}. "
-            "Both models must be trained with the same CLAHE setting."
-        )
-
-    s1_task, s2_task = tc1.get("task"), tc2.get("task")
-    s1_stage, s2_stage = tc1.get("stage"), tc2.get("stage")
-    if s1_task != "mri" or s2_task != "mri":
-        raise ValueError(f"Both models must be MRI: Stage 1 task={s1_task}, Stage 2 task={s2_task}")
-    if s1_stage != 1 or s2_stage != 2:
-        raise ValueError(f"Stage mismatch: Stage 1 stage={s1_stage}, Stage 2 stage={s2_stage} (expected 1 / 2)")
+        raise ValueError(f"Stage 1 and Stage 2 models disagree on apply_mclahe: " f"Stage 1={s1_mclahe}, Stage 2={s2_mclahe}.")
 
     return s2_mclahe
 
@@ -387,17 +392,27 @@ def predict_mri_two_stage(
         img_canonical = _mclahe(img_canonical)
 
     # ── Stage 1: coarse LA cavity (always run — needed for scar constraint)
-    img_s1 = _resample_3d(img_canonical, stage1_shape)
-    img_s1_norm = _zscore(img_s1)
-    t_s1 = torch.from_numpy(img_s1_norm).unsqueeze(0).unsqueeze(0)
+    mri_spacing = (0.625, 0.625, 2.5)  # Center A native spacing
+    s1_nnunet = _is_nnunet(stage1_model)
 
-    stage1_model.eval()
-    with torch.no_grad():
-        la_prob_s1 = _stage1_tta(stage1_model, t_s1, device) if use_tta else _run_stage1_model(stage1_model, t_s1, device)
-    la_mask_s1 = (la_prob_s1[1] >= s1_threshold).astype(np.uint8)
+    if s1_nnunet:
+        stage1_model.eval()
+        with torch.no_grad():
+            la_s1_canonical = stage1_model.predict(img_canonical, mri_spacing)
+            # nnUNet cavity model outputs classes {0,1} — argmax to binary
+            la_s1_canonical = (la_s1_canonical > 0).astype(np.uint8)
+    else:
+        img_s1 = _resample_3d(img_canonical, stage1_shape)
+        img_s1_norm = _zscore(img_s1)
+        t_s1 = torch.from_numpy(img_s1_norm).unsqueeze(0).unsqueeze(0)
 
-    # Stage-1 LA at canonical resolution (for scar constraint)
-    la_s1_canonical = _resample_mask(la_mask_s1, canonical_shape)
+        stage1_model.eval()
+        with torch.no_grad():
+            la_prob_s1 = _stage1_tta(stage1_model, t_s1, device) if use_tta else _run_stage1_model(stage1_model, t_s1, device)
+        la_mask_s1 = (la_prob_s1[1] >= s1_threshold).astype(np.uint8)
+
+        # Stage-1 LA at canonical resolution (for scar constraint)
+        la_s1_canonical = _resample_mask(la_mask_s1, canonical_shape)
 
     # Centroid
     if centroid is not None:
@@ -406,7 +421,7 @@ def predict_mri_two_stage(
         fg = np.argwhere(la_s1_canonical > 0)
         cx, cy, cz = fg.mean(axis=0).round().astype(int) if len(fg) > 0 else np.array([s // 2 for s in canonical_shape])
 
-    # ── Centroid crop → resize to training size → Stage 2 ─────────────────
+    # ── Centroid crop → Stage 2 ──────────────────────────────────────────
     cH, cW, cD = canonical_shape
     tH, tW, tD = stage2_crop_shape
 
@@ -425,33 +440,43 @@ def predict_mri_two_stage(
         crop = np.pad(crop, ((px0, px1), (py0, py1), (pz0, pz1)), mode="constant", constant_values=0.0)
 
     crop_h, crop_w, crop_d = crop.shape
-    img_s2_norm = _zscore(crop)
+    s2_nnunet = _is_nnunet(stage2_model)
 
-    # If model expects 2-channel input, generate SDF from Stage-1 LA mask
-    use_sdf = "2ch" in str(cfg2.get("backbone", ""))
-    if use_sdf:
-        from scipy.ndimage import distance_transform_edt
-
-        la_crop = la_s1_canonical[xs:xe, ys:ye, zs:ze]
-        if any(p > 0 for p in [px0, px1, py0, py1, pz0, pz1]):
-            la_crop = np.pad(la_crop, ((px0, px1), (py0, py1), (pz0, pz1)), mode="constant", constant_values=0.0)
-        sdf_out = distance_transform_edt(1 - la_crop)
-        sdf_in = distance_transform_edt(la_crop)
-        sdf = np.clip((sdf_out - sdf_in).astype(np.float32) * 0.625 / 4.0, -1.0, 1.0)
-        sdf_resized = _resample_3d(sdf, (s2_hw, s2_hw, crop_d))
-        img_s2_resized = _resample_3d(img_s2_norm, (s2_hw, s2_hw, crop_d))
-        # Stack as 2 channels: (2, H, W, D)
-        img_2ch = np.stack([img_s2_resized, sdf_resized], axis=0)
-        t_s2 = torch.from_numpy(img_2ch).unsqueeze(0)  # (1, 2, H, W, D)
+    if s2_nnunet:
+        # nnUNet Stage 2: predictor handles normalization + resampling internally
+        stage2_model.eval()
+        with torch.no_grad():
+            scar_crop = stage2_model.predict(crop, mri_spacing)
+            scar_crop = (scar_crop > 0).astype(np.uint8)
     else:
-        img_s2_resized = _resample_3d(img_s2_norm, (s2_hw, s2_hw, crop_d))
-        t_s2 = torch.from_numpy(img_s2_resized).unsqueeze(0).unsqueeze(0)
+        # VNet Stage 2: z-score → resize → forward → resize back
+        img_s2_norm = _zscore(crop)
+        use_sdf = "2ch" in str(cfg2.get("backbone", ""))
+        if use_sdf:
+            from scipy.ndimage import distance_transform_edt
 
-    stage2_model.eval()
-    with torch.no_grad():
-        _, scar_prob_s2 = _stage2_tta(stage2_model, t_s2, device) if use_tta else _run_stage2_model(stage2_model, t_s2, device)
+            la_crop = la_s1_canonical[xs:xe, ys:ye, zs:ze]
+            if any(p > 0 for p in [px0, px1, py0, py1, pz0, pz1]):
+                la_crop = np.pad(la_crop, ((px0, px1), (py0, py1), (pz0, pz1)), mode="constant", constant_values=0.0)
+            sdf_out = distance_transform_edt(1 - la_crop)
+            sdf_in = distance_transform_edt(la_crop)
+            sdf = np.clip((sdf_out - sdf_in).astype(np.float32) * 0.625 / 4.0, -1.0, 1.0)
+            sdf_resized = _resample_3d(sdf, (s2_hw, s2_hw, crop_d))
+            img_s2_resized = _resample_3d(img_s2_norm, (s2_hw, s2_hw, crop_d))
+            img_2ch = np.stack([img_s2_resized, sdf_resized], axis=0)
+            t_s2 = torch.from_numpy(img_2ch).unsqueeze(0)
+        else:
+            img_s2_resized = _resample_3d(img_s2_norm, (s2_hw, s2_hw, crop_d))
+            t_s2 = torch.from_numpy(img_s2_resized).unsqueeze(0).unsqueeze(0)
 
-    scar_crop = _resample_mask((scar_prob_s2[1] >= s2_threshold).astype(np.uint8), (crop_h, crop_w, crop_d))
+        stage2_model.eval()
+        with torch.no_grad():
+            _, scar_prob_s2 = (
+                _stage2_tta(stage2_model, t_s2, device) if use_tta else _run_stage2_model(stage2_model, t_s2, device)
+            )
+
+        scar_crop = _resample_mask((scar_prob_s2[1] >= s2_threshold).astype(np.uint8), (crop_h, crop_w, crop_d))
+
     scar_unpad = scar_crop[px0 : tH - px1, py0 : tW - py1, pz0 : tD - pz1]
     scar_canonical = np.zeros(canonical_shape, dtype=np.uint8)
     scar_canonical[xs:xe, ys:ye, zs:ze] = scar_unpad

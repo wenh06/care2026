@@ -37,6 +37,7 @@ from .vnet import VNet
 __all__ = [
     "CARE2026_MRI_Stage1_Model",
     "CARE2026_MRI_Stage2_Model",
+    "CARE2026_MRI_nnUNet",
     "CARE2026_CT_Model",
     "CARE2026_CT_ModelV2",
     "CARE2026_CT_nnUNet",
@@ -1106,3 +1107,149 @@ class CARE2026_CT_MT_nnUNet(nn.Module, SizeMixin, CkptMixin, CitationMixin):
             for attr, m in restored.items():
                 setattr(self, attr, m)
             self.__config["semi_supervised_mode"] = self.mode
+
+
+class CARE2026_MRI_nnUNet(nn.Module, SizeMixin, CkptMixin, CitationMixin):
+    """MRI model wrapping nnUNet's inference pipeline for Stage 1 or Stage 2.
+
+    Same class serves both stages — just point *nnunet_model_dir* to the
+    appropriate nnUNet trainer directory (e.g. ``Dataset501_CARE2026MRI_Scar``
+    for scar, ``Dataset502_CARE2026MRI_Cavity`` for cavity).
+
+    Uses ``nnUNetPredictor`` for preprocessing, normalisation, sliding window,
+    and resampling — exactly matching the nnUNet training recipe.
+    """
+
+    __name__ = "CARE2026_MRI_nnUNet"
+
+    def __init__(
+        self,
+        config: Optional[CFG] = None,
+        train_config: Optional[CFG] = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__()
+        self.__config = deepcopy(ModelCfg)
+        if config is not None:
+            self.__config.update(deepcopy(config))
+        self.__train_config = CFG()
+        if train_config is not None:
+            self.__train_config.update(deepcopy(train_config))
+
+        self.__config["backbone"] = "nnunet"
+
+        from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
+
+        model_dir = self.__train_config.get("nnunet_model_dir", None)
+        if model_dir is None:
+            raise ValueError("nnunet_model_dir must be set in train_config.")
+
+        trainer_dir, auto_folds, auto_ckpt = _resolve_nnunet_dir(model_dir)
+        folds = self.__train_config.get("nnunet_folds") or auto_folds or (0,)
+        if isinstance(folds, str):
+            folds = tuple(int(f.strip()) for f in folds.split(","))
+        if isinstance(folds, list):
+            folds = tuple(folds)
+        ckpt_name = self.__train_config.get("nnunet_checkpoint") or auto_ckpt.name if auto_ckpt else "checkpoint_best.pth"
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.__config["nnunet_trainer_dir"] = str(trainer_dir)
+        self.__config["nnunet_folds"] = folds
+
+        # Read normalisation params from plans.json (ZScoreNormalization for MRI)
+        norm = _load_nnunet_norm(trainer_dir)
+        self.__config["normalization"] = CFG(norm)
+        self.__train_config["normalization"] = CFG(norm)
+
+        # Store MCLAHE flag if given (nnUNet doesn't track this internally)
+        apply_mclahe = kwargs.get("apply_mclahe", False)
+        self.__config["apply_mclahe"] = apply_mclahe
+
+        self._predictor = nnUNetPredictor(
+            tile_step_size=0.5,
+            use_gaussian=True,
+            use_mirroring=False,
+            perform_everything_on_device=True,
+            device=device,
+            verbose=False,
+            verbose_preprocessing=False,
+            allow_tqdm=False,
+        )
+        self._predictor.initialize_from_trained_model_folder(
+            str(trainer_dir),
+            use_folds=folds,
+            checkpoint_name=ckpt_name,
+        )
+        self.backbone = self._predictor.network
+
+    # ------------------------------------------------------------------
+    # Full-volume inference (delegates to nnUNetPredictor)
+    # ------------------------------------------------------------------
+
+    @torch.no_grad()
+    def predict(self, image_npy: np.ndarray, spacing: Sequence[float]) -> np.ndarray:
+        """Run full-volume prediction using nnUNet's pipeline.
+
+        Parameters
+        ----------
+        image_npy : np.ndarray, shape (H, W, D), float32
+            Pre-processed image (e.g. canonical, possibly MCLAHE-enhanced).
+        spacing : (float, float, float)
+            Voxel spacing in mm (x, y, z).
+
+        Returns
+        -------
+        np.ndarray, shape (H, W, D), uint8
+            Predicted binary mask (0/1).
+        """
+        self._predictor.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # nnUNet's NibabelIOWithReorient transposes (x,y,z) → (z,y,x)
+        if image_npy.ndim == 3:
+            image_npy = np.transpose(image_npy, (2, 1, 0))
+        spacing_nnunet = (float(spacing[2]), float(spacing[1]), float(spacing[0]))
+        ret = self._predictor.predict_from_list_of_npy_arrays(
+            image_or_list_of_images=image_npy[None].astype(np.float32),
+            segs_from_prev_stage_or_list_of_segs_from_prev_stage=None,
+            properties_or_list_of_properties={"spacing": spacing_nnunet},
+            truncated_ofname=None,
+            num_processes=1,
+            save_probabilities=False,
+            num_processes_segmentation_export=1,
+        )
+        pred = ret[0].astype(np.uint8)
+        # Reverse transpose: (z,y,x) → (x,y,z)
+        pred = np.transpose(pred, (2, 1, 0))
+        return pred
+
+    # ------------------------------------------------------------------
+    # Forward (patch-based — unused at inference; compatibility only)
+    # ------------------------------------------------------------------
+
+    def forward(self, img: torch.Tensor, **kwargs) -> Dict[str, torch.Tensor]:
+        img = img.to(device=self.device, dtype=self.dtype)
+        logits = self.backbone(img)
+        if isinstance(logits, (list, tuple)):
+            seg_mask = logits[0].argmax(dim=1)
+        else:
+            seg_mask = logits.argmax(dim=1)
+        return {"logits1": logits, "seg_mask": seg_mask}
+
+    @property
+    def config(self) -> CFG:
+        return self.__config
+
+    @property
+    def train_config(self) -> CFG:
+        return self.__train_config
+
+    def _prepare_input(self, img: Union[np.ndarray, torch.Tensor, list]) -> torch.Tensor:
+        if isinstance(img, (list, tuple)):
+            img = torch.stack([i if isinstance(i, torch.Tensor) else torch.from_numpy(i) for i in img])
+        elif isinstance(img, np.ndarray):
+            img = torch.from_numpy(img)
+        return img.to(device=self.device, dtype=self.dtype).unsqueeze(0).unsqueeze(0) if img.ndim < 5 else img
+
+    def save(self, path, **kwargs):
+        p = Path(str(path))
+        name = re.sub(r"(?<=\d)\.(?=\d)", "_", p.name)
+        path = str(p.parent / name)
+        return super().save(path=path, **kwargs)
