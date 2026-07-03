@@ -421,7 +421,7 @@ if __name__ == "__main__":
         mri_mclahe = args.mri_mclahe
 
         # --- Stage 1 (LA cavity) ---
-        s1_nnunet_dir = model_dir / "mri_cavity"
+        s1_nnunet_dir = model_dir / "mri_stage1_model"
         if (s1_nnunet_dir / "plans.json").exists():
             _tc = {"nnunet_model_dir": str(s1_nnunet_dir)}
             if mri_mclahe is not None:
@@ -445,7 +445,7 @@ if __name__ == "__main__":
                 warnings.warn(f"MRI Stage-1 checkpoint not found in {model_dir}. Tasks 1 & 2 will be skipped.")
 
         # --- Stage 2 (scar) ---
-        s2_nnunet_dir = model_dir / "mri_scar"
+        s2_nnunet_dir = model_dir / "mri_stage2_model"
         if (s2_nnunet_dir / "plans.json").exists():
             _tc = {"nnunet_model_dir": str(s2_nnunet_dir)}
             if mri_mclahe is not None:
