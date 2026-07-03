@@ -49,11 +49,14 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 
-def _sorted_val_records(val_data_dir: Path) -> List[str]:
-    """Return val record names sorted by numeric suffix."""
-    if not val_data_dir.exists():
+def _sorted_records(data_dir: Path) -> List[str]:
+    """Return record names sorted by numeric suffix.
+
+    Handles both ``val_N`` and ``test_NN`` (zero-padded) prefixes.
+    """
+    if not data_dir.exists():
         return []
-    recs = [d.name for d in val_data_dir.iterdir() if d.is_dir() and d.name.startswith("val_")]
+    recs = [d.name for d in data_dir.iterdir() if d.is_dir() and (d.name.startswith("val_") or d.name.startswith("test_"))]
     recs.sort(key=lambda r: int(r.split("_")[1]))
     return recs
 
@@ -123,11 +126,13 @@ def run_task1_inference(
         Enable 8-fold flip TTA.
     """
     val_data_root = Path(val_data_root)
-    val_dir = val_data_root / "task1" / "val_data"
-    records = _sorted_val_records(val_dir)
+    data_dir = val_data_root / "task1"
+    if (data_dir / "val_data").exists():
+        data_dir = data_dir / "val_data"
+    records = _sorted_records(data_dir)
 
     if not records:
-        warnings.warn(f"No Task 1 validation records found in {val_dir}")
+        warnings.warn(f"No Task 1 records found in {data_dir}")
         return
 
     if device is None:
@@ -136,7 +141,7 @@ def run_task1_inference(
     stage1_model.eval()
     stage2_model.eval()
     for rec in tqdm(records, desc="Task 1 (LA scar)", unit="vol", dynamic_ncols=True):
-        img_path = val_dir / rec / "enhanced.nii.gz"
+        img_path = data_dir / rec / "enhanced.nii.gz"
         if not img_path.exists():
             warnings.warn(f"Image not found: {img_path}")
             continue
@@ -179,11 +184,13 @@ def run_task2_inference(
     use_tta : bool, default True
     """
     val_data_root = Path(val_data_root)
-    val_dir = val_data_root / "task2" / "val_data"
-    records = _sorted_val_records(val_dir)
+    data_dir = val_data_root / "task2"
+    if (data_dir / "val_data").exists():
+        data_dir = data_dir / "val_data"
+    records = _sorted_records(data_dir)
 
     if not records:
-        warnings.warn(f"No Task 2 validation records found in {val_dir}")
+        warnings.warn(f"No Task 2 records found in {data_dir}")
         return
 
     if device is None:
@@ -192,7 +199,7 @@ def run_task2_inference(
     stage1_model.eval()
     stage2_model.eval()
     for rec in tqdm(records, desc="Task 2 (LA cavity)", unit="vol", dynamic_ncols=True):
-        img_path = val_dir / rec / "enhanced.nii.gz"
+        img_path = data_dir / rec / "enhanced.nii.gz"
         if not img_path.exists():
             warnings.warn(f"Image not found: {img_path}")
             continue
@@ -225,11 +232,13 @@ def run_task3_inference(
     use_tta : bool, default True
     """
     val_data_root = Path(val_data_root)
-    val_dir = val_data_root / "task3" / "val_data"
-    records = _sorted_val_records(val_dir)
+    data_dir = val_data_root / "task3"
+    if (data_dir / "val_data").exists():
+        data_dir = data_dir / "val_data"
+    records = _sorted_records(data_dir)
 
     if not records:
-        warnings.warn(f"No Task 3 validation records found in {val_dir}")
+        warnings.warn(f"No Task 3 records found in {data_dir}")
         return
 
     if device is None:
@@ -238,7 +247,7 @@ def run_task3_inference(
     model.eval()
     for rec in tqdm(records, desc="Task 3 (CT multi-structure)", unit="vol", dynamic_ncols=True):
         img_name = _ct_image_name(rec)
-        img_path = val_dir / rec / img_name
+        img_path = data_dir / rec / img_name
         if not img_path.exists():
             warnings.warn(f"Image not found: {img_path}")
             continue

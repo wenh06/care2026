@@ -90,9 +90,15 @@ class CARE2026Outputs:
         if mask is None:
             raise ValueError(f"No mask available for task {task_num} " f"(task={self.task!r}).  Did you run the correct model?")
 
+        if record_id.startswith("test_"):
+            # Test phase: test_01 → 01_pred.nii.gz
+            out_name = f"{record_id.split('_')[1]}_pred.nii.gz"
+        else:
+            # Validation phase: val_1 → val_1_pred.nii.gz
+            out_name = f"{record_id}_pred.nii.gz"
         save_dir = Path(output_dir) / _TASK_DIRNAME[task_num] / record_id
         save_dir.mkdir(parents=True, exist_ok=True)
-        out_path = save_dir / f"{record_id}_pred.nii.gz"
+        out_path = save_dir / out_name
 
         affine = self.source_affine if self.source_affine is not None else np.eye(4)
         nii_img = nib.Nifti1Image(mask.astype(np.uint8), affine=affine, header=self.source_header)
