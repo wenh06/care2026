@@ -1,6 +1,6 @@
 # https://hub.docker.com/r/pytorch/pytorch
 # PyTorch 2.9.1, CUDA 12.8, cuDNN 9 -- released Oct 2025, stable and widely used
-FROM pytorch/pytorch:2.9.1-cuda12.8-cudnn9-runtime
+FROM pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime
 
 LABEL maintainer="wenh06@gmail.com"
 
@@ -46,6 +46,10 @@ RUN cd $GIT_CLONE_DIR \
     && cd /challenge
 
 RUN pip install -r requirements-docker.txt
+
+# nnunetv2 with --no-deps: avoid pip touching the pre-installed torch.
+# All nnunetv2 deps are already installed via requirements-docker.txt above.
+RUN pip install --no-deps nnunetv2
 
 RUN pip list
 
