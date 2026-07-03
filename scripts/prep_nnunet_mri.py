@@ -40,6 +40,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from const import MRI_STAGE2_CROP_SHAPE
+from utils.mclahe import mclahe as _mclahe
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -126,8 +127,12 @@ def _process_crop_case(
     lbl_dir: Path,
     case_id: str,
     crop_shape: Tuple[int, int, int],
+    apply_mclahe: bool = False,
 ) -> None:
     """Load, centroid-crop, and save one case for Task 1.
+
+    MCLAHE is applied to the full canonical image **before** cropping,
+    matching ``dataset.py:_load_all`` (Stage 2) behaviour.
 
     *scar_src* may be None for no-scar cases (hard negatives); in that case
     the label is saved as an all-zero mask of *crop_shape*.
@@ -136,12 +141,14 @@ def _process_crop_case(
     la_data, _ = _load_nifti(la_src)
     la_bin = (la_data > 0).astype(np.uint8)
 
+    if apply_mclahe:
+        image = _mclahe(image)
+
     if scar_src is not None:
         scar_data, _ = _load_nifti(scar_src)
         scar_bin = (scar_data > 0).astype(np.uint8)
         cropped_img, cropped_scar = _centroid_crop(image, la_bin, scar_bin, crop_shape)
     else:
-        # No-scar case: crop around cavity centroid, save all-zero label
         zero_scar = np.zeros_like(image, dtype=np.uint8)
         cropped_img, _ = _centroid_crop(image, la_bin, zero_scar, crop_shape)
         cropped_scar = np.zeros(crop_shape, dtype=np.uint8)
@@ -175,6 +182,12 @@ def main():
         help="Fraction of no-scar (Task 2) cases to include in Task 1 as hard negatives (default 0)",
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed for no-scar case sampling")
+    parser.add_argument(
+        "--mclahe",
+        action="store_true",
+        default=False,
+        help="Apply MCLAHE contrast enhancement to images before saving",
+    )
     args = parser.parse_args()
 
     db_dir = Path(args.db_dir)
@@ -206,7 +219,12 @@ def main():
             if not img_src.exists() or not la_src.exists():
                 continue
             case_id = f"CARE{case_idx:04d}"
-            os.symlink(img_src.resolve(), img_dir / f"{case_id}_0000.nii.gz")
+            if args.mclahe:
+                image, affine = _load_nifti(img_src)
+                image = _mclahe(image)
+                _save_nifti(image, affine, img_dir / f"{case_id}_0000.nii.gz")
+            else:
+                os.symlink(img_src.resolve(), img_dir / f"{case_id}_0000.nii.gz")
             la_data, la_affine = _load_nifti(la_src)
             la_bin = (la_data > 0).astype(np.uint8)
             _save_nifti(la_bin, la_affine, lbl_dir / f"{case_id}.nii.gz")
@@ -222,7 +240,12 @@ def main():
             if not img_src.exists() or not la_src.exists():
                 continue
             case_id = f"CARE{case_idx:04d}"
-            os.symlink(img_src.resolve(), img_dir / f"{case_id}_0000.nii.gz")
+            if args.mclahe:
+                image, affine = _load_nifti(img_src)
+                image = _mclahe(image)
+                _save_nifti(image, affine, img_dir / f"{case_id}_0000.nii.gz")
+            else:
+                os.symlink(img_src.resolve(), img_dir / f"{case_id}_0000.nii.gz")
             la_data, la_affine = _load_nifti(la_src)
             la_bin = (la_data > 0).astype(np.uint8)
             _save_nifti(la_bin, la_affine, lbl_dir / f"{case_id}.nii.gz")
@@ -243,6 +266,8 @@ def main():
         print(f"  imagesTr: {len(list(img_dir.glob('*_0000.nii.gz')))} files")
         print(f"  labelsTr: {len(list(lbl_dir.glob('*.nii.gz')))} files")
         print(f"  ({n_task1_cases} from Task 1 dir, {n_total - n_task1_cases} from Task 2 dir)")
+        if args.mclahe:
+            print("  MCLAHE: enabled")
         print(f"\nNext: nnUNetv2_plan_and_preprocess -d {args.dataset_id_task2:03d} --verify_dataset_integrity -c 3d_fullres")
         print(f"Train single fold: nnUNetv2_train {args.dataset_id_task2:03d} 3d_fullres 0")
         print(f"Train all folds  : for f in 0 1 2 3 4; do nnUNetv2_train {args.dataset_id_task2:03d} 3d_fullres $f; done")
@@ -273,12 +298,15 @@ def main():
             case_id = f"CARE{case_idx:04d}"
 
             if args.no_crop:
-                os.symlink(img_src.resolve(), img_dir / f"{case_id}_0000.nii.gz")
+                image, affine = _load_nifti(img_src)
+                if args.mclahe:
+                    image = _mclahe(image)
+                _save_nifti(image, affine, img_dir / f"{case_id}_0000.nii.gz")
                 scar_data, scar_affine = _load_nifti(scar_src)
                 scar_bin = (scar_data > 0).astype(np.uint8)
                 _save_nifti(scar_bin, scar_affine, lbl_dir / f"{case_id}.nii.gz")
             else:
-                _process_crop_case(img_src, la_src, scar_src, img_dir, lbl_dir, case_id, crop_shape)
+                _process_crop_case(img_src, la_src, scar_src, img_dir, lbl_dir, case_id, crop_shape, apply_mclahe=args.mclahe)
 
             case_idx += 1
 
@@ -301,11 +329,16 @@ def main():
                     case_id = f"CARE{case_idx:04d}"
 
                     if args.no_crop:
-                        os.symlink(img_src.resolve(), img_dir / f"{case_id}_0000.nii.gz")
-                        all_zero = np.zeros(nib.load(str(img_src)).shape, dtype=np.uint8)
-                        _save_nifti(all_zero, nib.load(str(img_src)).affine, lbl_dir / f"{case_id}.nii.gz")
+                        image, affine = _load_nifti(img_src)
+                        if args.mclahe:
+                            image = _mclahe(image)
+                        _save_nifti(image, affine, img_dir / f"{case_id}_0000.nii.gz")
+                        all_zero = np.zeros(image.shape, dtype=np.uint8)
+                        _save_nifti(all_zero, affine, lbl_dir / f"{case_id}.nii.gz")
                     else:
-                        _process_crop_case(img_src, la_src, None, img_dir, lbl_dir, case_id, crop_shape)
+                        _process_crop_case(
+                            img_src, la_src, None, img_dir, lbl_dir, case_id, crop_shape, apply_mclahe=args.mclahe
+                        )
 
                     no_scar_cases.append(case_id)
                     case_idx += 1
@@ -325,6 +358,8 @@ def main():
         print(f"  labelsTr: {len(list(lbl_dir.glob('*.nii.gz')))} files")
         print(f"  Crop shape: {crop_shape}" if not args.no_crop else "  Full volume (no crop)")
         print(f"  Scar cases: {n_scar_cases}")
+        if args.mclahe:
+            print("  MCLAHE: enabled (applied to full image before crop)")
         if no_scar_cases:
             print(f"  No-scar cases: {len(no_scar_cases)} (sampled {args.no_scar_proportion:.0%} from Task 2 dir)")
         print(f"\nNext: nnUNetv2_plan_and_preprocess -d {args.dataset_id_task1:03d} --verify_dataset_integrity -c 3d_fullres")
