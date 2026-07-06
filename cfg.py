@@ -22,6 +22,7 @@ from const import (
 
 __all__ = [
     "BaseCfg",
+    "PredictCfg",
     "MRI_Stage1_TrainCfg",
     "MRI_Stage2_TrainCfg",
     "CT_TrainCfg",
@@ -54,6 +55,19 @@ BaseCfg.np_dtype = np.float32
 
 BaseCfg.val_ratio = DEFAULT_VAL_RATIO
 BaseCfg.random_seed = 42
+
+# ---------------------------------------------------------------------------
+# Inference configuration — model paths
+# ---------------------------------------------------------------------------
+# Each key points to either a .safetensors file (VNet) or a directory
+# containing plans.json (nnUNet).  ``mri_apply_mclahe`` applies to both
+# MRI stages when nnUNet models are used.
+
+PredictCfg = CFG()
+PredictCfg.ct_model = str(_BASE_DIR / "checkpoints" / "ct_model")
+PredictCfg.mri_stage1_model = str(_BASE_DIR / "checkpoints" / "mri_stage1_model.safetensors")
+PredictCfg.mri_stage2_model = str(_BASE_DIR / "checkpoints" / "mri_stage2_model.safetensors")
+PredictCfg.mri_apply_mclahe = False
 
 # ---------------------------------------------------------------------------
 # MRI Stage 1 training configuration (coarse LA localisation)
