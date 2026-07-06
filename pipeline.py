@@ -104,7 +104,7 @@ def run_task1_inference(
     device: Optional[torch.device] = None,
     use_tta: bool = True,
     s1_threshold: float = 0.5,
-    s2_threshold: float = 0.7,
+    s2_threshold: float = 0.5,
 ) -> None:
     """Run Task 1 (LA scar) inference on the validation set.
 
@@ -429,7 +429,9 @@ if __name__ == "__main__":
         help="Sub-directory name appended to --output_dir (default: auto-generated timestamp).",
     )
     parser.add_argument("--s1_threshold", type=float, default=0.5, help="Stage-1 LA cavity probability threshold.")
-    parser.add_argument("--s2_threshold", type=float, default=0.7, help="Stage-2 scar probability threshold.")
+    parser.add_argument(
+        "--s2_threshold", type=float, default=0.5, help="Stage-2 scar probability threshold (VNet only; nnUNet uses argmax)."
+    )
     parser.add_argument("--ct_threshold", type=float, default=0.5, help="CT multi-class probability threshold.")
     parser.add_argument(
         "--ct-model",
