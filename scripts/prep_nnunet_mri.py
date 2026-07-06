@@ -39,6 +39,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from tqdm.auto import tqdm
+
 from const import MRI_STAGE2_CROP_SHAPE
 from utils.mclahe import mclahe as _mclahe
 
@@ -218,7 +220,8 @@ def main():
 
         case_idx = 0
         # Task 1 directory cases (train_1..train_60): have cavity + scar labels
-        for d in sorted(task1_dir.iterdir(), key=lambda p: int(p.name.split("_")[1])):
+        t1_cases = sorted(task1_dir.iterdir(), key=lambda p: int(p.name.split("_")[1]))
+        for d in tqdm(t1_cases, desc="Task2 images (T1 dir)", unit="case"):
             if not d.is_dir():
                 continue
             img_src = d / "enhanced.nii.gz"
@@ -239,7 +242,8 @@ def main():
 
         n_task1_cases = case_idx
         # Task 2 directory cases (train_1..train_130): cavity labels only
-        for d in sorted(task2_dir.iterdir(), key=lambda p: int(p.name.split("_")[1])):
+        t2_cases_all = sorted(task2_dir.iterdir(), key=lambda p: int(p.name.split("_")[1]))
+        for d in tqdm(t2_cases_all, desc="Task2 images (T2 dir)", unit="case"):
             if not d.is_dir():
                 continue
             img_src = d / "enhanced.nii.gz"
@@ -293,7 +297,8 @@ def main():
         case_idx = 0
 
         # Scar-positive cases from Task 1 directory
-        for d in sorted(task1_dir.iterdir(), key=lambda p: int(p.name.split("_")[1])):
+        scar_cases = sorted(task1_dir.iterdir(), key=lambda p: int(p.name.split("_")[1]))
+        for d in tqdm(scar_cases, desc="Task1 scar cases", unit="case"):
             if not d.is_dir():
                 continue
             img_src = d / "enhanced.nii.gz"
@@ -330,7 +335,7 @@ def main():
                 rng = np.random.default_rng(args.seed)
                 n_sample = max(1, round(len(t2_cases) * args.no_scar_proportion))
                 sampled = rng.choice(t2_cases, size=n_sample, replace=False)
-                for d in sampled:
+                for d in tqdm(sampled, desc="Task1 no-scar cases", unit="case"):
                     img_src = d / "enhanced.nii.gz"
                     la_src = d / "atriumSegImgMO.nii.gz"
                     case_id = f"CARE{case_idx:04d}"
