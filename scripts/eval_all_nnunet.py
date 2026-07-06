@@ -3,12 +3,20 @@
 Usage::
 
     python scripts/eval_all_nnunet.py --db-dir <CARE2026_data_root>
+    python scripts/eval_all_nnunet.py --db-dir ... --output results.txt
 """
 
 import argparse
+import os
 import sys
+import warnings
 from pathlib import Path
 from typing import Dict, Tuple
+
+# Suppress noisy third-party warnings
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"batchgenerators\.")
+warnings.filterwarnings("ignore", category=UserWarning, module=r"google\.protobuf")
 
 import nibabel as nib
 import numpy as np
@@ -49,18 +57,23 @@ def _resample_if_needed(pred: np.ndarray, gt: np.ndarray) -> np.ndarray:
     return F.interpolate(t, size=gt.shape, mode="nearest").squeeze().numpy().astype(np.uint8)
 
 
-def _print_summary(results: Dict):
-    """Print all results in a clean table at the end."""
-    print()
-    print("=" * 65)
-    print("  SUMMARY")
-    print("=" * 65)
+def _print_summary(results: Dict, out_path: Path = None):
+    """Print all results in a clean table; optionally write to file."""
+    lines = []
+    lines.append("=" * 65)
+    lines.append("  SUMMARY")
+    lines.append("=" * 65)
 
     for task_key, entries in results.items():
-        print(f"\n--- {task_key} ---")
+        lines.append(f"\n--- {task_key} ---")
         for label, metrics in entries.items():
             parts = "  ".join(f"{k}: {v:.4f}" for k, v in metrics.items())
-            print(f"  {label}:  {parts}")
+            lines.append(f"  {label}:  {parts}")
+
+    text = "\n".join(lines)
+    print(text)
+    if out_path is not None:
+        out_path.write_text(text)
 
 
 # ======================================================================
@@ -74,6 +87,7 @@ def main():
     parser.add_argument("--nnunet-results", default="tmp/nnUNet_results", help="nnUNet results directory")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--tasks", type=str, default="1,2,3", help="Comma-separated tasks")
+    parser.add_argument("--output", type=str, default=None, help="Write results to file (default: stdout only)")
     args = parser.parse_args()
 
     db_dir = Path(args.db_dir)
@@ -208,7 +222,10 @@ def main():
     # ==================================================================
     # Print unified summary
     # ==================================================================
-    _print_summary(all_results)
+    out_path = Path(args.output) if args.output else None
+    _print_summary(all_results, out_path)
+    if out_path:
+        print(f"\nResults saved to {out_path}")
 
 
 if __name__ == "__main__":
