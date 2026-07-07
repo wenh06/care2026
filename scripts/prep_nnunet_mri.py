@@ -130,11 +130,15 @@ def _process_crop_case(
     case_id: str,
     crop_shape: Tuple[int, int, int],
     apply_mclahe: bool = False,
+    multi_class: bool = False,
 ) -> None:
     """Load, centroid-crop, and save one case for Task 1.
 
     MCLAHE is applied to the full canonical image **before** cropping,
     matching ``dataset.py:_load_all`` (Stage 2) behaviour.
+
+    When ``multi_class`` is True, the label is 2-class (1=cavity, 2=scar);
+    scar overwrites cavity where both are present.
 
     *scar_src* may be None for no-scar cases (hard negatives); in that case
     the label is saved as an all-zero mask of *crop_shape*.
@@ -149,14 +153,28 @@ def _process_crop_case(
     if scar_src is not None:
         scar_data, _ = _load_nifti(scar_src)
         scar_bin = (scar_data > 0).astype(np.uint8)
-        cropped_img, cropped_scar = _centroid_crop(image, la_bin, scar_bin, crop_shape)
+        if multi_class:
+            # 2-class label: cavity=1, scar=2 (scar takes priority)
+            label = la_bin.astype(np.uint8) + scar_bin.astype(np.uint8) * 2
+            # Fix overlap: scar=2 wherever scar is present
+            label[scar_bin > 0] = 2
+            cropped_img, cropped_label = _centroid_crop(image, la_bin, label, crop_shape)
+        else:
+            cropped_img, cropped_label = _centroid_crop(image, la_bin, scar_bin, crop_shape)
     else:
-        zero_scar = np.zeros_like(image, dtype=np.uint8)
-        cropped_img, _ = _centroid_crop(image, la_bin, zero_scar, crop_shape)
-        cropped_scar = np.zeros(crop_shape, dtype=np.uint8)
+        if multi_class:
+            # No-scar case with multi-class: cavity-only label
+            label = la_bin.astype(np.uint8)
+            zero = np.zeros_like(image, dtype=np.uint8)
+            cropped_img, _ = _centroid_crop(image, la_bin, zero, crop_shape)
+            cropped_label = np.zeros(crop_shape, dtype=np.uint8)
+        else:
+            zero_scar = np.zeros_like(image, dtype=np.uint8)
+            cropped_img, _ = _centroid_crop(image, la_bin, zero_scar, crop_shape)
+            cropped_label = np.zeros(crop_shape, dtype=np.uint8)
 
     _save_nifti(cropped_img, affine, img_dir / f"{case_id}_0000.nii.gz")
-    _save_nifti(cropped_scar, affine, lbl_dir / f"{case_id}.nii.gz")
+    _save_nifti(cropped_label, affine, lbl_dir / f"{case_id}.nii.gz")
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +202,12 @@ def main():
         help="Fraction of no-scar (Task 2) cases to include in Task 1 as hard negatives (default 0)",
     )
     parser.add_argument("--seed", type=int, default=42, help="Random seed for no-scar case sampling")
+    parser.add_argument(
+        "--multi-class",
+        action="store_true",
+        default=False,
+        help="Create 2-class labels (1=cavity, 2=scar) instead of binary scar-only labels",
+    )
     parser.add_argument(
         "--mclahe",
         action="store_true",
@@ -314,11 +338,28 @@ def main():
                 if args.mclahe:
                     image = _mclahe(image)
                 _save_nifti(image, affine, img_dir / f"{case_id}_0000.nii.gz")
-                scar_data, scar_affine = _load_nifti(scar_src)
-                scar_bin = (scar_data > 0).astype(np.uint8)
-                _save_nifti(scar_bin, scar_affine, lbl_dir / f"{case_id}.nii.gz")
+                if args.multi_class:
+                    la_data, _ = _load_nifti(la_src)
+                    scar_data, _ = _load_nifti(scar_src)
+                    label = (la_data > 0).astype(np.uint8) + (scar_data > 0).astype(np.uint8) * 2
+                    label[(scar_data > 0)] = 2
+                    _save_nifti(label, affine, lbl_dir / f"{case_id}.nii.gz")
+                else:
+                    scar_data, scar_affine = _load_nifti(scar_src)
+                    scar_bin = (scar_data > 0).astype(np.uint8)
+                    _save_nifti(scar_bin, scar_affine, lbl_dir / f"{case_id}.nii.gz")
             else:
-                _process_crop_case(img_src, la_src, scar_src, img_dir, lbl_dir, case_id, crop_shape, apply_mclahe=args.mclahe)
+                _process_crop_case(
+                    img_src,
+                    la_src,
+                    scar_src,
+                    img_dir,
+                    lbl_dir,
+                    case_id,
+                    crop_shape,
+                    apply_mclahe=args.mclahe,
+                    multi_class=args.multi_class,
+                )
 
             case_idx += 1
 
@@ -349,15 +390,27 @@ def main():
                         _save_nifti(all_zero, affine, lbl_dir / f"{case_id}.nii.gz")
                     else:
                         _process_crop_case(
-                            img_src, la_src, None, img_dir, lbl_dir, case_id, crop_shape, apply_mclahe=args.mclahe
+                            img_src,
+                            la_src,
+                            None,
+                            img_dir,
+                            lbl_dir,
+                            case_id,
+                            crop_shape,
+                            apply_mclahe=args.mclahe,
+                            multi_class=args.multi_class,
                         )
 
                     no_scar_cases.append(case_id)
                     case_idx += 1
 
+        if args.multi_class:
+            labels = {"background": 0, "LA_cavity": 1, "LA_scar": 2}
+        else:
+            labels = {"background": 0, "LA_scar": 1}
         dataset_json = {
             "channel_names": {"0": "LGE-MRI"},
-            "labels": {"background": 0, "LA_scar": 1},
+            "labels": labels,
             "numTraining": case_idx,
             "file_ending": ".nii.gz",
             "overwrite_image_reader_writer": "NibabelIOWithReorient",

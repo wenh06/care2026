@@ -227,6 +227,7 @@ class CARE2026_MRI_Stage2_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
             "vnet_l": "vnet_stage2_l",
             "nested_vnet_l": "nested_vnet_stage2_l",
             "vnet_2ch_l": "vnet_stage2_2ch_l",
+            "vnet_mc": "vnet_stage2_mc",
         }
         backbone = _mri_backbone_map.get(backbone, backbone)
         self.__config["backbone"] = backbone
@@ -239,32 +240,58 @@ class CARE2026_MRI_Stage2_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
             self.backbone = VNet(self.config.get(backbone, self.config.vnet_stage2))
             self._is_nested = False
         self.criterion = ScarLoss(self.train_config)
+        # Detect multi-class (2 classes + bg → num_classes=3)
+        model_cfg_vnet = self.config.get(backbone, self.config.vnet_stage2)
+        self._num_classes = int(model_cfg_vnet.get("num_classes", 2))
+        if self._num_classes > 2:
+            from .loss import DiceCELoss
+
+            class_w = self.train_config.loss_weights.get("ce_class_weight", None)
+            if class_w is not None:
+                class_w = torch.tensor(class_w, dtype=torch.float32)
+            self.criterion_mc = DiceCELoss(dice_weight=1.0, ce_weight=1.0, ce_class_weight=class_w)
+        else:
+            self.criterion_mc = None
 
     def forward(self, img: torch.Tensor, labels: Optional[Dict[str, torch.Tensor]] = None) -> Dict[str, torch.Tensor]:
         img = img.to(device=self.device, dtype=self.dtype)
-        scar_logits = self.backbone(img)
+        logits = self.backbone(img)
         # For NestedVNet with deep supervision: upsample each level to the
         # full-resolution space, then average for loss computation.
-        if self._is_nested and isinstance(scar_logits, (list, tuple)):
+        if self._is_nested and isinstance(logits, (list, tuple)):
             full_logits = []
-            tgt_spatial = scar_logits[-1].shape[2:]
-            for lo in scar_logits:
+            tgt_spatial = logits[-1].shape[2:]
+            for lo in logits:
                 if lo.shape[2:] != tgt_spatial:
                     lo = nn.functional.interpolate(lo, size=tgt_spatial, mode="trilinear", align_corners=False)
                 full_logits.append(lo)
             logits_for_loss = sum(full_logits) / len(full_logits)
-            logits_for_mask = scar_logits[-1]
+            logits_for_mask = logits[-1]
         else:
-            logits_for_loss = scar_logits
-            logits_for_mask = scar_logits
-        output = {"scar_logits": scar_logits, "scar_mask": logits_for_mask.argmax(dim=1)}
+            logits_for_loss = logits
+            logits_for_mask = logits
+
+        if self._num_classes > 2:
+            # Multi-class: seg_mask = argmax, scar_mask = class 2
+            seg_mask = logits_for_mask.argmax(dim=1)
+            scar_mask = (seg_mask == 2).to(torch.uint8)
+            output = {"scar_logits": logits, "scar_mask": scar_mask, "seg_mask": seg_mask}
+        else:
+            # Binary scar only
+            output = {"scar_logits": logits, "scar_mask": logits_for_mask.argmax(dim=1)}
+
         if labels is not None:
-            loss_dict = self.criterion(
-                scar_logits=logits_for_loss,
-                scar_target=labels["scar_mask"].to(self.device),
-                has_scar=labels["has_scar"].to(self.device),
-            )
-            output.update(loss_dict)
+            if self._num_classes > 2:
+                target = labels["scar_mask"].to(self.device).long()  # multi-class int label
+                loss = self.criterion_mc(logits_for_loss, target)
+                output.update({"scar_loss": loss, "total_loss": loss})
+            else:
+                loss_dict = self.criterion(
+                    scar_logits=logits_for_loss,
+                    scar_target=labels["scar_mask"].to(self.device),
+                    has_scar=labels["has_scar"].to(self.device),
+                )
+                output.update(loss_dict)
         return output
 
     @torch.no_grad()
@@ -274,7 +301,10 @@ class CARE2026_MRI_Stage2_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
         input_t = self._prepare_input(img)
         output = self.forward(input_t)
         self.train(original_mode)
-        scar_mask = output["scar_mask"]
+        if self._num_classes > 2:
+            scar_mask = output["scar_mask"]
+        else:
+            scar_mask = output["scar_mask"]
         if isinstance(scar_mask, (list, tuple)):
             scar_mask = scar_mask[-1]
         return CARE2026Outputs(task="mri", scar_mask=scar_mask.cpu().numpy().astype(np.uint8))

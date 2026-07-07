@@ -141,7 +141,8 @@ MRI_Stage2_TrainCfg = deepcopy(BaseCfg)
 MRI_Stage2_TrainCfg.task = "mri"
 MRI_Stage2_TrainCfg.stage = 2
 # MRI_Stage2_TrainCfg.backbone = "vnet_stage2"
-MRI_Stage2_TrainCfg.backbone = "vnet_stage2_2ch"  # "vnet_stage2" | "nested_vnet_stage2" | "vnet_stage2_2ch"
+MRI_Stage2_TrainCfg.backbone = "vnet_stage2_2ch"  # "vnet_stage2" | "nested_vnet_stage2" | "vnet_stage2_2ch" | "vnet_stage2_mc"
+MRI_Stage2_TrainCfg.label_mode = "binary"  # "binary" = scar only, "multi_class" = cavity + scar
 
 # Volume shape: canonical → crop centred on LA centroid → resize to 128×128×44
 MRI_Stage2_TrainCfg.canonical_shape = MRI_CANONICAL_SHAPE
@@ -607,6 +608,29 @@ ModelCfg.nested_vnet_ct = CFG(
     ),
     output_conv=CFG(kernel_size=1),
     deep_supervision=False,
+    bottleneck_transformer=None,
+)
+
+# -- VNet for MRI Stage 2 multi-class (cavity + scar, 2 classes + bg) ----------
+
+ModelCfg.vnet_stage2_mc = CFG(
+    in_channels=1,
+    num_classes=3,  # bg, LA cavity, LA scar
+    norm="instance",
+    activation="mish",
+    use_eca_skip=False,
+    input_conv=CFG(channels=16, kernel_size=5),
+    down_conv=CFG(
+        channels=[32, 64, 128, 256],
+        kernel_size=[3, 3, 3, 3],
+        dropout=[0.0, 0.0, 0.3, 0.3],
+    ),
+    up_conv=CFG(
+        channels=[128, 64, 32, 16],
+        kernel_size=[3, 3, 3, 3],
+        dropout=[0.0, 0.0, 0.0, 0.0],
+    ),
+    output_conv=CFG(kernel_size=1),
     bottleneck_transformer=None,
 )
 

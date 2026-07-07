@@ -320,11 +320,19 @@ class CARE2026_MRI_Stage2_Dataset(Dataset, ReprMixin):
                 # 2. Find LA centroid in canonical space
                 cx, cy, cz = self._centroid(la_mask)
 
+                # Multi-class label: cavity=1, scar=2 (scar takes priority)
+                label_mode = str(self.config.get("label_mode", "binary"))
+                if label_mode == "multi_class":
+                    crop_label = la_mask.astype(np.uint8) + scar_mask.astype(np.uint8) * 2
+                    crop_label[scar_mask > 0] = 2
+                else:
+                    crop_label = scar_mask
+
                 # 3. Crop generous cache region around centroid
                 img_cache, la_cache, scar_cache = _centroid_crop(
                     image,
                     la_mask,
-                    scar_mask,
+                    crop_label,
                     centroid=(cx, cy, cz),
                     crop_shape=self._cache_shape,
                 )
