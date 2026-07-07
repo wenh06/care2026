@@ -217,21 +217,23 @@ def _is_nnunet(model: torch.nn.Module) -> bool:
 
 def _check_model_consistency(
     stage1_model: torch.nn.Module,
-    stage2_model: torch.nn.Module,
+    stage2_model: Optional[torch.nn.Module],
 ) -> bool:
     """Verify Stage-1 and Stage-2 models are compatible and return ``apply_mclahe``.
 
-    For VNet models, reads ``train_config.apply_mclahe``.
-    For nnUNet models, reads ``config.apply_mclahe`` (set at init from kwargs).
+    When *stage2_model* is None (e.g. Task 2 cavity-only), only Stage 1's
+    MCLAHE setting is used.
     """
     s1_nnunet = _is_nnunet(stage1_model)
-    s2_nnunet = _is_nnunet(stage2_model)
+    s2_nnunet = _is_nnunet(stage2_model) if stage2_model is not None else s1_nnunet
 
     if s1_nnunet:
         s1_mclahe = bool((getattr(stage1_model, "config", {}) or {}).get("apply_mclahe", False))
     else:
         s1_mclahe = bool((getattr(stage1_model, "train_config", {}) or {}).get("apply_mclahe", False))
-    if s2_nnunet:
+    if stage2_model is None:
+        s2_mclahe = s1_mclahe
+    elif s2_nnunet:
         s2_mclahe = bool((getattr(stage2_model, "config", {}) or {}).get("apply_mclahe", False))
     else:
         s2_mclahe = bool((getattr(stage2_model, "train_config", {}) or {}).get("apply_mclahe", False))
@@ -333,7 +335,7 @@ def _zscore(arr: np.ndarray) -> np.ndarray:
 def predict_mri_two_stage(
     img_path: Union[str, Path],
     stage1_model: torch.nn.Module,
-    stage2_model: torch.nn.Module,
+    stage2_model: Optional[torch.nn.Module] = None,
     device: Optional[torch.device] = None,
     use_tta: bool = True,
     apply_mclahe: Optional[bool] = None,
@@ -420,6 +422,15 @@ def predict_mri_two_stage(
     else:
         fg = np.argwhere(la_s1_canonical > 0)
         cx, cy, cz = fg.mean(axis=0).round().astype(int) if len(fg) > 0 else np.array([s // 2 for s in canonical_shape])
+
+    # ── If no Stage 2 model (e.g. Task 2 cavity-only), return LA mask only
+    if stage2_model is None:
+        la_out = _resample_mask(la_s1_canonical, orig_shape)
+        la_out, _ = postprocess_mri_masks(la_out, np.zeros_like(la_out))
+        return CARE2026Outputs(
+            task="mri", la_mask=la_out, scar_mask=np.zeros_like(la_out),
+            source_affine=nii.affine, source_header=nii.header,
+        )
 
     # ── Centroid crop → Stage 2 ──────────────────────────────────────────
     cH, cW, cD = canonical_shape

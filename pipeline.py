@@ -96,6 +96,25 @@ def _print_model_config(model: torch.nn.Module, name: str, ckpt_path: Path) -> N
 # ---------------------------------------------------------------------------
 
 
+def _output_exists(results_dir: Path, record_id: str, task_num: int) -> bool:
+    """Check if the prediction file for *record_id* already exists."""
+    from outputs import _TASK_DIRNAME
+
+    out_dir = results_dir / _TASK_DIRNAME[task_num] / record_id
+    if record_id.startswith("test_"):
+        out_name = f"{record_id.split('_')[1]}_pred.nii.gz"
+    else:
+        out_name = f"{record_id}_pred.nii.gz"
+    return (out_dir / out_name).exists()
+
+
+def _resolve_task_dir(val_data_root: Path, task_num: int) -> Path:
+    data_dir = val_data_root / f"task{task_num}"
+    if (data_dir / "val_data").exists():
+        data_dir = data_dir / "val_data"
+    return data_dir
+
+
 def run_task1_inference(
     stage1_model: torch.nn.Module,
     stage2_model: torch.nn.Module,
@@ -105,32 +124,13 @@ def run_task1_inference(
     use_tta: bool = True,
     s1_threshold: float = 0.5,
     s2_threshold: float = 0.5,
+    overwrite: bool = False,
 ) -> None:
-    """Run Task 1 (LA scar) inference on the validation set.
-
-    Saves **only the scar mask** (as required by the challenge specification).
-
-    Parameters
-    ----------
-    stage1_model : CARE2026_MRI_Stage1_Model
-        Trained single-head VNet for coarse LA localisation.
-    stage2_model : CARE2026_MRI_Stage2_Model
-        Trained dual-head VNet for fine LA + scar segmentation.
-    val_data_root : path-like
-        Root containing ``task1/val_data/val_N/`` sub-directories.
-    results_dir : path-like
-        Output base directory for predictions.
-    device : torch.device, optional
-        Inference device; defaults to the stage1_model's device.
-    use_tta : bool, default True
-        Enable 8-fold flip TTA.
-    """
+    """Run Task 1 (LA scar) inference."""
     val_data_root = Path(val_data_root)
-    data_dir = val_data_root / "task1"
-    if (data_dir / "val_data").exists():
-        data_dir = data_dir / "val_data"
+    results_dir = Path(results_dir)
+    data_dir = _resolve_task_dir(val_data_root, 1)
     records = _sorted_records(data_dir)
-
     if not records:
         warnings.warn(f"No Task 1 records found in {data_dir}")
         return
@@ -140,55 +140,40 @@ def run_task1_inference(
 
     stage1_model.eval()
     stage2_model.eval()
+    skipped = 0
     for rec in tqdm(records, desc="Task 1 (LA scar)", unit="vol", dynamic_ncols=True):
+        if not overwrite and _output_exists(results_dir, rec, 1):
+            print(f"  [SKIP] {rec}")
+            skipped += 1
+            continue
         img_path = data_dir / rec / "enhanced.nii.gz"
         if not img_path.exists():
             warnings.warn(f"Image not found: {img_path}")
             continue
         out = predict_mri_two_stage(
-            img_path,
-            stage1_model,
-            stage2_model,
-            device=device,
-            use_tta=use_tta,
-            s1_threshold=s1_threshold,
-            s2_threshold=s2_threshold,
+            img_path, stage1_model, stage2_model,
+            device=device, use_tta=use_tta,
+            s1_threshold=s1_threshold, s2_threshold=s2_threshold,
         )
         out.save_as_nifti(results_dir, record_id=rec, task_num=1)
+    if skipped:
+        print(f"Task 1: skipped {skipped} already-completed case(s)")
 
 
 def run_task2_inference(
     stage1_model: torch.nn.Module,
-    stage2_model: torch.nn.Module,
     val_data_root: Union[str, Path],
     results_dir: Union[str, Path],
     device: Optional[torch.device] = None,
     use_tta: bool = True,
     s1_threshold: float = 0.5,
+    overwrite: bool = False,
 ) -> None:
-    """Run Task 2 (LA cavity) inference on the validation set.
-
-    Saves the LA cavity mask (binary) for each validation record.
-
-    Parameters
-    ----------
-    stage1_model : CARE2026_MRI_Stage1_Model
-        Trained single-head VNet for coarse LA localisation.
-    stage2_model : CARE2026_MRI_Stage2_Model
-        Trained dual-head VNet for fine LA + scar segmentation.
-    val_data_root : path-like
-        Root containing ``task2/val_data/val_N/`` sub-directories.
-    results_dir : path-like
-        Output base directory for predictions.
-    device : torch.device, optional
-    use_tta : bool, default True
-    """
+    """Run Task 2 (LA cavity) inference."""
     val_data_root = Path(val_data_root)
-    data_dir = val_data_root / "task2"
-    if (data_dir / "val_data").exists():
-        data_dir = data_dir / "val_data"
+    results_dir = Path(results_dir)
+    data_dir = _resolve_task_dir(val_data_root, 2)
     records = _sorted_records(data_dir)
-
     if not records:
         warnings.warn(f"No Task 2 records found in {data_dir}")
         return
@@ -197,16 +182,22 @@ def run_task2_inference(
         device = next(stage1_model.parameters()).device
 
     stage1_model.eval()
-    stage2_model.eval()
+    skipped = 0
     for rec in tqdm(records, desc="Task 2 (LA cavity)", unit="vol", dynamic_ncols=True):
+        if not overwrite and _output_exists(results_dir, rec, 2):
+            print(f"  [SKIP] {rec}")
+            skipped += 1
+            continue
         img_path = data_dir / rec / "enhanced.nii.gz"
         if not img_path.exists():
             warnings.warn(f"Image not found: {img_path}")
             continue
         out = predict_mri_two_stage(
-            img_path, stage1_model, stage2_model, device=device, use_tta=use_tta, s1_threshold=s1_threshold
+            img_path, stage1_model, stage2_model=None, device=device, use_tta=use_tta, s1_threshold=s1_threshold,
         )
         out.save_as_nifti(results_dir, record_id=rec, task_num=2)
+    if skipped:
+        print(f"Task 2: skipped {skipped} already-completed case(s)")
 
 
 def run_task3_inference(
@@ -215,28 +206,13 @@ def run_task3_inference(
     results_dir: Union[str, Path],
     device: Optional[torch.device] = None,
     use_tta: bool = True,
+    overwrite: bool = False,
 ) -> None:
-    """Run Task 3 (CT multi-structure) inference on the validation set.
-
-    Saves a multi-class mask (values 0–3) for each validation record.
-
-    Parameters
-    ----------
-    model : CARE2026_CT_Model
-        Trained CPS model in eval mode.
-    val_data_root : path-like
-        Root containing ``task3/val_data/val_N/`` sub-directories.
-    results_dir : path-like
-        Output base directory for predictions.
-    device : torch.device, optional
-    use_tta : bool, default True
-    """
+    """Run Task 3 (CT multi-structure) inference."""
     val_data_root = Path(val_data_root)
-    data_dir = val_data_root / "task3"
-    if (data_dir / "val_data").exists():
-        data_dir = data_dir / "val_data"
+    results_dir = Path(results_dir)
+    data_dir = _resolve_task_dir(val_data_root, 3)
     records = _sorted_records(data_dir)
-
     if not records:
         warnings.warn(f"No Task 3 records found in {data_dir}")
         return
@@ -245,7 +221,12 @@ def run_task3_inference(
         device = next(model.parameters()).device
 
     model.eval()
+    skipped = 0
     for rec in tqdm(records, desc="Task 3 (CT multi-structure)", unit="vol", dynamic_ncols=True):
+        if not overwrite and _output_exists(results_dir, rec, 3):
+            print(f"  [SKIP] {rec}")
+            skipped += 1
+            continue
         img_name = _ct_image_name(rec)
         img_path = data_dir / rec / img_name
         if not img_path.exists():
@@ -253,6 +234,8 @@ def run_task3_inference(
             continue
         out = predict_ct(img_path, model, device=device, use_tta=use_tta)
         out.save_as_nifti(results_dir, record_id=rec, task_num=3)
+    if skipped:
+        print(f"Task 3: skipped {skipped} already-completed case(s)")
 
 
 def run_all_tasks(
@@ -263,6 +246,7 @@ def run_all_tasks(
     results_dir: Union[str, Path],
     device: Optional[torch.device] = None,
     use_tta: bool = True,
+    overwrite: bool = False,
     tasks: Optional[List[int]] = None,
 ) -> None:
     """Convenience wrapper that runs all specified tasks sequentially.
@@ -293,19 +277,19 @@ def run_all_tasks(
 
     if 1 in tasks:
         if mri_ready:
-            run_task1_inference(mri_stage1_model, mri_stage2_model, val_data_root, results_dir, device=device, use_tta=use_tta)
+            run_task1_inference(mri_stage1_model, mri_stage2_model, val_data_root, results_dir, device=device, use_tta=use_tta, overwrite=overwrite)
         else:
             warnings.warn("Task 1 skipped: MRI Stage-1 and/or Stage-2 model not provided.")
 
     if 2 in tasks:
-        if mri_ready:
-            run_task2_inference(mri_stage1_model, mri_stage2_model, val_data_root, results_dir, device=device, use_tta=use_tta)
+        if mri_stage1_model is not None:
+            run_task2_inference(mri_stage1_model, val_data_root, results_dir, device=device, use_tta=use_tta, overwrite=overwrite)
         else:
             warnings.warn("Task 2 skipped: MRI Stage-1 and/or Stage-2 model not provided.")
 
     if 3 in tasks:
         if ct_model is not None:
-            run_task3_inference(ct_model, val_data_root, results_dir, device=device, use_tta=use_tta)
+            run_task3_inference(ct_model, val_data_root, results_dir, device=device, use_tta=use_tta, overwrite=overwrite)
         else:
             warnings.warn("Task 3 skipped: no CT model provided.")
 
@@ -430,6 +414,12 @@ if __name__ == "__main__":
     )
     parser.add_argument("--s1_threshold", type=float, default=0.5, help="Stage-1 LA cavity probability threshold.")
     parser.add_argument(
+        "--overwrite",
+        type=str2bool,
+        default=False,
+        help="Overwrite existing prediction files instead of skipping.",
+    )
+    parser.add_argument(
         "--s2_threshold", type=float, default=0.5, help="Stage-2 scar probability threshold (VNet only; nnUNet uses argmax)."
     )
     parser.add_argument("--ct_threshold", type=float, default=0.5, help="CT multi-class probability threshold.")
@@ -510,6 +500,7 @@ if __name__ == "__main__":
         results_dir=output_dir,
         device=device,
         use_tta=args.tta,
+        overwrite=args.overwrite,
         tasks=tasks,
     )
 
