@@ -823,7 +823,6 @@ class CARE2026_CT_nnUNet(nn.Module, SizeMixin, CkptMixin, CitationMixin):
         self._predictor = nnUNetPredictor(
             tile_step_size=0.5,
             use_gaussian=True,
-            use_mirroring=False,
             perform_everything_on_device=True,
             device=device,
             verbose=False,
@@ -902,7 +901,7 @@ class CARE2026_CT_nnUNet(nn.Module, SizeMixin, CkptMixin, CitationMixin):
     # ------------------------------------------------------------------
 
     @torch.no_grad()
-    def predict(self, image_npy: np.ndarray, spacing: Sequence[float]) -> np.ndarray:
+    def predict(self, image_npy: np.ndarray, spacing: Sequence[float], use_tta: bool = True) -> np.ndarray:
         """Run full-volume prediction using nnUNet's pipeline.
 
         Parameters
@@ -911,6 +910,8 @@ class CARE2026_CT_nnUNet(nn.Module, SizeMixin, CkptMixin, CitationMixin):
             Raw CT volume in original voxel space.
         spacing : (float, float, float)
             Voxel spacing in mm (x, y, z).
+        use_tta : bool
+            Enable nnUNet's built-in mirroring TTA.
 
         Returns
         -------
@@ -918,6 +919,7 @@ class CARE2026_CT_nnUNet(nn.Module, SizeMixin, CkptMixin, CitationMixin):
             Predicted multi-class mask (0-3).
         """
         self._predictor.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self._predictor.use_mirroring = bool(use_tta)
         # nnUNet's NibabelIOWithReorient transposes nibabel's (x,y,z)
         # to SimpleITK's (z,y,x) ordering.  We must do the same for the
         # raw numpy array and reverse the transpose on the output.
@@ -1197,7 +1199,6 @@ class CARE2026_MRI_nnUNet(nn.Module, SizeMixin, CkptMixin, CitationMixin):
         self._predictor = nnUNetPredictor(
             tile_step_size=0.5,
             use_gaussian=True,
-            use_mirroring=False,
             perform_everything_on_device=True,
             device=device,
             verbose=False,
@@ -1216,7 +1217,7 @@ class CARE2026_MRI_nnUNet(nn.Module, SizeMixin, CkptMixin, CitationMixin):
     # ------------------------------------------------------------------
 
     @torch.no_grad()
-    def predict(self, image_npy: np.ndarray, spacing: Sequence[float]) -> np.ndarray:
+    def predict(self, image_npy: np.ndarray, spacing: Sequence[float], use_tta: bool = True) -> np.ndarray:
         """Run full-volume prediction using nnUNet's pipeline.
 
         Parameters
@@ -1225,6 +1226,8 @@ class CARE2026_MRI_nnUNet(nn.Module, SizeMixin, CkptMixin, CitationMixin):
             Pre-processed image (e.g. canonical, possibly MCLAHE-enhanced).
         spacing : (float, float, float)
             Voxel spacing in mm (x, y, z).
+        use_tta : bool
+            Enable nnUNet's built-in mirroring TTA.
 
         Returns
         -------
@@ -1232,6 +1235,7 @@ class CARE2026_MRI_nnUNet(nn.Module, SizeMixin, CkptMixin, CitationMixin):
             Predicted binary mask (0/1).
         """
         self._predictor.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self._predictor.use_mirroring = bool(use_tta)
         # nnUNet's NibabelIOWithReorient transposes (x,y,z) → (z,y,x)
         if image_npy.ndim == 3:
             image_npy = np.transpose(image_npy, (2, 1, 0))

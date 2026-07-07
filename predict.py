@@ -398,7 +398,7 @@ def predict_mri_two_stage(
     if s1_nnunet:
         stage1_model.eval()
         with torch.no_grad():
-            la_s1_canonical = stage1_model.predict(img_canonical, mri_spacing)
+            la_s1_canonical = stage1_model.predict(img_canonical, mri_spacing, use_tta=use_tta)
             # nnUNet cavity model outputs classes {0,1} — argmax to binary
             la_s1_canonical = (la_s1_canonical > 0).astype(np.uint8)
     else:
@@ -446,7 +446,7 @@ def predict_mri_two_stage(
         # nnUNet Stage 2: predictor handles normalization + resampling internally
         stage2_model.eval()
         with torch.no_grad():
-            scar_crop = stage2_model.predict(crop, mri_spacing)
+            scar_crop = stage2_model.predict(crop, mri_spacing, use_tta=use_tta)
             scar_crop = (scar_crop > 0).astype(np.uint8)
     else:
         # VNet Stage 2: z-score → resize → forward → resize back
@@ -631,7 +631,7 @@ def predict_ct(
         nii = nib.load(str(img_path))
         image_raw = nii.get_fdata().astype(np.float32)
         zooms = tuple(nii.header.get_zooms()[:3])
-        pred = model.predict(image_raw, zooms)
+        pred = model.predict(image_raw, zooms, use_tta=use_tta)
         # skip postprocess_ct_mask — nnUNet's Gaussian-weighted sliding
         # window produces clean predictions; connected-component filtering
         # would destroy multi-lobed structures (LAA, PV).
