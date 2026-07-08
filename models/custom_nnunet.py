@@ -10,8 +10,13 @@ Usage::
 nnUNet recursively scans all ``.py`` files for the requested class name.
 """
 
+import numpy as np
 import torch
+from nnunetv2.training.loss.deep_supervision import DeepSupervisionWrapper
+from nnunetv2.training.loss.dice import MemoryEfficientSoftDiceLoss
 from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
+from scipy.ndimage import distance_transform_edt
+from torch.nn import CrossEntropyLoss
 
 
 class nnUNetTrainerScarWeighted(nnUNetTrainer):
@@ -41,3 +46,117 @@ class nnUNetTrainerScarWeighted(nnUNetTrainer):
                 weights[idx] = 1.0
         self.ce_weight = torch.tensor(weights, dtype=torch.float32)
         super().__init__(plans, configuration, fold, dataset_json, device=device)
+
+
+class nnUNetTrainerScarGaussian(nnUNetTrainer):
+    """nnUNet with Gaussian spatial weighting for scar segmentation.
+
+    Computes a pixel-wise weight map w(x) = 1 + w₀·exp(−d²/2σ²) where
+    d is the distance to the nearest scar voxel.  Works for both binary
+    (Dataset 501) and multi-class (Dataset 521) labels.
+
+    The distance transform runs on CPU (scipy) per batch — ~0.1s overhead
+    for a 256×256×44 patch, negligible relative to forward/backward pass.
+    """
+
+    def __init__(
+        self,
+        plans: dict,
+        configuration: str,
+        fold: int,
+        dataset_json: dict,
+        device: torch.device = torch.device("cuda"),
+        w0: float = 5.0,
+        sigma_mm: float = 2.0,
+    ):
+        self._w0 = w0
+        self._sigma_mm = sigma_mm
+        # Find scar class index from label map
+        labels = dataset_json.get("labels", {})
+        self._scar_cls = 1  # fallback: last non-bg class
+        for name, idx in labels.items():
+            if "scar" in name.lower():
+                self._scar_cls = int(idx)
+                break
+        super().__init__(plans, configuration, fold, dataset_json, device=device)
+
+    def _build_loss(self):
+        loss = _ScarGaussianLoss(
+            scar_class=self._scar_cls,
+            w0=self._w0,
+            sigma_mm=self._sigma_mm,
+            batch_dice=self.configuration_manager.batch_dice,
+            ignore_label=self.label_manager.ignore_label,
+        )
+        if self._do_i_compile():
+            loss.dice = torch.compile(loss.dice)
+        if self.enable_deep_supervision:
+            deep_supervision_scales = self._get_deep_supervision_scales()
+            weights = np.array([1 / (2**i) for i in range(len(deep_supervision_scales))])
+            if self.is_ddp and not self._do_i_compile():
+                weights[-1] = 1e-6
+            else:
+                weights[-1] = 0
+            weights = weights / weights.sum()
+            loss = DeepSupervisionWrapper(loss, weights)
+        return loss
+
+
+class _ScarGaussianLoss(torch.nn.Module):
+    """Dice + pixel-weighted CE with Gaussian spatial weighting.
+
+    Same weight map formula as ``models.loss.ScarLoss``:
+    w(x) = 1 + w₀·exp(−d(x)²/2σ²) where d(x) = distance to nearest scar voxel.
+    Adapted for nnUNet interface: ``forward(pred, target)`` instead of
+    ``forward(scar_logits, scar_target, has_scar)``.
+    Uses ``MemoryEfficientSoftDiceLoss`` (nnUNet) instead of ``DiceCELoss``.
+    """
+
+    def __init__(
+        self,
+        scar_class: int,
+        w0: float = 5.0,
+        sigma_mm: float = 2.0,
+        spacing_xy: float = 0.625,
+        dice_weight: float = 1.0,
+        ce_weight: float = 1.0,
+        batch_dice: bool = False,
+        ignore_label: int | None = None,
+    ):
+        super().__init__()
+        self.scar_class = scar_class
+        self.w0 = w0
+        self.sigma_px = max(1.0, sigma_mm / spacing_xy)
+        self.dice_weight = dice_weight
+        self.ce_weight = ce_weight
+        self.ignore_label = ignore_label
+        self.dice = MemoryEfficientSoftDiceLoss(apply_nonlin=torch.nn.Softmax(dim=1), batch_dice=batch_dice, smooth=1e-5)
+        self.ce = CrossEntropyLoss(reduction="none", ignore_index=ignore_label if ignore_label is not None else -100)
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        # Dice
+        dice_loss = self.dice(pred, target)
+
+        # Pixel-weighted CE
+        # target may be (B, 1, H, W, D) → squeeze
+        tgt = target.long()
+        if tgt.ndim == 5 and tgt.shape[1] == 1:
+            tgt = tgt[:, 0]
+
+        # Compute spatial weight map from scar mask (CPU, per-batch)
+        scar_bin = (tgt == self.scar_class).cpu().numpy().astype("uint8")
+        batch_w = []
+        for b in range(scar_bin.shape[0]):
+            sb = scar_bin[b]
+            if sb.sum() == 0:
+                batch_w.append(np.ones(sb.shape, dtype=np.float32))
+            else:
+                d = distance_transform_edt(1 - sb).astype(np.float32)
+                w = 1.0 + self.w0 * np.exp(-(d**2) / (2 * self.sigma_px**2))
+                batch_w.append(w.astype(np.float32))
+        w_tensor = torch.from_numpy(np.stack(batch_w)).to(pred.device)
+
+        ce_pixel = self.ce(pred, tgt)  # (B, H, W, D)
+        ce_loss = (ce_pixel * w_tensor).mean()
+
+        return self.dice_weight * dice_loss + self.ce_weight * ce_loss
