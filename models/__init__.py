@@ -144,8 +144,13 @@ class CARE2026_MRI_Stage1_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
         for key in ("canonical_shape", "patch_shape", "apply_mclahe"):
             if key in self.__train_config and key not in self.__config:
                 self.__config[key] = self.__train_config[key]
+        self._num_classes = int(self.config.vnet_stage1.get("num_classes", 2))
         self.backbone = VNet(self.config.vnet_stage1)
         self.criterion = Stage1MRILoss(self.train_config)
+
+    @property
+    def num_classes(self) -> int:
+        return self._num_classes
 
     def forward(self, img: torch.Tensor, labels: Optional[Dict[str, torch.Tensor]] = None) -> Dict[str, torch.Tensor]:
         img = img.to(device=self.device, dtype=self.dtype)
@@ -252,6 +257,22 @@ class CARE2026_MRI_Stage2_Model(nn.Module, SizeMixin, CkptMixin, CitationMixin):
             self.criterion_mc = DiceCELoss(dice_weight=1.0, ce_weight=1.0, ce_class_weight=class_w)
         else:
             self.criterion_mc = None
+
+        # Derive scar class index from label_map (e.g. {"LA_scar": 2})
+        label_map = model_cfg_vnet.get("label_map", {})
+        self._scar_class_index = self._num_classes - 1  # fallback: last class
+        for name, idx in label_map.items():
+            if "scar" in name.lower():
+                self._scar_class_index = int(idx)
+                break
+
+    @property
+    def num_classes(self) -> int:
+        return self._num_classes
+
+    @property
+    def scar_class_index(self) -> int:
+        return self._scar_class_index
 
     def forward(self, img: torch.Tensor, labels: Optional[Dict[str, torch.Tensor]] = None) -> Dict[str, torch.Tensor]:
         img = img.to(device=self.device, dtype=self.dtype)
@@ -1211,6 +1232,23 @@ class CARE2026_MRI_nnUNet(nn.Module, SizeMixin, CkptMixin, CitationMixin):
             checkpoint_name=ckpt_name,
         )
         self.backbone = self._predictor.network
+        ds_json = self._predictor.dataset_json or {}
+        labels = ds_json.get("labels", {})
+        self._num_classes = len(labels)
+        # Scar class index from label map (e.g. {"background": 0, "LA_scar": 1} → 1)
+        self._scar_class_index: int = 1
+        for name, idx in labels.items():
+            if "scar" in name.lower():
+                self._scar_class_index = int(idx)
+                break
+
+    @property
+    def num_classes(self) -> int:
+        return self._num_classes
+
+    @property
+    def scar_class_index(self) -> int:
+        return self._scar_class_index
 
     # ------------------------------------------------------------------
     # Full-volume inference (delegates to nnUNetPredictor)

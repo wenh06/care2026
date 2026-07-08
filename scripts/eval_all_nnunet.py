@@ -13,10 +13,10 @@ import warnings
 from pathlib import Path
 from typing import Dict, Tuple
 
-# Suppress noisy third-party warnings BEFORE any import that triggers them
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"  # force; mclahe.py resets to "2"
-warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"batchgenerators")
-warnings.filterwarnings("ignore", category=UserWarning, module=r"google")
+# Suppress noisy third-party warnings
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"batchgenerators\.")
+warnings.filterwarnings("ignore", category=UserWarning, module=r"google\.protobuf")
 
 import nibabel as nib
 import numpy as np
@@ -28,9 +28,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from models import CARE2026_CT_nnUNet, CARE2026_MRI_nnUNet
 from predict import predict_ct, predict_mri_two_stage
-
-# Re-override: mclahe.py (imported by predict) resets TF_CPP_MIN_LOG_LEVEL to "2"
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
 
 def _get_trainer_dir(ds_id: int, results_root: Path) -> Path:
@@ -175,7 +172,7 @@ def main():
                     from utils.mclahe import mclahe as _mc
 
                     img = _mc(img)
-                pred = model.predict(img, spacer, use_tta=False)
+                pred = model.predict(img, spacer)
                 pred = (pred > 0).astype(np.uint8)
                 pred = _resample_if_needed(pred, gt)
                 d, _, _ = _binary_metrics(pred, gt)

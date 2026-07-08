@@ -143,6 +143,8 @@ MRI_Stage2_TrainCfg.stage = 2
 # MRI_Stage2_TrainCfg.backbone = "vnet_stage2"
 MRI_Stage2_TrainCfg.backbone = "vnet_stage2_2ch"  # "vnet_stage2" | "nested_vnet_stage2" | "vnet_stage2_2ch" | "vnet_stage2_mc"
 MRI_Stage2_TrainCfg.label_mode = "binary"  # "binary" = scar only, "multi_class" = cavity + scar
+# Label mapping for multi-class mode (must match prep_nnunet_mri.py --multi-class)
+MRI_Stage2_TrainCfg.label_map = {"background": 0, "LA_cavity": 1, "LA_scar": 2}
 
 # Volume shape: canonical → crop centred on LA centroid → resize to 128×128×44
 MRI_Stage2_TrainCfg.canonical_shape = MRI_CANONICAL_SHAPE
@@ -419,6 +421,7 @@ ModelCfg.vnet_stage1 = CFG(
 ModelCfg.vnet_stage2 = CFG(
     in_channels=1,
     num_classes=2,
+    label_map={"background": 0, "LA_scar": 1},
     norm="instance",
     activation="mish",
     use_eca_skip=False,
@@ -616,6 +619,7 @@ ModelCfg.nested_vnet_ct = CFG(
 ModelCfg.vnet_stage2_mc = CFG(
     in_channels=1,
     num_classes=3,  # bg, LA cavity, LA scar
+    label_map={"background": 0, "LA_cavity": 1, "LA_scar": 2},
     norm="instance",
     activation="mish",
     use_eca_skip=False,

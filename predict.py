@@ -428,8 +428,11 @@ def predict_mri_two_stage(
         la_out = _resample_mask(la_s1_canonical, orig_shape)
         la_out, _ = postprocess_mri_masks(la_out, np.zeros_like(la_out))
         return CARE2026Outputs(
-            task="mri", la_mask=la_out, scar_mask=np.zeros_like(la_out),
-            source_affine=nii.affine, source_header=nii.header,
+            task="mri",
+            la_mask=la_out,
+            scar_mask=np.zeros_like(la_out),
+            source_affine=nii.affine,
+            source_header=nii.header,
         )
 
     # ── Centroid crop → Stage 2 ──────────────────────────────────────────
@@ -453,12 +456,17 @@ def predict_mri_two_stage(
     crop_h, crop_w, crop_d = crop.shape
     s2_nnunet = _is_nnunet(stage2_model)
 
+    scar_cls = getattr(stage2_model, "scar_class_index", 1)
+
     if s2_nnunet:
         # nnUNet Stage 2: predictor handles normalization + resampling internally
         stage2_model.eval()
         with torch.no_grad():
-            scar_crop = stage2_model.predict(crop, mri_spacing, use_tta=use_tta)
-            scar_crop = (scar_crop > 0).astype(np.uint8)
+            pred_crop = stage2_model.predict(crop, mri_spacing, use_tta=use_tta)
+        if scar_cls > 1:
+            scar_crop = (pred_crop == scar_cls).astype(np.uint8)
+        else:
+            scar_crop = (pred_crop > 0).astype(np.uint8)
     else:
         # VNet Stage 2: z-score → resize → forward → resize back
         img_s2_norm = _zscore(crop)
@@ -486,7 +494,7 @@ def predict_mri_two_stage(
                 _stage2_tta(stage2_model, t_s2, device) if use_tta else _run_stage2_model(stage2_model, t_s2, device)
             )
 
-        scar_crop = _resample_mask((scar_prob_s2[1] >= s2_threshold).astype(np.uint8), (crop_h, crop_w, crop_d))
+        scar_crop = _resample_mask((scar_prob_s2[scar_cls] >= s2_threshold).astype(np.uint8), (crop_h, crop_w, crop_d))
 
     scar_unpad = scar_crop[px0 : tH - px1, py0 : tW - py1, pz0 : tD - pz1]
     scar_canonical = np.zeros(canonical_shape, dtype=np.uint8)
