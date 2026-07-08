@@ -63,6 +63,28 @@ def _save_nifti(data: np.ndarray, affine: np.ndarray, path: Path) -> None:
     nib.save(img, str(path))
 
 
+def _scar_weight_map(
+    scar_mask: np.ndarray,
+    w0: float = 5.0,
+    sigma_mm: float = 2.0,
+    spacing_xy: float = 0.625,
+) -> np.ndarray:
+    """Gaussian spatial weight map centred on scar voxels.
+
+    w(x) = 1 + w₀ · exp(−d(x)² / 2σ²)
+    where d(x) = Euclidean distance to nearest scar voxel.
+
+    Matches ``ScarLoss`` in ``models/loss/__init__.py``.
+    """
+    from scipy.ndimage import distance_transform_edt
+
+    if scar_mask.sum() == 0:
+        return np.ones_like(scar_mask, dtype=np.float32)
+    sigma_px = max(1.0, sigma_mm / spacing_xy)
+    d = distance_transform_edt(1 - scar_mask).astype(np.float32)
+    return (1.0 + w0 * np.exp(-(d**2) / (2 * sigma_px**2))).astype(np.float32)
+
+
 def _centroid_crop(
     image: np.ndarray,
     la_mask: np.ndarray,
@@ -133,6 +155,7 @@ def _process_crop_case(
     crop_shape: Tuple[int, int, int],
     apply_mclahe: bool = False,
     multi_class: bool = False,
+    save_weight_map: bool = False,
 ) -> None:
     """Load, centroid-crop, and save one case for Task 1.
 
@@ -177,6 +200,15 @@ def _process_crop_case(
 
     _save_nifti(cropped_img, affine, img_dir / f"{case_id}_0000.nii.gz")
     _save_nifti(cropped_label, affine, lbl_dir / f"{case_id}.nii.gz")
+    if save_weight_map:
+        if scar_src is not None:
+            scar_data, _ = _load_nifti(scar_src)
+            scar_bin = (scar_data > 0).astype(np.uint8)
+            _, cropped_scar = _centroid_crop(np.zeros_like(image, dtype=np.uint8), la_bin, scar_bin, crop_shape)
+            wm = _scar_weight_map(cropped_scar)
+        else:
+            wm = np.ones(crop_shape, dtype=np.float32)
+        np.save(str(lbl_dir / f"{case_id}_weight.npy"), wm)
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +241,12 @@ def main():
         action="store_true",
         default=False,
         help="Create 2-class labels (1=cavity, 2=scar) instead of binary scar-only labels",
+    )
+    parser.add_argument(
+        "--weight-map",
+        action="store_true",
+        default=False,
+        help="Save Gaussian spatial weight map alongside label (for custom loss)",
     )
     parser.add_argument(
         "--mclahe",
@@ -346,10 +384,15 @@ def main():
                     label = (la_data > 0).astype(np.uint8) + (scar_data > 0).astype(np.uint8) * 2
                     label[(scar_data > 0)] = 2
                     _save_nifti(label, affine, lbl_dir / f"{case_id}.nii.gz")
+                    if args.weight_map:
+                        scar_bin = (scar_data > 0).astype(np.uint8)
+                        np.save(str(lbl_dir / f"{case_id}_weight.npy"), _scar_weight_map(scar_bin))
                 else:
                     scar_data, scar_affine = _load_nifti(scar_src)
                     scar_bin = (scar_data > 0).astype(np.uint8)
                     _save_nifti(scar_bin, scar_affine, lbl_dir / f"{case_id}.nii.gz")
+                    if args.weight_map:
+                        np.save(str(lbl_dir / f"{case_id}_weight.npy"), _scar_weight_map(scar_bin))
             else:
                 _process_crop_case(
                     img_src,
@@ -361,6 +404,7 @@ def main():
                     crop_shape,
                     apply_mclahe=args.mclahe,
                     multi_class=args.multi_class,
+                    save_weight_map=args.weight_map,
                 )
 
             case_idx += 1
@@ -401,6 +445,7 @@ def main():
                             crop_shape,
                             apply_mclahe=args.mclahe,
                             multi_class=args.multi_class,
+                            save_weight_map=args.weight_map,
                         )
 
                     no_scar_cases.append(case_id)
