@@ -17,21 +17,27 @@ from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
 class nnUNetTrainerScarWeighted(nnUNetTrainer):
     """nnUNet with per-class CE weights for scar segmentation.
 
-    nnUNetTrainer.__init__ sets ``self.ce_weight = None``, then calls
-    ``_build_loss()`` which passes it to ``DC_and_CE_loss``.  We set
-    ``self.ce_weight`` **before** ``super().__init__()`` so that
-    ``_build_loss`` picks up our per-class weights.
+    Reads ``dataset_json["labels"]`` to find the scar class index and
+    assigns: bg = 0.1, scar = 5.0, other fg classes = 1.0.
 
-    Must use the **exact same signature** as nnUNetTrainer.__init__
-    (no ``**kwargs``) because the parent inspects ``locals()``.
+    nnUNetTrainer sets ``self.ce_weight = None`` then calls
+    ``_build_loss()`` which passes it to ``DC_and_CE_loss``.
+    We set ``self.ce_weight`` BEFORE ``super().__init__()``.
     """
 
     def __init__(
         self, plans: dict, configuration: str, fold: int, dataset_json: dict, device: torch.device = torch.device("cuda")
     ):
-        num_fg = len(dataset_json.get("labels", {})) - 1
-        if num_fg > 1:
-            self.ce_weight = torch.tensor([0.1, 1.0, 5.0], dtype=torch.float32)
-        else:
-            self.ce_weight = torch.tensor([0.1, 5.0], dtype=torch.float32)
+        labels = dataset_json.get("labels", {})
+        n_classes = len(labels)
+        weights = [0.1] * n_classes  # bg default
+        for name, idx in labels.items():
+            idx = int(idx)
+            if idx == 0:
+                continue
+            if "scar" in name.lower():
+                weights[idx] = 5.0
+            else:
+                weights[idx] = 1.0
+        self.ce_weight = torch.tensor(weights, dtype=torch.float32)
         super().__init__(plans, configuration, fold, dataset_json, device=device)
