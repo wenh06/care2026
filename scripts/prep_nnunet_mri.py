@@ -1,30 +1,32 @@
 """Convert CARE2026 LGE-MRI data to nnUNet v2 format.
 
-Creates two nnUNet datasets:
+Creates nnUNet datasets for Task 1 (scar) and Task 2 (cavity).
 
-- **Dataset 502** — LA cavity segmentation (Task 2): 190 full-volume cases
-  (60 from Task 1 dir + 130 from Task 2 dir), binary LA cavity label.
+Common datasets
+--------------
+- **Dataset 502** — LA cavity segmentation (Task 2): 190 full-volume cases,
+  binary LA cavity label.
+- **Dataset 501** — LA scar segmentation (Task 1): 60 cases centroid-cropped
+  to 256×256×44, binary scar label.
+- **Dataset 511/512** — Same as 501/502 but with MCLAHE (``--mclahe``).
 
-- **Dataset 501** — LA scar segmentation (Task 1): 60 cases **cropped** to a
-  fixed-size region centred on the LA cavity centroid.  Uses the same centroid
-  crop logic as ``dataset.py:_centroid_crop`` with ``MRI_STAGE2_CROP_SHAPE``
-  (256 × 256 × 44) from ``const.py``.  All cropped cases have identical shape,
-  which is ideal for nnUNet's self-configuring pipeline.
+Multi-class (cavity + scar joint label)
+---------------------------------------
+- **Dataset 521** — 60 cropped cases, 2-class label (cavity=1, scar=2).
+- **Dataset 600** — 60 full-volume cases, 2-class label.
 
 Usage::
 
-    # Both datasets
-    python scripts/prep_nnunet_mri.py --db-dir /Data1/wenh06/CARE2026-LeftAtrium
+    # Standard (binary scar, no CLAHE)
+    python scripts/prep_nnunet_mri.py --db-dir ... --task 1           # → 501
+    python scripts/prep_nnunet_mri.py --db-dir ... --task 2           # → 502
 
-    # Single dataset
-    python scripts/prep_nnunet_mri.py --db-dir ... --task 1
-    python scripts/prep_nnunet_mri.py --db-dir ... --task 2
+    # With CLAHE
+    python scripts/prep_nnunet_mri.py --db-dir ... --task 1 --mclahe  # → 511
 
-    # With no-scar hard negatives (30% of Task 2 cases)
-    python scripts/prep_nnunet_mri.py --db-dir ... --no-scar-proportion 0.3
-
-    # Custom output dir (default: $nnUNet_raw or tmp/nnUNet_raw)
-    python scripts/prep_nnunet_mri.py --db-dir ... --output /path/to/nnUNet_raw
+    # Multi-class (cavity + scar)
+    python scripts/prep_nnunet_mri.py --db-dir ... --task 1 --multi-class          # → 521 crop
+    python scripts/prep_nnunet_mri.py --db-dir ... --task 1 --multi-class --no-crop  # → 600 full
 """
 
 import argparse
