@@ -13,13 +13,14 @@ from pathlib import Path
 
 import nibabel as nib
 import numpy as np
+from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-NNUNET_RAW_DEFAULT = "tmp/nnUNet_raw"
-NNUNET_PREPROCESSED_DEFAULT = "tmp/nnUNet_preprocessed"
-NNUNET_RESULTS_DEFAULT = "checkpoints/nnUNet_results"
+ENV_RAW = "nnUNet_raw"
+ENV_PREPROC = "nnUNet_preprocessed"
+ENV_RES = "nnUNet_results"
 
 
 def main():
@@ -30,19 +31,34 @@ def main():
         required=True,
         help="nnUNet training output (contains fold_0/..fold_4/, plans.json, dataset.json)",
     )
-    parser.add_argument("--nnunet-raw", default=NNUNET_RAW_DEFAULT, help="nnUNet_raw dir for output dataset")
-    parser.add_argument("--nnunet-preprocessed", default=NNUNET_PREPROCESSED_DEFAULT, help="For printed commands only")
-    parser.add_argument("--nnunet-results", default=NNUNET_RESULTS_DEFAULT, help="For printed commands only")
+    parser.add_argument("--nnunet-raw", default=None, help="nnUNet_raw dir (default: $nnUNet_raw)")
+    parser.add_argument("--nnunet-preprocessed", default=None, help="For printed commands (default: $nnUNet_preprocessed)")
+    parser.add_argument("--nnunet-results", default=None, help="For printed commands (default: $nnUNet_results)")
     parser.add_argument(
         "--folds",
         type=str,
         default="0,1,2,3,4",
         help="Comma-separated folds to ensemble, e.g. '0' for single-fold pseudo-labels",
     )
-    parser.add_argument("--dataset-id", type=int, default=501, help="New nnUNet dataset ID for 150-case training")
+    parser.add_argument("--dataset-id", type=int, default=503, help="New nnUNet dataset ID for 150-case training")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--checkpoint", default="checkpoint_best.pth")
     args = parser.parse_args()
+
+    # Resolve paths: CLI arg > env var > error
+    for key, env, label in [
+        ("nnunet_raw", ENV_RAW, "nnUNet_raw"),
+        ("nnunet_preprocessed", ENV_PREPROC, "nnUNet_preprocessed"),
+        ("nnunet_results", ENV_RES, "nnUNet_results"),
+    ]:
+        val = getattr(args, key)
+        if val is None:
+            val = os.environ.get(env)
+        if val is None:
+            raise RuntimeError(f"--{key} not set and ${env} not defined.  export {env}=... or pass --{key}")
+        setattr(args, key, val)
+    if args.dataset_id in (500, 501, 502, 511, 512, 521):
+        raise ValueError(f"--dataset-id {args.dataset_id} conflicts with existing datasets.  Use 503 or higher.")
 
     db_dir = Path(args.db_dir)
     ct_dir = db_dir / "cardiac anatomy segmentation（CT）" / "train_data"
@@ -68,8 +84,6 @@ def main():
     print(f"Labeled: {len(labeled_cases)}  Unlabeled: {len(unlabeled_cases)}")
 
     # ── Step 2: 5-fold ensemble inference on unlabeled cases ──────────
-    from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
-
     predictor = nnUNetPredictor(
         tile_step_size=0.5,
         use_gaussian=True,
@@ -87,6 +101,9 @@ def main():
         checkpoint_name=args.checkpoint,
     )
 
+    # Save pseudo-labels to a separate dir, not touching original data
+    pseudo_dir = nnunet_raw.parent / "pseudo_labels"
+    pseudo_dir.mkdir(parents=True, exist_ok=True)
     print(f"Generating pseudo-labels for {len(unlabeled_cases)} unlabeled cases...")
     for d, rec_num, num_str, img_src in tqdm(unlabeled_cases, desc="Pseudo-labeling", unit="case"):
         nii = nib.load(str(img_src))
@@ -108,10 +125,9 @@ def main():
         pred = ret[0].astype(np.uint8)
         pred = np.transpose(pred, (2, 1, 0))  # back to (x,y,z)
 
-        # Save pseudo-label
-        lbl_path = d / f"label_{num_str}.nii.gz"
+        # Save pseudo-label in separate directory
         nii_out = nib.Nifti1Image(pred, affine=nii.affine, header=nii.header)
-        nib.save(nii_out, str(lbl_path))
+        nib.save(nii_out, str(pseudo_dir / f"label_{num_str}.nii.gz"))
 
     print("Pseudo-labels saved.")
 
@@ -129,7 +145,7 @@ def main():
         os.symlink(lbl_src.resolve(), lbl_dir / f"CARE{num_str}.nii.gz")
         n_linked += 1
     for d, rec_num, num_str, img_src in unlabeled_cases:
-        lbl_src = d / f"label_{num_str}.nii.gz"  # just generated
+        lbl_src = pseudo_dir / f"label_{num_str}.nii.gz"  # just generated
         os.symlink(img_src.resolve(), img_dir / f"CARE{num_str}_0000.nii.gz")
         os.symlink(lbl_src.resolve(), lbl_dir / f"CARE{num_str}.nii.gz")
         n_linked += 1
@@ -153,8 +169,9 @@ def main():
     print(f"  export nnUNet_raw='{raw}'")
     print(f"  export nnUNet_preprocessed='{preproc}'")
     print(f"  export nnUNet_results='{results}'")
-    print(f"  nnUNetv2_plan_and_preprocess -d {args.dataset_id:03d} --verify_dataset_integrity")
-    print(f"  nnUNetv2_train {args.dataset_id:03d} 3d_fullres 0  # repeat for folds 1-4")
+    print(f"  nnUNetv2_plan_and_preprocess -d {args.dataset_id:03d} --verify_dataset_integrity -c 3d_fullres")
+    print(f"  nnUNetv2_train {args.dataset_id:03d} 3d_fullres 0")
+    print(f"  for f in 0 1 2 3 4; do nnUNetv2_train {args.dataset_id:03d} 3d_fullres $f; done")
 
 
 if __name__ == "__main__":
