@@ -1,13 +1,64 @@
-# CLAUDE.md — CARE2026 project instructions
+# CLAUDE.md — CARE2026 mandatory coding rules
 
-## Coding Rules
+Violation of these rules is considered a **bug**. Do not finish the task
+until all rules are satisfied.
 
-1. **All imports at top** of every file. No inline imports inside functions.
-2. **Collect results into a dict** first, then print/write a unified table after
-   all experiments complete. tqdm progress bars for real-time feedback are fine.
-3. **Support `--output`** in analysis/eval scripts to save results to file.
-4. **Test before committing**: at minimum `python3 -c "from module import Thing"`,
-   and ideally a functional smoke test for new CLI arguments or logic.
+## Rules
+
+### 1. All imports at file top
+
+- MUST place every `import` / `from ... import` at the top of the file.
+- MUST NOT put imports inside functions or conditional blocks.
+
+```python
+# BAD
+def foo():
+    import numpy as np
+
+# GOOD
+import numpy as np
+
+def foo():
+    ...
+```
+
+### 2. Collect results before printing
+
+- MUST collect experiment metrics into a `dict` first.
+- MUST print a unified summary table AFTER all experiments complete.
+- tqdm progress bars for real-time feedback are fine and encouraged.
+
+```python
+# BAD
+for exp in experiments:
+    result = run(exp)
+    print(result)          # gets lost in warnings
+
+# GOOD
+results = {}
+for exp in tqdm(experiments):
+    results[label] = run(exp)
+_print_summary(results)    # clean table at end
+```
+
+### 3. Every eval/analysis script MUST support `--output`
+
+- MUST add `parser.add_argument("--output", ...)` to save results to file.
+
+### 4. Test before declaring done
+
+- MUST run at minimum `python3 -c "from module import Thing"` after writing code.
+- MUST verify new CLI arguments parse correctly before committing.
+
+## Pre-commit checklist
+
+Before presenting code as complete, verify:
+
+- [ ] No inline imports — all imports at file top.
+- [ ] Results collected into dict, printed at end.
+- [ ] `--output` argument present in new eval/analysis scripts.
+- [ ] Smoke test: `python3 -c "import <new_module>"` passes.
+- [ ] CLI arg test: `python3 -c "... parse_args(...)"` passes for new args.
 
 ## Repository Layout
 
