@@ -447,9 +447,9 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--scar-dilation",
-        type=lambda x: None if x.lower() in ("none", "null", "-1") else float(x),
+        type=lambda x: None if x.lower() in ("none", "null") else (float(x) if float(x) > 0 else (_ for _ in ()).throw(ValueError("scar_dilation must be > 0 or 'none'"))),
         default=5.0,
-        help="Scar constraint dilation in mm, or 'none'/0 to disable.",
+        help="Scar constraint dilation in mm (>0), or 'none' to disable.",
     )
     parser.add_argument("--ct_threshold", type=float, default=0.5, help="CT multi-class probability threshold.")
     parser.add_argument(

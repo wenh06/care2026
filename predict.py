@@ -164,9 +164,12 @@ def postprocess_mri_masks(
     -------
     la_mask_clean, scar_mask_clean : np.ndarray
     """
+    if dilation_mm is not None and dilation_mm <= 0:
+        raise ValueError(f"scar_dilation must be > 0 or None (got {dilation_mm}).  Scar is in the wall, " f"not inside the cavity; 0 mm dilation would eliminate nearly all true scar.")
+
     la_clean = keep_largest_component(la_mask)
 
-    if dilation_mm is not None and dilation_mm > 0:
+    if dilation_mm is not None:
         dilation_px = max(1, int(np.round(dilation_mm / max(in_plane_spacing))))
         structure = np.ones((dilation_px, dilation_px, 1), dtype=bool)
         la_dilated = binary_dilation(la_clean.astype(bool), structure=structure, iterations=1)
