@@ -499,12 +499,18 @@ if __name__ == "__main__":
     tasks = [int(t.strip()) for t in args.tasks.split(",")]
 
     print("Inference config:")
-    print(f"  input_dir  : {input_dir}")
-    print(f"  output_dir : {output_dir}")
-    print(f"  tasks      : {tasks}")
-    print(f"  device     : {args.device}")
-    print(f"  TTA        : {args.tta}")
-    print(f"  run_name   : {run_name}")
+    print(f"  input_dir       : {input_dir}")
+    print(f"  output_dir      : {output_dir}")
+    print(f"  tasks           : {tasks}")
+    print(f"  device          : {args.device}")
+    print(f"  TTA             : {args.tta}")
+    print(f"  scar_dilation   : {args.scar_dilation}")
+    print(f"  mri_mclahe      : {args.mri_mclahe}")
+    print(f"  overwrite       : {args.overwrite}")
+    print(f"  mri_stage1      : {args.mri_stage1_model}")
+    print(f"  mri_stage2      : {args.mri_stage2_model}")
+    print(f"  ct_model        : {args.ct_model}")
+    print(f"  run_name        : {run_name}")
     print()
 
     mri_stage1_model, mri_stage2_model, ct_model = None, None, None
