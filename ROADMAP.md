@@ -402,14 +402,20 @@ nnUNet no-CLAHE improves G-DSC by **+73 %** over VNet on the same training data.
 
 **Dilation ablation (training set, 60 cases):**
 
-| Dilation | 502+501 (binary) | 502+521 (multi-class) |
-|----------|------|------|
-| none (raw pred) | — | — |
-| 2mm (old default) | 0.3529 | 0.3533 |
-| 5mm | 0.6211 | 0.6221 |
+| Dilation | 502+501 (binary) | 502+521 (multi-class) | 512+511 (CLAHE) |
+|----------|------|------|------|
+| none | **0.6317** | **0.6333** | 0.5976 |
+| 2mm (old default) | 0.3529 | 0.3533 | 0.3138 |
+| 5mm | 0.6211 | 0.6221 | 0.5875 |
+| 10mm | 0.6306 | 0.6321 | 0.5969 |
 
-Dilation is the **dominant factor** (+0.27 G-DSC).  Multi-class label (521)
-provides negligible benefit over binary (501) at both 2mm and 5mm.  Top-1
+Key findings:
+- **Remove LA constraint entirely** (dilation=none) — highest G-DSC across all models.
+  LA cavity prediction errors clip true scar; even 10mm dilation loses ~0.1pp vs none.
+- Dilation is the **dominant factor** (+0.28 G-DSC from 2mm→none).
+- **CLAHE consistently harmful** (~3-4 pp lower at every dilation).
+- **Multi-class (521) ≈ binary (501)** — at best 0.15 pp difference, negligible.
+- Default changed: ``postprocess_mri_masks(dilation_mm=None)`` — no LA constraint. Top-1
 result is dilation, not data strategy.
 
 CLAHE is harmful for nnUNet (−5.5 % vs no CLAHE), consistent with the

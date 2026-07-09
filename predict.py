@@ -137,7 +137,7 @@ def keep_largest_component(mask: np.ndarray) -> np.ndarray:
 def postprocess_mri_masks(
     la_mask: np.ndarray,
     scar_mask: np.ndarray,
-    dilation_mm: float = 5.0,
+    dilation_mm: Optional[float] = None,
     in_plane_spacing: Tuple[float, float] = (0.625, 0.625),
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Post-process MRI segmentation outputs.

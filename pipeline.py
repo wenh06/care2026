@@ -124,7 +124,7 @@ def run_task1_inference(
     use_tta: bool = True,
     s1_threshold: float = 0.5,
     s2_threshold: float = 0.5,
-    scar_dilation: Optional[float] = 5.0,
+    scar_dilation: Optional[float] = None,
     overwrite: bool = False,
 ) -> None:
     """Run Task 1 (LA scar) inference."""
@@ -258,7 +258,7 @@ def run_all_tasks(
     device: Optional[torch.device] = None,
     use_tta: bool = True,
     overwrite: bool = False,
-    scar_dilation: Optional[float] = 5.0,
+    scar_dilation: Optional[float] = None,
     tasks: Optional[List[int]] = None,
 ) -> None:
     """Convenience wrapper that runs all specified tasks sequentially.
@@ -452,8 +452,8 @@ if __name__ == "__main__":
             if x.lower() in ("none", "null")
             else (float(x) if float(x) > 0 else (_ for _ in ()).throw(ValueError("scar_dilation must be > 0 or 'none'")))
         ),
-        default=5.0,
-        help="Scar constraint dilation in mm (>0), or 'none' to disable.",
+        default=None,
+        help="Scar constraint dilation in mm (>0), or 'none' to disable (default).",
     )
     parser.add_argument("--ct_threshold", type=float, default=0.5, help="CT multi-class probability threshold.")
     parser.add_argument(
