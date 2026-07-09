@@ -457,9 +457,10 @@ Competitive with 1st place (0.9579) — only 0.21 pp away on the leaderboard.
 | 3 (CT) | DSC 0.9558 | 0.9579 | −0.2 % |
 
 Task 2 and 3 are competitive.  Task 1 (scar) is the primary bottleneck.
-The 5mm dilation fix (2mm → 5mm) raises training-set G-DSC from 0.35 to
-0.62, suggesting the old post-processing constraint was the dominant problem
-rather than model quality.  Next validation submission expected to close
+Removing the LA cavity constraint entirely (dilation=None) raises training-set
+G-DSC from 0.35 (2mm) to 0.63 — the post-processing constraint was the dominant
+bottleneck, not model quality.  The LA prediction error from Stage 1 clips
+true scar even at 10mm dilation.  Next validation submission should close a
 significant portion of the gap to 1st place (0.4409).
 
 ### 6.3 CT Semi-Supervised (Task 3) — 🔄 Iterating
