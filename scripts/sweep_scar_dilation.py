@@ -19,12 +19,13 @@ import nibabel as nib
 import numpy as np
 import torch
 import torch.nn.functional as F
+from scipy.ndimage import binary_dilation
 from tqdm.auto import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from pipeline import _load_model
-from predict import postprocess_mri_masks, predict_mri_two_stage
+from predict import keep_largest_component, predict_mri_two_stage
 
 
 def _binary_metrics(pred, gt, eps=1e-7):
@@ -86,22 +87,31 @@ def main():
             s2_threshold=0.5,
             scar_dilation=None,  # None = no LA constraint
         )
-        # Get raw LA mask too (for postprocessing)
+        # Keep largest LA component once (invariant across dilations)
         la_raw = out.la_mask
+        la_clean = keep_largest_component(la_raw)
         scar_raw = out.scar_mask
         if scar_raw.shape != gt.shape:
             t = torch.from_numpy(scar_raw.astype(np.float32)).unsqueeze(0).unsqueeze(0)
             scar_raw = F.interpolate(t, size=gt.shape, mode="nearest").squeeze().numpy().astype(np.uint8)
-            t = torch.from_numpy(la_raw.astype(np.float32)).unsqueeze(0).unsqueeze(0)
-            la_raw = F.interpolate(t, size=gt.shape, mode="nearest").squeeze().numpy().astype(np.uint8)
-        cache[rec_dir.name] = (la_raw, scar_raw, gt)
+            t = torch.from_numpy(la_clean.astype(np.float32)).unsqueeze(0).unsqueeze(0)
+            la_clean = F.interpolate(t, size=gt.shape, mode="nearest").squeeze().numpy().astype(np.uint8)
+        cache[rec_dir.name] = (la_clean, scar_raw, gt)
 
-    # ── Phase 2: Sweep dilations on cached predictions ──
+    # ── Phase 2: Dilate LA → AND with scar (no connected components, near-instant) ──
+    spacing_xy = 0.625
     results: Dict[str, Dict] = {}
     for dm in tqdm(dilations, desc="Sweep dilation", unit="dm"):
         dice_vals, acc_vals, sen_vals = [], [], []
-        for rec_name, (la_raw, scar_raw, gt) in cache.items():
-            _, scar_proc = postprocess_mri_masks(la_raw, scar_raw, dilation_mm=dm)
+        if dm is not None and dm > 0:
+            dp = max(1, int(round(dm / spacing_xy)))
+            structure = np.ones((dp, dp, 1), dtype=bool)
+        for rec_name, (la_clean, scar_raw, gt) in cache.items():
+            if dm is None or dm <= 0:
+                scar_proc = scar_raw
+            else:
+                la_dilated = binary_dilation(la_clean.astype(bool), structure=structure, iterations=1)
+                scar_proc = (scar_raw.astype(bool) & la_dilated).astype(np.uint8)
             d, a, s = _binary_metrics(scar_proc, gt)
             dice_vals.append(d)
             acc_vals.append(a)
