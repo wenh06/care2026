@@ -124,6 +124,7 @@ def run_task1_inference(
     use_tta: bool = True,
     s1_threshold: float = 0.5,
     s2_threshold: float = 0.5,
+    scar_dilation: Optional[float] = 5.0,
     overwrite: bool = False,
 ) -> None:
     """Run Task 1 (LA scar) inference."""
@@ -151,9 +152,14 @@ def run_task1_inference(
             warnings.warn(f"Image not found: {img_path}")
             continue
         out = predict_mri_two_stage(
-            img_path, stage1_model, stage2_model,
-            device=device, use_tta=use_tta,
-            s1_threshold=s1_threshold, s2_threshold=s2_threshold,
+            img_path,
+            stage1_model,
+            stage2_model,
+            device=device,
+            use_tta=use_tta,
+            s1_threshold=s1_threshold,
+            s2_threshold=s2_threshold,
+            scar_dilation=scar_dilation,
         )
         out.save_as_nifti(results_dir, record_id=rec, task_num=1)
     if skipped:
@@ -193,7 +199,12 @@ def run_task2_inference(
             warnings.warn(f"Image not found: {img_path}")
             continue
         out = predict_mri_two_stage(
-            img_path, stage1_model, stage2_model=None, device=device, use_tta=use_tta, s1_threshold=s1_threshold,
+            img_path,
+            stage1_model,
+            stage2_model=None,
+            device=device,
+            use_tta=use_tta,
+            s1_threshold=s1_threshold,
         )
         out.save_as_nifti(results_dir, record_id=rec, task_num=2)
     if skipped:
@@ -247,6 +258,7 @@ def run_all_tasks(
     device: Optional[torch.device] = None,
     use_tta: bool = True,
     overwrite: bool = False,
+    scar_dilation: Optional[float] = 5.0,
     tasks: Optional[List[int]] = None,
 ) -> None:
     """Convenience wrapper that runs all specified tasks sequentially.
@@ -277,13 +289,24 @@ def run_all_tasks(
 
     if 1 in tasks:
         if mri_ready:
-            run_task1_inference(mri_stage1_model, mri_stage2_model, val_data_root, results_dir, device=device, use_tta=use_tta, overwrite=overwrite)
+            run_task1_inference(
+                mri_stage1_model,
+                mri_stage2_model,
+                val_data_root,
+                results_dir,
+                device=device,
+                use_tta=use_tta,
+                overwrite=overwrite,
+                scar_dilation=scar_dilation,
+            )
         else:
             warnings.warn("Task 1 skipped: MRI Stage-1 and/or Stage-2 model not provided.")
 
     if 2 in tasks:
         if mri_stage1_model is not None:
-            run_task2_inference(mri_stage1_model, val_data_root, results_dir, device=device, use_tta=use_tta, overwrite=overwrite)
+            run_task2_inference(
+                mri_stage1_model, val_data_root, results_dir, device=device, use_tta=use_tta, overwrite=overwrite
+            )
         else:
             warnings.warn("Task 2 skipped: MRI Stage-1 and/or Stage-2 model not provided.")
 
@@ -422,6 +445,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--s2_threshold", type=float, default=0.5, help="Stage-2 scar probability threshold (VNet only; nnUNet uses argmax)."
     )
+    parser.add_argument(
+        "--scar-dilation",
+        type=float,
+        default=5.0,
+        help="Scar constraint dilation in mm (None/skip to disable cavity constraint).",
+    )
     parser.add_argument("--ct_threshold", type=float, default=0.5, help="CT multi-class probability threshold.")
     parser.add_argument(
         "--ct-model",
@@ -501,6 +530,7 @@ if __name__ == "__main__":
         device=device,
         use_tta=args.tta,
         overwrite=args.overwrite,
+        scar_dilation=args.scar_dilation,
         tasks=tasks,
     )
 

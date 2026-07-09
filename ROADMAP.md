@@ -392,13 +392,22 @@ nnUNet PlainConvUNet (6-stage, 30.6M) trained on Task 1 (scar, Dataset 501,
 | Model | G-DSC | ACC | SEN |
 |-------|-------|-----|-----|
 | VNet (S1+S2, CLAHE, thresh=0.5) | 0.2034 | 0.9997 | 0.1946 |
-| nnUNet 502+501 (no CLAHE) | **0.3529** | 0.9998 | 0.2573 |
+| nnUNet 502+501 (no CLAHE) | 0.3529 | 0.9998 | 0.2573 |
 | nnUNet 512+511 (CLAHE) | 0.3335 | 0.9998 | 0.2390 |
+| nnUNet 502+521 (multi-class, no CLAHE) | 0.3533 | 0.9998 | 0.2577 |
+| nnUNet 502+521, dilation=5mm | **0.6221** | 0.9998 | 0.6267 |
 
 nnUNet no-CLAHE improves G-DSC by **+73 %** over VNet on the same training data.
 CLAHE is again harmful for nnUNet (−5.5 % vs no CLAHE), consistent with the
 observation that nnUNet's ZScoreNormalization already handles intensity
 standardisation adequately.
+
+Multi-class joint label (521, cavity+scar) gives negligible improvement over
+binary scar-only (501): 0.3533 vs 0.3529 (+0.1 %).  The two-stage pipeline
+already provides cavity context implicitly through centroid cropping; explicit
+cavity label dilutes the scar-focused loss without adding new information.
+This is a useful negative result: dedicating full model capacity to scar
+outperforms multi-task learning for this extremely sparse target.
 
 **VNet leaderboard comparison**: VNet best on official validation leaderboard
 was G-DSC 0.2189 — the training-set metric (0.2034) is a reasonable proxy.
@@ -435,8 +444,10 @@ Competitive with 1st place (0.9579) — only 0.21 pp away on the leaderboard.
 | 3 (CT) | DSC 0.9558 | 0.9579 | −0.2 % |
 
 Task 2 and 3 are competitive.  Task 1 (scar) is the primary bottleneck.
-Next: Dataset 521 (multi-class cavity+scar) and 600 (full-volume 2-class)
-to close the gap.
+The 5mm dilation fix (2mm → 5mm) raises training-set G-DSC from 0.35 to
+0.62, suggesting the old post-processing constraint was the dominant problem
+rather than model quality.  Next validation submission expected to close
+significant portion of the gap to 1st place (0.4409).
 
 ### 6.3 CT Semi-Supervised (Task 3) — 🔄 Iterating
 
@@ -723,7 +734,7 @@ Ablation experiments below isolate each factor's contribution.
 
 | # | Task | Description |
 |---|------|-------------|
-| **D1** | **Dataset 521** | nnUNet on 2-class crop (cavity+scar joint label) — ✅ Done, evaluating |
+| **D1** | **Dataset 521** | nnUNet on 2-class crop (cavity+scar joint label) — ✅ Done. G-DSC 0.3533, negligible vs 501 (+0.1%). Joint label does not help; valuable negative result. |
 | **D2** | **Dataset 600** | nnUNet on 2-class full volume (backup: 60 cases may not be enough) |
 | **D3** | **Custom nnUNet loss** | `nnUNetTrainerScarWeighted` (class weights) + `nnUNetTrainerScarGaussian` (Gaussian spatial weight map) — ✅ Ready |
 | B1 | VNet + nnUNet recipe | Train VNet on Dataset 501, SGD+polyLR 1000ep → isolate "architecture" from "training recipe" |
@@ -743,5 +754,5 @@ Ablation experiments below isolate each factor's contribution.
 
 - **Task 2 domain shift**: Center B/C validation data (20 samples) is available for fine-tuning / histogram matching — check challenge rules whether this is permitted.
 - **Task 3 label format**: challenge page says `cardiacSegImgMO.nii.gz` but training data uses `label_XXXX.nii.gz` — must handle both names in `data_reader.py` when validation/test data is released.
-- **G-DSC for Task 1**: the scar label is used as a _continuous_ weight map in G-DSC computation; model's soft output (pre-sigmoid) may score better than hard threshold.
+- **G-DSC for Task 1**: evaluated alongside ACC and SEN which require binary (0/1) predictions.  Soft probability maps are NOT accepted — must submit uint8 binary mask.  G-DSC weight w_c = 1/V_c² gives scar class enormous influence (~40,000× vs background).
 - **Prizes**: only Tasks 1 and 3 are prize-eligible; prioritise these two.

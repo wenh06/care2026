@@ -26,7 +26,21 @@ Task 1 (LA scar quantification):
     ACC: 0.5744
     SEN: 0.1489
     model: nnUNet 502+501 (5-fold ensemble)
-    train: 1000ep, no CLAHE
+    train: 1000ep, no CLAHE, use_mirroring=off
+  submission 5:
+    created_time: "2026-07-08 01:27:44"
+    G-DSC: 0.2230
+    ACC: 0.5747
+    SEN: 0.1495
+    model: nnUNet 502+501 (5-fold ensemble)
+    train: 1000ep, no CLAHE, use_mirroring=on
+  submission 6:
+    created_time: "2026-07-08 16:29:24"
+    G-DSC: 0.2236
+    ACC: 0.5743
+    SEN: 0.1487
+    model: nnUNet 512+511 (5-fold ensemble)
+    train: 1000ep, CLAHE, use_mirroring=on
 
 Task 2 (LA cavity segmentation):
   submission 1:
@@ -52,7 +66,19 @@ Task 2 (LA cavity segmentation):
     DSC: 0.8832
     HD: 17.549
     model: nnUNet 502 (5-fold ensemble)
-    train: 1000ep, no CLAHE
+    train: 1000ep, no CLAHE, use_mirroring=off
+  submission 5:
+    created_time: "2026-07-08 01:27:44"
+    DSC: 0.8828
+    HD: 17.6501
+    model: nnUNet 502 (5-fold ensemble)
+    train: 1000ep, no CLAHE, use_mirroring=on
+  submission 6:
+    created_time: "2026-07-08 16:29:24"
+    DSC: 0.8835
+    HD: 18.5298
+    model: nnUNet 512 (5-fold ensemble)
+    train: 1000ep, CLAHE, use_mirroring=on
 
 Task 3 (LA multi-structure segmentation):
   submission 1:
@@ -84,4 +110,10 @@ Task 3 (LA multi-structure segmentation):
     DSC: 0.9558
     HD: 13.3596
     model: nnUNet 500 (5-fold ensemble)
-    train: 1000ep
+    train: 1000ep, use_mirroring=off
+  submission 6:
+    created_time: "2026-07-08 01:27:44"
+    DSC: 0.9563
+    HD: 12.4547
+    model: nnUNet 500 (5-fold ensemble)
+    train: 1000ep, use_mirroring=on
