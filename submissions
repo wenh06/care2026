@@ -41,6 +41,13 @@ Task 1 (LA scar quantification):
     SEN: 0.1487
     model: nnUNet 512+511 (5-fold ensemble)
     train: 1000ep, CLAHE, use_mirroring=on
+  submission 7:
+    created_time: "YYYY-MM-DD HH:MM:SS"
+    G-DSC: X.XXXX
+    ACC: X.XXXX
+    SEN: X.XXXX
+    model: nnUNet 502+521 (5-fold ensemble, multi-class)
+    train: 1000ep, no CLAHE, use_mirroring=on, dilation=5mm
 
 Task 2 (LA cavity segmentation):
   submission 1:

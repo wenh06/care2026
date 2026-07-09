@@ -396,18 +396,25 @@ nnUNet PlainConvUNet (6-stage, 30.6M) trained on Task 1 (scar, Dataset 501,
 | nnUNet 512+511 (CLAHE) | 0.3335 | 0.9998 | 0.2390 |
 | nnUNet 502+521 (multi-class, no CLAHE) | 0.3533 | 0.9998 | 0.2577 |
 | nnUNet 502+521, dilation=5mm | **0.6221** | 0.9998 | 0.6267 |
+| nnUNet 502+501, dilation=5mm | 0.6211 | 0.9998 | 0.6242 |
 
 nnUNet no-CLAHE improves G-DSC by **+73 %** over VNet on the same training data.
-CLAHE is again harmful for nnUNet (−5.5 % vs no CLAHE), consistent with the
+
+**Dilation ablation (training set, 60 cases):**
+
+| Dilation | 502+501 (binary) | 502+521 (multi-class) |
+|----------|------|------|
+| none (raw pred) | — | — |
+| 2mm (old default) | 0.3529 | 0.3533 |
+| 5mm | 0.6211 | 0.6221 |
+
+Dilation is the **dominant factor** (+0.27 G-DSC).  Multi-class label (521)
+provides negligible benefit over binary (501) at both 2mm and 5mm.  Top-1
+result is dilation, not data strategy.
+
+CLAHE is harmful for nnUNet (−5.5 % vs no CLAHE), consistent with the
 observation that nnUNet's ZScoreNormalization already handles intensity
 standardisation adequately.
-
-Multi-class joint label (521, cavity+scar) gives negligible improvement over
-binary scar-only (501): 0.3533 vs 0.3529 (+0.1 %).  The two-stage pipeline
-already provides cavity context implicitly through centroid cropping; explicit
-cavity label dilutes the scar-focused loss without adding new information.
-This is a useful negative result: dedicating full model capacity to scar
-outperforms multi-task learning for this extremely sparse target.
 
 **VNet leaderboard comparison**: VNet best on official validation leaderboard
 was G-DSC 0.2189 — the training-set metric (0.2034) is a reasonable proxy.
@@ -678,7 +685,10 @@ Results tracked in ``submissions`` (YAML log).
 | 1 | 2026-06-25 20:02 | 0.2092 | 0.5997 | 0.1997 | vnet_stage2 (1ch), SGD 300ep, CLAHE |
 | 2 | 2026-06-29 18:58 | **0.2189** | 0.6041 | 0.2085 | vnet_stage2 (1ch), SGD 300ep, CLAHE, thresh=0.7 |
 | 3 | 2026-07-01 22:40 | 0.1882 | 0.5766 | 0.1533 | vnet_stage2_2ch (MRI+SDF), SGD 600ep, CLAHE |
-| 4 | 2026-07-06 23:26 | **0.2213** | 0.5744 | 0.1489 | nnUNet 502+501 (5-fold ensemble), 1000ep, no CLAHE |
+| 4 | 2026-07-06 23:26 | 0.2213 | 0.5744 | 0.1489 | nnUNet 502+501, dilation=2mm |
+| 5 | 2026-07-08 01:27 | 0.2230 | 0.5747 | 0.1495 | nnUNet 502+501, TTA on, dilation=2mm |
+| 6 | 2026-07-08 16:29 | **0.2236** | 0.5743 | 0.1487 | nnUNet 512+511 (CLAHE), TTA on, dilation=2mm |
+| 7 | 2026-07-08 ??:?? | — | — | — | nnUNet 502+521, TTA on, dilation=5mm |
 
 ### Task 2 (LA cavity segmentation) — DSC / HD (mm)
 
@@ -734,7 +744,7 @@ Ablation experiments below isolate each factor's contribution.
 
 | # | Task | Description |
 |---|------|-------------|
-| **D1** | **Dataset 521** | nnUNet on 2-class crop (cavity+scar joint label) — ✅ Done. G-DSC 0.3533, negligible vs 501 (+0.1%). Joint label does not help; valuable negative result. |
+| **D1** | **Dataset 521** | nnUNet on 2-class crop (cavity+scar joint label) — ✅ Done. G-DSC 0.3533 vs 0.3529 (501) at 2mm, 0.6221 vs 0.6211 at 5mm. Negligible difference; dilation, not label strategy, is the key factor. |
 | **D2** | **Dataset 600** | nnUNet on 2-class full volume (backup: 60 cases may not be enough) |
 | **D3** | **Custom nnUNet loss** | `nnUNetTrainerScarWeighted` (class weights) + `nnUNetTrainerScarGaussian` (Gaussian spatial weight map) — ✅ Ready |
 | B1 | VNet + nnUNet recipe | Train VNet on Dataset 501, SGD+polyLR 1000ep → isolate "architecture" from "training recipe" |
