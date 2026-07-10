@@ -448,20 +448,23 @@ from Center B/C — consistent with the known challenge of multi-center LGE-MRI.
 Training-set mean DSC 0.9823 vs. validation leaderboard 0.9558 (nnUNet 5-fold).
 Competitive with 1st place (0.9579) — only 0.21 pp away on the leaderboard.
 
-**Overall leaderboard standings (2026-07-06 submission):**
+**Overall leaderboard standings (2026-07-09):**
 
-| Task | nnUNet | 1st place | Gap |
-|------|--------|-----------|-----|
-| 1 (scar) | G-DSC 0.2213 | 0.4409 | −49 % |
-| 2 (cavity) | DSC 0.8832 | 0.8886 | −0.6 % |
-| 3 (CT) | DSC 0.9558 | 0.9579 | −0.2 % |
+| Task | Our best | 1st place | Gap | Rank |
+|------|----------|-----------|-----|------|
+| 1 (scar) | G-DSC **0.4525** | — | **#1** 🏆 | 1st |
+| 2 (cavity) | DSC 0.8835 | 0.8886 | −0.6 % | competitive |
+| 3 (CT) | DSC 0.9563 | 0.9579 | −0.16 pp | **2nd** ← next target |
 
-Task 2 and 3 are competitive.  Task 1 (scar) is the primary bottleneck.
-Removing the LA cavity constraint entirely (dilation=None) raises training-set
-G-DSC from 0.35 (2mm) to 0.63 — the post-processing constraint was the dominant
-bottleneck, not model quality.  The LA prediction error from Stage 1 clips
-true scar even at 10mm dilation.  Next validation submission should close a
-significant portion of the gap to 1st place (0.4409).
+**Sub 7 breakthrough (2026-07-09):** G-DSC 0.4525, ACC 0.7113, SEN 0.4227 —
+all three metrics are #1 on the leaderboard by large margins (G-DSC +102 % over
+our previous best 0.2236).  The key change was **dilation 2mm → 5mm** (not
+multi-class vs binary — 521 ≈ 501).  Sub 8 (dilation=None) is still pending
+and may push G-DSC even higher based on training-set trends (0.6333 vs 0.6221).
+
+The dilation bottleneck is now resolved.  Task 1 is securely #1 on validation
+leaderboard.  Primary focus shifts to **Task 3 (CT) where we are #2, only
+0.16 pp behind 1st place**.
 
 ### 6.3 CT Semi-Supervised (Task 3) — 🔄 Iterating
 
@@ -695,7 +698,8 @@ Results tracked in ``submissions`` (YAML log).
 | 4 | 2026-07-06 23:26 | 0.2213 | 0.5744 | 0.1489 | nnUNet 502+501, dilation=2mm |
 | 5 | 2026-07-08 01:27 | 0.2230 | 0.5747 | 0.1495 | nnUNet 502+501, TTA on, dilation=2mm |
 | 6 | 2026-07-08 16:29 | **0.2236** | 0.5743 | 0.1487 | nnUNet 512+511 (CLAHE), TTA on, dilation=2mm |
-| 7 | 2026-07-08 ??:?? | — | — | — | nnUNet 502+521, TTA on, dilation=5mm |
+| 7 | 2026-07-09 15:11 | **0.4525** | **0.7113** | **0.4227** | nnUNet 502+521, TTA on, dilation=5mm |
+| 8 | 2026-07-09 ??:?? | — | — | — | nnUNet 502+521, TTA on, dilation=none |
 
 ### Task 2 (LA cavity segmentation) — DSC / HD (mm)
 
@@ -715,6 +719,7 @@ Results tracked in ``submissions`` (YAML log).
 | 3 | 2026-06-29 18:58 | 0.7511 | 37.953 | nnUNet PlainConvUNet (30.6M), fold_0 only, ep974 |
 | 4 | 2026-07-01 22:40 | 0.9495 | 17.9575 | nnUNet PlainConvUNet, fold_0 only |
 | 5 | 2026-07-06 23:26 | **0.9558** | **13.3596** | nnUNet 500 (5-fold ensemble), 1000ep |
+| 6 | 2026-07-08 01:27 | **0.9563** | **12.4547** | nnUNet 500 (5-fold ensemble), TTA on |
 
 ---
 ## Architecture — Why nnUNet > Custom VNet
@@ -738,25 +743,52 @@ Ablation experiments below isolate each factor's contribution.
 ---
 ## Immediate Next Steps
 
-### Analysis (zero training cost)
+### Priority: Task 3 CT — close 0.16 pp gap to 1st place
 
-| # | Task | Description |
-|---|------|-------------|
-| A1 | Convergence curves | Parse nnUNet `training_log_*.txt` vs VNet CSV → prove nnUNet converges faster to higher ceiling (`utils/parse_nnunet_log.py` ready) |
-| A2 | Per-case DSC | 60 cases individually — which gain most (large/small LA, SNR)? |
-| A3 | Failure analysis | Cases where even nnUNet fails — thin wall, low contrast, boundary ambiguity? |
-| A4 | MCLAHE ablation write-up | Why CLAHE helps VNet but hurts nnUNet (ZScoreNormalization vs global z-score) |
+Current: nnUNet Dataset 500, 5-fold ensemble, DSC **0.9563** (#2).  Gap to #1: **0.16 pp**.
 
-### Training (need GPU time)
+The key opportunity: 100 of 150 CT training cases are **unlabeled**.  The current
+nnUNet model was trained on only 50 labeled cases.  Self-training on all 150
+cases should improve per-class DSC, especially PV (the hardest class at DSC
+0.92–0.93).
 
-| # | Task | Description |
-|---|------|-------------|
-| **D1** | **Dataset 521** | nnUNet on 2-class crop (cavity+scar joint label) — ✅ Done. G-DSC 0.3533 vs 0.3529 (501) at 2mm, 0.6221 vs 0.6211 at 5mm. Negligible difference; dilation, not label strategy, is the key factor. |
-| **D2** | **Dataset 600** | nnUNet on 2-class full volume (backup: 60 cases may not be enough) |
-| **D3** | **Custom nnUNet loss** | `nnUNetTrainerScarWeighted` (class weights) + `nnUNetTrainerScarGaussian` (Gaussian spatial weight map) — ✅ Ready |
-| B1 | VNet + nnUNet recipe | Train VNet on Dataset 501, SGD+polyLR 1000ep → isolate "architecture" from "training recipe" |
-| B2 | 4-stage nnUNet | PlainConvUNet reduced to 4 stages (~12M params) → isolate depth + deep supervision |
-| B3 | CT self-training | `scripts/self_train_nnunet.py` → 5-fold pseudo-labels on 100 unlabeled CT → retrain nnUNet on 150 cases |
+**CT self-training pipeline** (`scripts/self_train_nnunet.py` — ready):
+
+```bash
+python scripts/self_train_nnunet.py \
+  --db-dir /root/autodl-tmp/CARE2026 \
+  --nnunet-dir tmp/nnUNet_results/Dataset500_CARE2026CT/nnUNetTrainer__... \
+  --dataset-id 503 \
+  --folds 0,1,2,3,4
+```
+
+This does:
+1. 5-fold ensemble inference on 100 unlabeled CTs → pseudo-labels in `tmp/pseudo_labels/`
+2. Symlink 50 GT + 100 pseudo-labeled cases into `Dataset503_CARE2026CT_ST/`
+3. Print plan + train commands
+
+After self-training:
+```bash
+nnUNetv2_plan_and_preprocess -d 503 --verify_dataset_integrity -c 3d_fullres
+for f in 0 1 2 3 4; do nnUNetv2_train 503 3d_fullres $f; done
+```
+
+Beyond naive self-training, two additional strategies to consider:
+
+| # | Strategy | Rationale | Effort |
+|---|----------|-----------|--------|
+| **S1** | **Soft pseudo-labels** | Hard argmax discards prediction uncertainty; train with soft targets (KL divergence) on unlabeled cases to preserve PV/LAA boundary ambiguity | Medium |
+| **S2** | **Custom CT loss** | `nnUNetTrainerCTBoundary` — add Boundary Loss (HausdorffERLoss) for PV/LAA edge precision, similar to `nnUNetTrainerScarGaussian` for scar | Medium |
+| S3 | Slice-position encoding | Help model handle superior/inferior slices where PV junctions are complex | Low priority |
+
+### MRI — remaining items (lower priority after sub 7)
+
+| # | Task | Description | Status |
+|---|------|-------------|--------|
+| D2 | Dataset 600 | nnUNet on 2-class full volume (backup) | ⏳ |
+| D3 | Custom nnUNet loss | `nnUNetTrainerScarGaussian` — test on 521 | ⏳ |
+| B1 | VNet + nnUNet recipe | Train VNet on Dataset 501, SGD+polyLR 1000ep | ⏳ |
+| B2 | 4-stage nnUNet | PlainConvUNet reduced to 4 stages | ⏳ |
 
 ### Infrastructure
 
