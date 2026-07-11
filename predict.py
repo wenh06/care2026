@@ -350,7 +350,7 @@ def predict_mri_two_stage(
     centroid: Optional[Tuple[int, int, int]] = None,
     s1_threshold: float = 0.5,
     s2_threshold: float = 0.7,
-    scar_dilation: Optional[float] = 5.0,
+    scar_dilation: Optional[float] = None,
     canonical_shape: Optional[Tuple[int, int, int]] = None,
     stage1_shape: Optional[Tuple[int, int, int]] = None,
     stage2_crop_shape: Optional[Tuple[int, int, int]] = None,

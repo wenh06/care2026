@@ -387,36 +387,43 @@ nnUNet PlainConvUNet (6-stage, 30.6M) trained on Task 1 (scar, Dataset 501,
 60 cropped 256×256×44 cases) and Task 2 (cavity, Dataset 502, 190 full-volume
 576×576×44 cases).  Evaluated on labeled training data (in-domain):
 
-**Task 1 — LA Scar (60 labeled cases, 5-fold ensemble):**
+**Task 1 — LA Scar (60 labeled cases, 5-fold ensemble, training-set evaluation):**
 
-| Model | G-DSC | ACC | SEN |
-|-------|-------|-----|-----|
-| VNet (S1+S2, CLAHE, thresh=0.5) | 0.2034 | 0.9997 | 0.1946 |
-| nnUNet 502+501 (no CLAHE) | 0.3529 | 0.9998 | 0.2573 |
-| nnUNet 512+511 (CLAHE) | 0.3335 | 0.9998 | 0.2390 |
-| nnUNet 502+521 (multi-class, no CLAHE) | 0.3533 | 0.9998 | 0.2577 |
-| nnUNet 502+521, dilation=5mm | **0.6221** | 0.9998 | 0.6267 |
-| nnUNet 502+501, dilation=5mm | 0.6211 | 0.9998 | 0.6242 |
+| S1 | S2 | Multi-class | MCLAHE | Dilation | G-DSC | ACC | SEN |
+|----|----|:----------:|:------:|:--------:|-------|-----|-----|
+| VNet S1 | VNet S2 | — | ✅ | 2mm | 0.2034 | 0.9997 | 0.1946 |
+| 502 | 501 | — | — | 2mm | 0.3529 | 0.9998 | 0.2573 |
+| 512 | 511 | — | ✅ | 2mm | 0.3335 | 0.9998 | 0.2390 |
+| 502 | 521 | ✅ | — | 2mm | 0.3533 | 0.9998 | 0.2577 |
+| 502 | 501 | — | — | 5mm | 0.6211 | 0.9998 | 0.6242 |
+| 502 | 521 | ✅ | — | 5mm | **0.6221** | 0.9998 | 0.6267 |
+| 502 | 531 | ✅ | ✅ | 5mm | 0.6016 | 0.9998 | 0.5775 |
+| 512 | 511 | — | ✅ | 5mm | 0.5875 | 0.9998 | — |
+| 502 | 501 | — | — | none | 0.6317 | — | — |
+| 502 | 521 | ✅ | — | none | **0.6333** | — | — |
+| 512 | 511 | — | ✅ | none | 0.5976 | — | — |
 
-nnUNet no-CLAHE improves G-DSC by **+73 %** over VNet on the same training data.
+nnUNet (502+521, dilation=none) improves G-DSC by **+212 %** over VNet best on the same training data.
 
-**Dilation ablation (training set, 60 cases):**
+**Dilation sweep (same 60 cases):**
 
-| Dilation | 502+501 (binary) | 502+521 (multi-class) | 512+511 (CLAHE) |
-|----------|------|------|------|
-| none | **0.6317** | **0.6333** | 0.5976 |
-| 2mm (old default) | 0.3529 | 0.3533 | 0.3138 |
-| 5mm | 0.6211 | 0.6221 | 0.5875 |
-| 10mm | 0.6306 | 0.6321 | 0.5969 |
+| Dilation | 502+501 (binary) | 502+521 (multi) | 512+511 (CLAHE bin) | 502+531 (CLAHE multi) |
+|----------|------|------|------|------|
+| none | **0.6317** | **0.6333** | 0.5976 | — |
+| 2mm | 0.3529 | 0.3533 | 0.3138 | — |
+| 5mm | 0.6211 | 0.6221 | 0.5875 | 0.6016 |
+| 10mm | 0.6306 | 0.6321 | 0.5969 | — |
 
 Key findings:
 - **Remove LA constraint entirely** (dilation=none) — highest G-DSC across all models.
   LA cavity prediction errors clip true scar; even 10mm dilation loses ~0.1pp vs none.
 - Dilation is the **dominant factor** (+0.28 G-DSC from 2mm→none).
-- **CLAHE consistently harmful** (~3-4 pp lower at every dilation).
+- **CLAHE consistently harmful** (−3–4 pp at every dilation).  Multi-class partially
+  compensates (+1.4 pp from 511→531) but cannot fully offset CLAHE damage (−2 pp vs 521).
 - **Multi-class (521) ≈ binary (501)** — at best 0.15 pp difference, negligible.
-- Default changed: ``postprocess_mri_masks(dilation_mm=None)`` — no LA constraint. Top-1
-result is dilation, not data strategy.
+- Default changed: ``postprocess_mri_masks(dilation_mm=None)`` — no LA constraint.
+  Top-1 result is dilation, not data strategy.
+  531 only tested at 5mm (``eval_all_models.py`` default at the time).
 
 CLAHE is harmful for nnUNet (−5.5 % vs no CLAHE), consistent with the
 observation that nnUNet's ZScoreNormalization already handles intensity
