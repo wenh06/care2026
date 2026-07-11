@@ -36,6 +36,28 @@ __all__ = [
 ]
 
 
+def _is_nnunet_model(model: torch.nn.Module) -> bool:
+    """Return True if the model wraps an nnUNetPredictor."""
+    return hasattr(model, "_predictor") or getattr(getattr(model, "config", None), "backbone", None) == "nnunet"
+
+
+def _safe_device(model: torch.nn.Module) -> torch.device:
+    """Get device from model, falling back to CUDA / CPU."""
+    try:
+        return next(model.parameters()).device
+    except (StopIteration, AttributeError):
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def _safe_get_config(model: torch.nn.Module, key: str, default=None):
+    """Read a config key from model.train_config or model.config."""
+    for attr in ("train_config", "config"):
+        cfg = getattr(model, attr, None)
+        if cfg is not None and key in cfg:
+            return cfg[key]
+    return default
+
+
 def _binary_dice_metric(pred: np.ndarray, target: np.ndarray) -> float:
     p, g = pred.astype(bool), target.astype(bool)
     inter = (p & g).sum()
@@ -312,8 +334,14 @@ def evaluate_stage1(
     dict with ``la_dice`` (Stage-1 resolution).
     """
 
+    if _is_nnunet_model(model):
+        raise RuntimeError(
+            "evaluate_stage1 does not support nnUNet models. "
+            "Use evaluate_training_sample(rec, task=1, stage1_model=..., stage2_model=...) instead."
+        )
+
     if device is None:
-        device = next(model.parameters()).device
+        device = _safe_device(model)
 
     db_dir = Path(db_dir).expanduser().resolve()
     has_scar = False
@@ -323,7 +351,7 @@ def evaluate_stage1(
     else:
         reader = CARE2026_MRI(db_dir=db_dir, task=2, verbose=0)
 
-    apply_mclahe = bool(model.train_config.get("apply_mclahe", False))
+    apply_mclahe = bool(_safe_get_config(model, "apply_mclahe", False))
 
     # Preprocessing
     image = reader.load_data(rec)
@@ -432,7 +460,7 @@ def evaluate_stage2(
     import nibabel as nib
 
     if device is None:
-        device = next(stage1_model.parameters()).device
+        device = _safe_device(stage1_model)
 
     db_dir = Path(db_dir).expanduser().resolve()
     reader = CARE2026_MRI(db_dir=db_dir, task=1, verbose=0)
@@ -462,7 +490,7 @@ def evaluate_stage2(
     scar_dice = float(_binary_dice_metric(pred_scar, gt_scar)) if has_scar else float("nan")
 
     centroid_src = "GT" if centroid is not None else "Stage-1 predicted"
-    apply_mclahe = bool(stage2_model.train_config.get("apply_mclahe", False))
+    apply_mclahe = bool(_safe_get_config(stage2_model, "apply_mclahe", False))
     print(f"  Centroid       : {centroid_src}")
     print(f"  apply_mclahe   : {apply_mclahe}")
     print(f"  LA Dice        : {la_dice:.4f}")
@@ -545,10 +573,11 @@ def evaluate_ct(
     rec : str
         Training record name, e.g. ``"train_1"`` (must have a GT label).
     model : torch.nn.Module
-        CARE2026_CT_Model in eval mode.
+        CARE2026_CT_Model or CARE2026_CT_nnUNet in eval mode.
     db_dir : path-like
         Root of the CARE2026 dataset.
     device : torch.device, optional
+        Ignored for nnUNet models (device is handled internally).
     use_tta : bool, default False
 
     Returns
@@ -558,8 +587,8 @@ def evaluate_ct(
     from data_reader import CARE2026_CT
     from predict import predict_ct
 
-    if device is None:
-        device = next(model.parameters()).device
+    if device is None and not _is_nnunet_model(model):
+        device = _safe_device(model)
     db_dir = Path(db_dir).expanduser().resolve()
 
     reader = CARE2026_CT(db_dir=db_dir, verbose=0)
@@ -868,7 +897,7 @@ def evaluate_training_sample(
         if stage1_model is None or stage2_model is None:
             raise ValueError("stage1_model and stage2_model required for MRI evaluation.")
         if device is None:
-            device = next(stage1_model.parameters()).device
+            device = _safe_device(stage1_model)
 
         reader = CARE2026_MRI(db_dir=db_dir, task=task, verbose=0)
         has_scar = reader.get_scar_path(rec) is not None
@@ -898,7 +927,7 @@ def evaluate_training_sample(
         if ct_model is None:
             raise ValueError("ct_model required for CT evaluation.")
         if device is None:
-            device = next(ct_model.parameters()).device
+            device = _safe_device(ct_model)
         ct_reader = CARE2026_CT(db_dir=db_dir, verbose=0)
         img_path = ct_reader.get_data_path(rec)
         gt = ct_reader.load_ann(rec)
