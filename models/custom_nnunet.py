@@ -160,3 +160,106 @@ class _ScarGaussianLoss(torch.nn.Module):
         ce_loss = (ce_pixel * w_tensor).mean()
 
         return self.dice_weight * dice_loss + self.ce_weight * ce_loss
+
+
+# ---------------------------------------------------------------------------
+# CT Boundary-aware Trainer
+# ---------------------------------------------------------------------------
+
+
+class nnUNetTrainerCTBoundary(nnUNetTrainer):
+    """nnUNet with boundary + topology loss for CT multi-structure segmentation.
+
+    Adds Hausdorff boundary loss (GPU-friendly erosion-based) and
+    centerline CE loss for thin tubular structures (PV).  Designed to
+    narrow the gap on PV and LAA where standard DiceCE underperforms.
+
+    Usage::
+
+        export nnUNet_extTrainer="$PWD/models"
+        nnUNetv2_train 500 3d_fullres 0 -tr nnUNetTrainerCTBoundary
+    """
+
+    def __init__(
+        self,
+        plans: dict,
+        configuration: str,
+        fold: int,
+        dataset_json: dict,
+        device: torch.device = torch.device("cuda"),
+        hd_weight: float = 0.1,
+        clce_weight: float = 0.3,
+        hd_erosions: int = 10,
+    ):
+        self._hd_weight = hd_weight
+        self._clce_weight = clce_weight
+        self._hd_erosions = hd_erosions
+        super().__init__(plans, configuration, fold, dataset_json, device=device)
+
+    def _build_loss(self):
+        loss = _CTBoundaryLoss(
+            hd_weight=self._hd_weight,
+            clce_weight=self._clce_weight,
+            hd_erosions=self._hd_erosions,
+            batch_dice=self.configuration_manager.batch_dice,
+            ignore_label=self.label_manager.ignore_label,
+        )
+        if self._do_i_compile():
+            loss.clce.dice = torch.compile(loss.clce.dice)
+        if self.enable_deep_supervision:
+            deep_supervision_scales = self._get_deep_supervision_scales()
+            weights = np.array([1 / (2**i) for i in range(len(deep_supervision_scales))])
+            if self.is_ddp and not self._do_i_compile():
+                weights[-1] = 1e-6
+            else:
+                weights[-1] = 0
+            weights = weights / weights.sum()
+            loss = DeepSupervisionWrapper(loss, weights)
+        return loss
+
+
+class _CTBoundaryLoss(torch.nn.Module):
+    """DiceCE + HausdorffER + CenterlineCE for CT multi-class segmentation.
+
+    L = L_clce (Dice + λ_clce·skeleton_CE) + L_ce + w_hd·L_hd
+
+    - ``CenterlineCELoss`` handles topology of thin PV through soft-skeleton
+      cross-entropy (already includes an internal Dice term).
+    - ``HausdorffERLoss`` penalises boundary misalignment for PV and LAA
+      using GPU-friendly iterative erosion.
+    - Standard CE provides per-pixel supervision.
+    """
+
+    def __init__(
+        self,
+        hd_weight: float = 0.1,
+        clce_weight: float = 0.3,
+        hd_erosions: int = 10,
+        batch_dice: bool = False,
+        ignore_label: int | None = None,
+    ):
+        super().__init__()
+        from models.loss.boundary_loss import HausdorffERLoss
+        from models.loss.centerline_loss import CenterlineCELoss
+
+        self.hd_weight = hd_weight
+        self.ignore_label = ignore_label
+
+        # CenterlineCELoss includes internal Dice → covers Dice + topology
+        self.clce = CenterlineCELoss(kernel_size=5, lambda_clce=clce_weight, do_bg=False)
+        # Standard CE
+        self.ce = CrossEntropyLoss(reduction="mean", ignore_index=ignore_label if ignore_label is not None else -100)
+        # GPU-friendly Hausdorff (no scipy → works fully on GPU)
+        self.hd = HausdorffERLoss(alpha=2.0, erosions=hd_erosions, do_bg=False)
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        # target may be (B, 1, H, W, D) → squeeze
+        tgt = target.long()
+        if tgt.ndim == 5 and tgt.shape[1] == 1:
+            tgt = tgt[:, 0]
+
+        clce_loss = self.clce(pred, tgt)  # internal: Dice + λ·skeleton_CE
+        ce_loss = self.ce(pred, tgt)
+        hd_loss = self.hd(pred, tgt)
+
+        return clce_loss + ce_loss + self.hd_weight * hd_loss
