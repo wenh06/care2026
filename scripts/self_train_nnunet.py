@@ -13,6 +13,7 @@ from pathlib import Path
 
 import nibabel as nib
 import numpy as np
+import torch
 from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
 from tqdm import tqdm
 
@@ -89,7 +90,7 @@ def main():
         use_gaussian=True,
         use_mirroring=True,
         perform_everything_on_device=True,
-        device=args.device,
+        device=torch.device(args.device),
         verbose=False,
         verbose_preprocessing=False,
         allow_tqdm=True,
