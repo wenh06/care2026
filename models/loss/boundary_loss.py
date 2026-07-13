@@ -176,8 +176,8 @@ class HausdorffERLoss(nn.Module):
 
     def _erode(self, x: torch.Tensor) -> torch.Tensor:
         if x.dim() == 5:
-            return F.conv3d(x, self.kernel3D.to(dtype=x.dtype), padding=1)
-        return F.conv2d(x, self.kernel2D.to(dtype=x.dtype), padding=1)
+            return F.conv3d(x, self.kernel3D.to(dtype=x.dtype, device=x.device), padding=1)
+        return F.conv2d(x, self.kernel2D.to(dtype=x.dtype, device=x.device), padding=1)
 
     def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """
