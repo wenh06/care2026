@@ -155,10 +155,12 @@ def postprocess_mri_masks(
     ----------
     la_mask, scar_mask : np.ndarray
         Binary (0/1) uint8 arrays in the same voxel space.
-    dilation_mm : float, default 2.0
-        Dilation radius in millimetres.
+    dilation_mm : float or None, default None
+        Dilation radius in millimetres.  No constraint when None.
     in_plane_spacing : (float, float), default (0.625, 0.625)
-        Voxel spacing (mm/px) for the X and Y axes.
+        Voxel spacing (mm/px) for the X and Y axes.  Callers handling
+        multi-center data must provide the actual spacing from the
+        NIfTI header (the default is Center-A specific).
 
     Returns
     -------
@@ -403,7 +405,7 @@ def predict_mri_two_stage(
         img_canonical = _mclahe(img_canonical)
 
     # ── Stage 1: coarse LA cavity (always run — needed for scar constraint)
-    mri_spacing = (0.625, 0.625, 2.5)  # Center A native spacing
+    mri_spacing = tuple(float(s) for s in nii.header.get_zooms()[:3])
     s1_nnunet = _is_nnunet(stage1_model)
 
     if s1_nnunet:

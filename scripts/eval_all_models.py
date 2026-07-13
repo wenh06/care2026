@@ -217,7 +217,6 @@ def main():
                 all_cases.append(d)
 
         task2_results: Dict[str, Dict] = {}
-        spacer = (0.625, 0.625, 2.5)
         for model_path in args.t2:
             label = _short_label(model_path)
             model = _load_model("mri_stage1", model_path, device)
@@ -237,7 +236,8 @@ def main():
 
                     img = _mc(img)
                 if hasattr(model, "predict"):
-                    pred = model.predict(img, spacer, use_tta=args.tta)
+                    zooms = tuple(float(s) for s in nib.load(str(img_path)).header.get_zooms()[:3])
+                    pred = model.predict(img, zooms, use_tta=args.tta)
                     pred = (pred > 0).astype(np.uint8)
                 else:
                     out = predict_mri_two_stage(img_path, model, stage2_model=None, use_tta=args.tta)

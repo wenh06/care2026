@@ -158,7 +158,7 @@ def main():
             use_mclahe = ds_id >= 510
             model = CARE2026_MRI_nnUNet(train_config={"nnunet_model_dir": str(trainer_dir)}, apply_mclahe=use_mclahe)
             dice_vals = []
-            spacer = (0.625, 0.625, 2.5)
+            dice_vals = []
             for rec_dir in tqdm(all_cases, desc=f"  T2 {ds_id}", unit="case"):
                 img_path = rec_dir / "enhanced.nii.gz"
                 gt_path = rec_dir / "atriumSegImgMO.nii.gz"
@@ -167,12 +167,14 @@ def main():
                 gt = (nib.load(str(gt_path)).get_fdata() > 0).astype(np.uint8)
                 if gt.sum() == 0:
                     continue
-                img = nib.load(str(img_path)).get_fdata().astype(np.float32)
+                nii = nib.load(str(img_path))
+                img = nii.get_fdata().astype(np.float32)
+                zooms = tuple(float(s) for s in nii.header.get_zooms()[:3])
                 if use_mclahe:
                     from utils.mclahe import mclahe as _mc
 
                     img = _mc(img)
-                pred = model.predict(img, spacer)
+                pred = model.predict(img, zooms)
                 pred = (pred > 0).astype(np.uint8)
                 pred = _resample_if_needed(pred, gt)
                 d, _, _ = _binary_metrics(pred, gt)

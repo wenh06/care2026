@@ -8,6 +8,41 @@
 
 Three tasks are evaluated independently; no cross-modal fusion is required.
 
+---
+
+## Best Model Configurations (for submission & inference)
+
+### Task 1 — LA Scar Quantification
+
+| Role | Dataset | Trainer | Notes |
+|------|---------|----------|-------|
+| **Stage 1** (cavity) | 502 | `nnUNetTrainer__nnUNetPlans__3d_fullres` | 190 cases, no CLAHE |
+| **Stage 2** (scar) | 521 | `nnUNetTrainer__nnUNetPlans__3d_fullres` | 60 cases, multi-class (cav=1, scar=2), no CLAHE |
+| Dilation | `None` | — | no LA cavity constraint |
+| TTA | on | — | marginal gain (+0.0017 G-DSC) |
+
+**Pipeline**: ``predict_mri_two_stage`` with 502→centroid crop→521, ``scar_dilation=None``
+
+### Task 2 — LA Cavity Segmentation
+
+| Role | Dataset | Trainer | Notes |
+|------|---------|----------|-------|
+| **Model** | 512 | `nnUNetTrainer__nnUNetPlans__3d_fullres` | 190 cases, CLAHE (marginal +0.25pp) |
+
+**Pipeline**: ``predict_mri_two_stage`` with stage2_model=None (cavity-only)
+
+### Task 3 — LA Multi-Structure Segmentation (CT)
+
+| Role | Dataset | Trainer | Notes |
+|------|---------|----------|-------|
+| **Primary** | 500 | `nnUNetTrainer__nnUNetPlans__3d_fullres` | 50 labeled, no CLAHE, DSC 0.9563 (#2) |
+| **Secondary** | 503 | `nnUNetTrainer__nnUNetPlans__3d_fullres` | self-trained on 150 cases, DSC 0.9745 (training-set; worse than 500 but complementary) |
+| **Planned** | 500 | `nnUNetTrainerCTBoundary` | boundary-aware loss, not yet trained |
+
+**Pipeline**: ``predict_ct``.  Ensemble 500 + 503 if complementary errors provide gain.
+
+---
+
 ### Tasks 1 & 2 — LGE-MRI (Two-stage coarse-to-fine V-Net)
 
 We train **two separate 3D networks in series**.
@@ -747,6 +782,26 @@ vs. our best VNet (4-stage, 6.9M params, no deep supervision).
 Gap is large enough (0.35 vs 0.20 G-DSC) that multiple factors compound — architecture depth,
 training recipe (SGD+polyLR 1000ep), deep supervision, and data normalisation all contribute.
 Ablation experiments below isolate each factor's contribution.
+
+---
+## Validation Data Spacing Variability (2026-07-13) ⚠️
+
+**Finding**: Validation data has **different voxel spacings** than training data, even within the same center.  ``predict_mri_two_stage`` previously hardcoded Center A training spacing ``(0.625, 0.625, 2.5)`` for nnUNet inference, which was wrong for all validation cases.
+
+Measured ``nii.header.get_zooms()`` from actual validation files:
+
+| Data | Shape | Spacing (x, y, z) |
+|------|-------|-------------------|
+| Task 1/2 train (Center A) | 576×576×44 | (0.625, 0.625, 2.5) |
+| Task 1 val (Center A) | 576×576×88 | **(1.0, 1.0, 1.0)** |
+| Task 2 val_1-10 (Center A) | 864×864×~44 | **(0.347, 0.347, 2.0)** |
+| Task 2 val_11+ (Center C) | 640×640×88 | **(1.0, 1.0, 1.0)** |
+| Task 3 train (Center D) | variable | variable in-plane, 0.5 z |
+| Task 3 val (Center D) | variable | variable in-plane, 0.5 z |
+
+**Impact**: nnUNet predictor uses spacing to resample images to the target spacing defined in plans.json.  Hardcoding wrong spacing caused incorrect resampling → degraded prediction quality.
+
+**Fix**: ``predict_mri_two_stage`` now reads spacing from the NIfTI header.  CT (``predict_ct``) was never affected — it always read spacing from the header.
 
 ---
 ## GT Scar Distribution Analysis (2026-07-12) ✅
