@@ -127,6 +127,7 @@ def main():
     parser.add_argument("--t2", type=str, action="append", default=[], dest="t2", help="Cavity model path (repeatable)")
     # Task 3: CT models
     parser.add_argument("--t3", type=str, action="append", default=[], dest="t3", help="CT model path (repeatable)")
+    parser.add_argument("--tta", action="store_true", default=False, help="Enable 8-fold flip TTA (default: off)")
     args = parser.parse_args()
 
     # Dedup
@@ -188,7 +189,7 @@ def main():
                 gt = (nib.load(str(gt_path)).get_fdata() > 0).astype(np.uint8)
                 if gt.sum() == 0:
                     continue
-                out = predict_mri_two_stage(img_path, s1, s2, use_tta=False, apply_mclahe=use_mclahe, s2_threshold=0.5)
+                out = predict_mri_two_stage(img_path, s1, s2, use_tta=args.tta, apply_mclahe=use_mclahe, s2_threshold=0.5)
                 pred = _resample_if_needed(out.scar_mask, gt)
                 d, a, s = _binary_metrics(pred, gt)
                 dice_vals.append(d)
@@ -236,10 +237,10 @@ def main():
 
                     img = _mc(img)
                 if hasattr(model, "predict"):
-                    pred = model.predict(img, spacer, use_tta=False)
+                    pred = model.predict(img, spacer, use_tta=args.tta)
                     pred = (pred > 0).astype(np.uint8)
                 else:
-                    out = predict_mri_two_stage(img_path, model, stage2_model=None, use_tta=False)
+                    out = predict_mri_two_stage(img_path, model, stage2_model=None, use_tta=args.tta)
                     pred = out.la_mask
                 pred = _resample_if_needed(pred, gt)
                 d, _, _ = _binary_metrics(pred, gt)
@@ -253,7 +254,14 @@ def main():
     if 3 in tasks and args.t3:
         ct_dir = db_dir / "cardiac anatomy segmentation（CT）" / "train_data"
         records = sorted(
-            [d for d in ct_dir.iterdir() if d.is_dir() and d.name.startswith("train_")],
+            [
+                d
+                for d in ct_dir.iterdir()
+                if d.is_dir()
+                and d.name.startswith("train_")
+                and (d / f"{str(int(d.name.split('_')[1])).zfill(4)}.nii.gz").exists()
+                and (d / f"label_{str(int(d.name.split('_')[1])).zfill(4)}.nii.gz").exists()
+            ],
             key=lambda p: int(p.name.split("_")[1]),
         )
         task3_results: Dict[str, Dict] = {}
@@ -266,10 +274,8 @@ def main():
                 num_str = str(int(rec_dir.name.split("_")[1])).zfill(4)
                 img_path = rec_dir / f"{num_str}.nii.gz"
                 lbl_path = rec_dir / f"label_{num_str}.nii.gz"
-                if not img_path.exists() or not lbl_path.exists():
-                    continue
                 gt = nib.load(str(lbl_path)).get_fdata().astype(np.uint8)
-                out = predict_ct(img_path, model, use_tta=False)
+                out = predict_ct(img_path, model, use_tta=args.tta)
                 pred = _resample_if_needed(out.ct_mask, gt)
                 labeled += 1
                 for cls_id in [1, 2, 3]:
