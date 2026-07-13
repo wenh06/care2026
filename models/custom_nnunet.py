@@ -131,17 +131,8 @@ class _ScarGaussianLoss(torch.nn.Module):
         self.dice = MemoryEfficientSoftDiceLoss(apply_nonlin=torch.nn.Softmax(dim=1), batch_dice=batch_dice, smooth=1e-5)
         self.ce = CrossEntropyLoss(reduction="none", ignore_index=ignore_label if ignore_label is not None else -100)
 
-    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        # Dice
-        dice_loss = self.dice(pred, target)
-
-        # Pixel-weighted CE
-        # target may be (B, 1, H, W, D) → squeeze
-        tgt = target.long()
-        if tgt.ndim == 5 and tgt.shape[1] == 1:
-            tgt = tgt[:, 0]
-
-        # Compute spatial weight map from scar mask (CPU, per-batch)
+    def _compute_weight(self, tgt: torch.Tensor) -> torch.Tensor:
+        """Compute Gaussian spatial weight map from scar mask (CPU, once per batch)."""
         scar_bin = (tgt == self.scar_class).cpu().numpy().astype("uint8")
         batch_w = []
         for b in range(scar_bin.shape[0]):
@@ -152,7 +143,25 @@ class _ScarGaussianLoss(torch.nn.Module):
                 d = distance_transform_edt(1 - sb).astype(np.float32)
                 w = 1.0 + self.w0 * np.exp(-(d**2) / (2 * self.sigma_px**2))
                 batch_w.append(w.astype(np.float32))
-        w_tensor = torch.from_numpy(np.stack(batch_w)).to(pred.device)
+        return torch.from_numpy(np.stack(batch_w))
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        # Dice
+        dice_loss = self.dice(pred, target)
+
+        # Pixel-weighted CE
+        # target may be (B, 1, H, W, D) → squeeze
+        tgt = target.long()
+        if tgt.ndim == 5 and tgt.shape[1] == 1:
+            tgt = tgt[:, 0]
+
+        # Cache weight map: DeepSupervisionWrapper calls forward() once per
+        # decoder level with the same target — compute the DT only once.
+        tgt_ptr = tgt.data_ptr()
+        if tgt_ptr != getattr(self, "_cached_tgt_ptr", None):
+            self._cached_weight = self._compute_weight(tgt)
+            self._cached_tgt_ptr = tgt_ptr
+        w_tensor = self._cached_weight.to(pred.device)
 
         ce_pixel = self.ce(pred, tgt)  # (B, H, W, D)
         ce_loss = (ce_pixel * w_tensor).mean()
