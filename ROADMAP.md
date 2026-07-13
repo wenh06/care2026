@@ -119,7 +119,7 @@ Additional tricks:
 
 ## Phase 1 — Data Exploration & Repository Setup ✅
 
-- [x] Explore raw training data at `/Data1/wenh06/CARE2026-LeftAtrium/`.
+- [x] Explore raw training data at `/path/to/CARE2026-LeftAtrium/`.
 - [x] Document data layout: Center A MRI (Tasks 1 & 2), Center D CT (Task 3).
 - [x] Discover quirks: LA cavity mask values are `{0, ~420}` (not `{0, 1}`); CT labels only for train_1..50.
 - [x] Create full repository structure: `models/`, `models/loss/`, `utils/`, `checkpoints/`, `log/`, `results/`.
@@ -329,7 +329,7 @@ python trainer.py --task ct --db-dir <data_root> --epochs 200
 - CLI: ``--ct-model``, ``--mri-stage1-model``, ``--mri-stage2-model`` per-model paths; ``--mri-mclahe`` for nnUNet.
 - Auto-detects val/test phases (``val_`` / ``test_`` prefix) for record discovery and output naming.
 
-**Validation data confirmed** (already on disk at `/Data1/wenh06/CARE2026-LeftAtrium/`):
+**Validation data confirmed** (already on disk at `/path/to/CARE2026-LeftAtrium/`):
 - Task 1: 10 records (`val_1..val_10`), `enhanced.nii.gz`.
 - Task 2: 20 records (`val_1..val_20`), `enhanced.nii.gz`.
 - Task 3: 20 records (`val_1..val_20`), `NNNN.nii.gz` (4-digit zero-padded).
@@ -343,7 +343,7 @@ python trainer.py --task ct --db-dir <data_root> --epochs 200
 ```bash
 PYTORCH_ALLOC_CONF=expandable_segments:True \
   python trainer.py --task mri --stage 1 \
-  --db-dir /Data1/wenh06/CARE2026-LeftAtrium --epochs 100 \
+  --db-dir /path/to/CARE2026-LeftAtrium --epochs 100 \
   2>&1 | tee log/mri1_train.log
 ```
 
@@ -356,7 +356,7 @@ Input: 144×144×44, batch_size=4.  Trained to epoch 100; checkpoint at `checkpo
 ```bash
 PYTORCH_ALLOC_CONF=expandable_segments:True \
   python trainer.py --task mri --stage 2 \
-  --db-dir /Data1/wenh06/CARE2026-LeftAtrium --epochs 200 --mclahe true \
+  --db-dir /path/to/CARE2026-LeftAtrium --epochs 200 --mclahe true \
   2>&1 | tee log/scar_train.log
 ```
 
@@ -445,33 +445,34 @@ from Center B/C — consistent with the known challenge of multi-center LGE-MRI.
 
 **Task 3 — CT (50 labeled cases, 5-fold ensemble, full-volume inference):**
 
-| Class | DSC |
-|-------|-----|
-| LA (left atrium) | 0.9938 |
-| PV (pulmonary veins) | 0.9832 |
-| LAA (left atrial appendage) | 0.9700 |
-| **Mean** | **0.9823** |
+| Model | LA | PV | LAA | Mean | Notes |
+|-------|-----|-----|-----|------|-------|
+| Dataset 500 (50 labeled) | **0.9938** | **0.9832** | **0.9700** | **0.9823** | nnUNet baseline |
+| Dataset 503 (self-trained, 150 cases) | 0.9916 | 0.9771 | 0.9547 | 0.9745 | hard pseudo-labels from 500 → hurts all classes |
 
-Training-set mean DSC 0.9823 vs. validation leaderboard 0.9558 (nnUNet 5-fold).
-Competitive with 1st place (0.9579) — only 0.21 pp away on the leaderboard.
+Self-training with hard pseudo-labels **degrades performance across all classes**
+(−0.78 pp mean DSC, LAA worst at −1.53 pp).  When the teacher (Dataset 500) is
+already near-optimal (0.9823 training-set), hard pseudo-labels introduce noise
+rather than new information.  The 100 unlabeled cases come from the same center
+and distribution, so they provide no distributional diversity benefit.
+
+This negative result motivates the boundary-aware trainer (B1,
+``nnUNetTrainerCTBoundary``) — improving loss design rather than adding noisy
+pseudo-labels.
 
 **Overall leaderboard standings (2026-07-09):**
 
 | Task | Our best | 1st place | Gap | Rank |
 |------|----------|-----------|-----|------|
-| 1 (scar) | G-DSC **0.4525** | — | **#1** 🏆 | 1st |
+| 1 (scar) | G-DSC **0.4743** | — | **#1** 🏆 | 1st |
 | 2 (cavity) | DSC 0.8835 | 0.8886 | −0.6 % | competitive |
 | 3 (CT) | DSC 0.9563 | 0.9579 | −0.16 pp | **2nd** ← next target |
 
-**Sub 7 breakthrough (2026-07-09):** G-DSC 0.4525, ACC 0.7113, SEN 0.4227 —
-all three metrics are #1 on the leaderboard by large margins (G-DSC +102 % over
-our previous best 0.2236).  The key change was **dilation 2mm → 5mm** (not
-multi-class vs binary — 521 ≈ 501).  Sub 8 (dilation=None) is still pending
-and may push G-DSC even higher based on training-set trends (0.6333 vs 0.6221).
-
-The dilation bottleneck is now resolved.  Task 1 is securely #1 on validation
-leaderboard.  Primary focus shifts to **Task 3 (CT) where we are #2, only
-0.16 pp behind 1st place**.
+**Sub 7 breakthrough (2026-07-09):** G-DSC 0.4525 — first submission using
+dilation=5mm, #1 by large margin.  **Sub 8 (2026-07-10):** dilation=None →
+G-DSC **0.4743**, ACC 0.7313, SEN 0.4627 — further +0.022 G-DSC over sub 7,
+confirming the training-set trend that removing the LA cavity constraint
+entirely is optimal.  All three metrics are #1 on the leaderboard.
 
 ### 6.3 CT Semi-Supervised (Task 3) — 🔄 Iterating
 
@@ -582,7 +583,7 @@ PV coverage; switch to percentile normalisation (nnUNet-style).
 ```bash
 PYTORCH_ALLOC_CONF=expandable_segments:True \
   python trainer.py --task ct \
-  --db-dir /Data1/wenh06/CARE2026-LeftAtrium --epochs 300 \
+  --db-dir /path/to/CARE2026-LeftAtrium --epochs 300 \
   --semi-mode mean_teacher \
   2>&1 | tee log/ct_mt_300ep_train.log
 ```
@@ -633,13 +634,13 @@ python pipeline.py \
   --mri-stage1-model tmp/nnUNet_results/Dataset502_*/nnUNetTrainer__* \
   --mri-stage2-model tmp/nnUNet_results/Dataset501_*/nnUNetTrainer__* \
   --ct-model tmp/nnUNet_results/Dataset500_*/nnUNetTrainer__* \
-  --input_dir /Data1/wenh06/CARE2026-LeftAtrium \
+  --input_dir /path/to/CARE2026-LeftAtrium \
   --output_dir results/ \
   --tasks 1,2,3
 
 # VNet fallback (uses PredictCfg defaults → checkpoints/)
 python pipeline.py \
-  --input_dir /Data1/wenh06/CARE2026-LeftAtrium \
+  --input_dir /path/to/CARE2026-LeftAtrium \
   --output_dir results/ \
   --tasks 1,2,3
 ```
@@ -700,13 +701,13 @@ Results tracked in ``submissions`` (YAML log).
 | # | Time | G-DSC | ACC | SEN | Model |
 |---|------|-------|-----|-----|-------|
 | 1 | 2026-06-25 20:02 | 0.2092 | 0.5997 | 0.1997 | vnet_stage2 (1ch), SGD 300ep, CLAHE |
-| 2 | 2026-06-29 18:58 | **0.2189** | 0.6041 | 0.2085 | vnet_stage2 (1ch), SGD 300ep, CLAHE, thresh=0.7 |
+| 2 | 2026-06-29 18:58 | 0.2189 | 0.6041 | 0.2085 | vnet_stage2 (1ch), SGD 300ep, CLAHE, thresh=0.7 |
 | 3 | 2026-07-01 22:40 | 0.1882 | 0.5766 | 0.1533 | vnet_stage2_2ch (MRI+SDF), SGD 600ep, CLAHE |
 | 4 | 2026-07-06 23:26 | 0.2213 | 0.5744 | 0.1489 | nnUNet 502+501, dilation=2mm |
 | 5 | 2026-07-08 01:27 | 0.2230 | 0.5747 | 0.1495 | nnUNet 502+501, TTA on, dilation=2mm |
-| 6 | 2026-07-08 16:29 | **0.2236** | 0.5743 | 0.1487 | nnUNet 512+511 (CLAHE), TTA on, dilation=2mm |
-| 7 | 2026-07-09 15:11 | **0.4525** | **0.7113** | **0.4227** | nnUNet 502+521, TTA on, dilation=5mm |
-| 8 | 2026-07-09 ??:?? | — | — | — | nnUNet 502+521, TTA on, dilation=none |
+| 6 | 2026-07-08 16:29 | 0.2236 | 0.5743 | 0.1487 | nnUNet 512+511 (CLAHE), TTA on, dilation=2mm |
+| 7 | 2026-07-09 15:11 | 0.4525 | 0.7113 | 0.4227 | nnUNet 502+521, TTA on, dilation=5mm |
+| 8 | 2026-07-10 01:53 | **0.4743** | **0.7313** | **0.4627** | nnUNet 502+521, TTA on, dilation=none |
 
 ### Task 2 (LA cavity segmentation) — DSC / HD (mm)
 
@@ -748,45 +749,75 @@ training recipe (SGD+polyLR 1000ep), deep supervision, and data normalisation al
 Ablation experiments below isolate each factor's contribution.
 
 ---
+## GT Scar Distribution Analysis (2026-07-12) ✅
+
+**Purpose**: Verify how much of the GT scar tissue actually lies outside the GT LA cavity mask
+at various dilation radii.  This is the data-analysis foundation for the paper's main finding.
+
+**Method**: For each of 60 Task 1 training cases, compute the 3D Euclidean distance (in mm,
+using spacing=(0.625, 0.625, 2.5) mm) from every GT scar voxel to the nearest GT LA cavity
+voxel, using `scipy.ndimage.distance_transform_edt`.  Count the fraction of scar voxels with
+distance ≤ dilation_mm as "inside dilated cavity".
+
+**Results** (60 cases, only cases with non-zero scar counted):
+
+| Dilation | % scar INSIDE dilated GT cavity | % scar OUTSIDE | Range (min–max inside) |
+|----------|--------------------------------|----------------|------------------------|
+| 0 mm     | 16.0 %                         | **84.0 %**     | 4 %–38 %               |
+| 1 mm     | 40.6 %                         | 59.4 %         | 16 %–62 %              |
+| **2 mm** | **80.7 %**                     | **19.3 %**     | 61 %–94 %              |
+| 3 mm     | 93.4 %                         | 6.6 %          | 80 %–99 %              |
+| 5 mm     | 98.9 %                         | 1.1 %          | 95 %–100 %             |
+| 8 mm     | 99.6 %                         | 0.4 %          | 96 %–100 %             |
+| 10 mm    | 99.7 %                         | 0.3 %          | 96 %–100 %             |
+
+**Key insights**:
+- **84% of GT scar is outside the GT LA lumen** at 0 mm (not 68% as previously estimated — correct the paper plan).
+  This is because LA scar is myocardial fibrosis in the **atrial wall**, not inside the blood-pool lumen.
+- Standard 2 mm dilation covers only 80.7% of scar; 19.3% is anatomically excluded even with a perfect Stage 1.
+- At 3 mm (≈ atrial wall thickness upper bound) coverage reaches 93.4%.
+- At 5 mm coverage is 98.9% — explains why sub 7 (dilation=5mm) dramatically outperformed sub 4-6 (dilation=2mm).
+- Combined with Stage 1 prediction errors (DSC ~0.88), the 2 mm constraint effectively clips much more scar.
+
+**Confirmed standard practice**:
+- AtrialJSQnet (Li et al., MedIA 2022) explicitly dilates the cavity mask and uses it as a hard post-processing
+  constraint (documented in their paper methods + Fig. 3/4).
+- TESSLA (MICCAI-STACOM 2022) uses LA blood-pool mask to constrain scar.
+- Closely related recent work: Kundu & Linte, "A Two Stage Pipeline for Left Atrial Wall Constrained Scar
+  Segmentation" (arXiv:2604.27101, 2026-04-29) — uses SDMs as soft priors; their approach is a training-time
+  soft constraint, complementary to our post-processing analysis.  Evaluated on LAScarQS 2022 (Dice 61.1%).
+
+**Paper implication**: The 84% figure directly supports the paper's central claim.  The title should reflect
+"scar beyond the lumen / cavity" rather than "dilation trap" (too jargon-heavy).
+Suggested title: *"Scar Beyond the Lumen: Rethinking Anatomical Constraints for Left Atrial Scar Segmentation"*.
+
+---
 ## Immediate Next Steps
 
 ### Priority: Task 3 CT — close 0.16 pp gap to 1st place
 
 Current: nnUNet Dataset 500, 5-fold ensemble, DSC **0.9563** (#2).  Gap to #1: **0.16 pp**.
 
-The key opportunity: 100 of 150 CT training cases are **unlabeled**.  The current
-nnUNet model was trained on only 50 labeled cases.  Self-training on all 150
-cases should improve per-class DSC, especially PV (the hardest class at DSC
-0.92–0.93).
+**Self-training (Dataset 503) — ❌ Failed.**  Training on 50 GT + 100 hard
+pseudo-labels decreased mean DSC by −0.78 pp vs. the 50-label baseline.
+Teacher (500) is too strong — pseudo-labels add noise, not signal.
 
-**CT self-training pipeline** (`scripts/self_train_nnunet.py` — ready):
+**Next: Boundary-aware nnUNet (B1).**  ``nnUNetTrainerCTBoundary`` is ready
+(``models/custom_nnunet.py``).  Adds HausdorffERLoss (PV/LAA boundary) +
+CenterlineCELoss (PV topology) to standard DiceCE.  Train on Dataset 500:
 
 ```bash
-python scripts/self_train_nnunet.py \
-  --db-dir /root/autodl-tmp/CARE2026 \
-  --nnunet-dir tmp/nnUNet_results/Dataset500_CARE2026CT/nnUNetTrainer__... \
-  --dataset-id 503 \
-  --folds 0,1,2,3,4
+export nnUNet_extTrainer="$PWD/models"
+for f in 0 1 2 3 4; do
+  nnUNetv2_train 500 3d_fullres $f -tr nnUNetTrainerCTBoundary
+done
 ```
 
-This does:
-1. 5-fold ensemble inference on 100 unlabeled CTs → pseudo-labels in `tmp/pseudo_labels/`
-2. Symlink 50 GT + 100 pseudo-labeled cases into `Dataset503_CARE2026CT_ST/`
-3. Print plan + train commands
-
-After self-training:
-```bash
-nnUNetv2_plan_and_preprocess -d 503 --verify_dataset_integrity -c 3d_fullres
-for f in 0 1 2 3 4; do nnUNetv2_train 503 3d_fullres $f; done
-```
-
-Beyond naive self-training, two additional strategies to consider:
-
-| # | Strategy | Rationale | Effort |
+| # | Strategy | Rationale | Status |
 |---|----------|-----------|--------|
-| **S1** | **Soft pseudo-labels** | Hard argmax discards prediction uncertainty; train with soft targets (KL divergence) on unlabeled cases to preserve PV/LAA boundary ambiguity | Medium |
-| **S2** | **Custom CT loss** | `nnUNetTrainerCTBoundary` — add Boundary Loss (HausdorffERLoss) for PV/LAA edge precision, similar to `nnUNetTrainerScarGaussian` for scar | Medium |
-| S3 | Slice-position encoding | Help model handle superior/inferior slices where PV junctions are complex | Low priority |
+| **B1** | **Boundary-aware nnUNet** | HausdorffERLoss + CenterlineCELoss for PV/LAA | Code ready, need GPU |
+| S1 | Soft pseudo-labels | KL divergence on unlabeled cases | De-prioritized after 503 failure |
+| S3 | Ensemble 500 + 503 | Different training data → complementary errors | Low-cost, try after B1 |
 
 ### MRI — remaining items (lower priority after sub 7)
 

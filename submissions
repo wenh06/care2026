@@ -56,10 +56,10 @@ Task 1 (LA scar quantification):
     train: 1000ep, no CLAHE
     infer: tta=on, dilation=5mm
   submission 8:
-    created_time: "YYYY-MM-DD HH:MM:SS"
-    G-DSC: X.XXXX
-    ACC: X.XXXX
-    SEN: X.XXXX
+    created_time: "2026-07-10 01:53:31"
+    G-DSC: 0.4743
+    ACC: 0.7313
+    SEN: 0.4627
     model: nnUNet 502+521 (5-fold ensemble, multi-class)
     train: 1000ep, no CLAHE
     infer: tta=on, dilation=none
