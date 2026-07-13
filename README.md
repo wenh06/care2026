@@ -57,7 +57,7 @@ Segment the left atrium, pulmonary veins, and left atrial appendage jointly from
 |--------|----------|-----------|-------------|--------|-------|
 | Center A (Utah NAMIC-CARMA) | LGE-MRI (0.625×0.625×2.5 mm) | 60 (T1), 130 (T2) | 10 | 24 (T1), 14 (T2) | Task 1, Task 2 |
 | Center B (Beth Israel, Boston) | LGE-MRI (1.4×1.4×1.4 mm) | — | — | 20 | Task 2 |
-| Center C (King's College London) | LGE-MRI (1.3×1.3×4.0 mm) | — | 10 | 10 | Task 2 |
+| Center C (King's College London) | LGE-MRI (1.3×1.3×4.0 mm) | — | 10 (Center C) | 10 | Task 2 |
 | Center D (Fuzhou University Hospital) | CT (0.30–0.80×0.30–0.80×0.5 mm) | 150 | 20 | 130 | Task 3 |
 
 Data are provided in NIfTI format:
@@ -84,6 +84,7 @@ Data are provided in NIfTI format:
 - [outputs.py](outputs.py): `CARE2026Outputs` dataclass container for model predictions with `save_as_nifti()` (challenge-compliant directory layout) and `package_submission()` (submission zip creation).
 - [pipeline.py](pipeline.py): high-level inference orchestration (`run_task1/2/3_inference`, `run_all_tasks`) plus the **unified CLI** for model loading, inference, and submission packaging. Serves as the Docker `ENTRYPOINT`.
 - [predict.py](predict.py): core volume-level inference functions — `predict_mri_two_stage()` (two-stage coarse-to-fine MRI pipeline), `predict_ct()` (sliding-window CT inference), 8-fold flip TTA, and post-processing utilities (`keep_largest_component`, `postprocess_mri_masks`, `postprocess_ct_mask`).
+- [viz.py](viz.py): Jupyter notebook visualization and evaluation utilities — `view_prediction()`, `evaluate_stage1/2()`, `evaluate_ct()`, `evaluate_training_sample()`. Supports both VNet and nnUNet model backends.
 - [post_docker_build.py](post_docker_build.py): downloads and caches trained model weights into the Docker image at build time (executed during `docker build`).
 - [trainer.py](trainer.py): three trainer classes (`CARE2026_MRI_Stage1_Trainer`, `CARE2026_MRI_Stage2_Trainer`, `CARE2026_CT_Trainer`) with AMP, gradient accumulation, cosine/poly LR, and a CLI for launching training runs.  Supports `--ct-model v1|v2|nnunet` and `--backbone vnet|nested_vnet`.
 - [requirements.txt](requirements.txt): full requirements for local development.
@@ -97,13 +98,20 @@ Data are provided in NIfTI format:
 - [checkpoints](checkpoints): trained model weights (`.safetensors`). Canonical names: `mri_stage1_model.safetensors`, `mri_stage2_model.safetensors`, `ct_model.safetensors`; also contains epoch snapshots for rollback.
 - [log](log): training logs (`.txt` + `.csv` metrics from `torch_ecg` trainers) and TensorBoard event files.
 - [evaluate-results](evaluate-results): output directory for local validation-set evaluation metrics.
-- [scripts](scripts): diagnostic and test scripts — `diagnose_ct.py` (full per-class metrics on labelled CTs), `test_ct_inference.py` (quick smoke test).
+- [scripts](scripts): diagnostic, evaluation, and data preparation scripts —
+  `eval_all_models.py` (unified VNet + nnUNet evaluation on training data),
+  `create_mock_test_set.py` (mock test set from validation data for Docker smoke tests),
+  `prep_nnunet_mri.py` / `prep_nnunet_ct.py` (nnUNet v2 dataset preparation),
+  `self_train_nnunet.py` (pseudo-label generation + dataset construction),
+  `sweep_scar_dilation.py` (offline dilation sweep),
+  `diagnose_ct.py` (full per-class metrics on labelled CTs).
 - [results](results): local prediction outputs and submission zip archives.
 
 ### Folders (Modules)
 
 - [models](models): model architecture definitions and high-level wrappers.
-  - [`__init__.py`](models/__init__.py): model wrapper classes — `CARE2026_MRI_Stage1_Model` (VNet for coarse LA localisation), `CARE2026_MRI_Stage2_Model` (single-head VNet for scar-only, trained on centroid-cropped region), `CARE2026_CT_Model` (VNet(s) supporting CPS dual-model and Mean Teacher semi-supervised modes), `CARE2026_CT_ModelV2` (supervised-first variant with InstanceNorm+Mish+AdamW option), `CARE2026_CT_nnUNet` (wraps nnUNet's PlainConvUNet + predictor for inference, 6-stage ResEnc U-Net with deep supervision). All wrappers compute loss inside `forward()` and support checkpoint save/load.
+  - [`__init__.py`](models/__init__.py): model wrapper classes — `CARE2026_MRI_Stage1_Model` (VNet for coarse LA localisation), `CARE2026_MRI_Stage2_Model` (single-head VNet for scar-only, trained on centroid-cropped region), `CARE2026_CT_Model` (VNet(s) supporting CPS dual-model and Mean Teacher semi-supervised modes), `CARE2026_CT_ModelV2` (supervised-first variant with InstanceNorm+Mish+AdamW option), `CARE2026_CT_nnUNet` / `CARE2026_MRI_nnUNet` (wraps nnUNet's PlainConvUNet + predictor for inference, 6-stage ResEnc U-Net with deep supervision). All wrappers compute loss inside `forward()` and support checkpoint save/load.
+  - [`custom_nnunet.py`](models/custom_nnunet.py): custom nnUNet trainers — `nnUNetTrainerScarWeighted` (per-class CE weights), `nnUNetTrainerScarGaussian` (Gaussian spatial weight map), `nnUNetTrainerCTBoundary` (HausdorffER + CenterlineCE for PV/LAA boundary). Loaded via `nnUNet_extTrainer` environment variable.
   - [vnet.py](models/vnet.py): 3D V-Net backbone — `VNet` (encoder-decoder with skip connections). Supports optional `BottleneckTransformer3D` at the bottleneck and `ECAGate3D` on skip connections.
   - [nested_vnet.py](models/nested_vnet.py): UNet++-style NestedVNet with dense skip connections and deep supervision at multiple decoder resolutions. Used for CT via `--backbone nested_vnet`.
   - [layers.py](models/layers.py): shared 3-D building blocks — `ConvNormAct`, `ResBlock3D`, `DownBlock3D`, `UpBlock3D`, `NestedUpBlock3D`, `ECAGate3D` (efficient channel attention), `WindowedMHSA3D` (windowed multi-head self-attention), `BottleneckTransformer3D` (Swin-style transformer block).
@@ -127,7 +135,15 @@ Data are provided in NIfTI format:
 
 ## Leaderboards
 
-Leaderboards will be released after test results submission. See the [challenge page](https://www.zmic.org.cn/care_2026/track_leftatrium/) for updates.
+Validation leaderboard results (nnUNet 5-fold ensemble, no CLAHE):
+
+| Task | Metric | Score | Rank |
+|------|--------|-------|------|
+| Task 1 (scar) | G-DSC / ACC / SEN | 0.4743 / 0.7313 / 0.4627 | **#1** |
+| Task 2 (cavity) | DSC / HD | 0.8835 / 18.53 mm | competitive |
+| Task 3 (CT) | DSC / HD | 0.9563 / 12.45 mm | #2 |
+
+See `submissions` for full submission log and `ROADMAP.md` for development history.
 
 ## Citations
 
