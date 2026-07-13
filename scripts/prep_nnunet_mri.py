@@ -13,6 +13,7 @@ Common datasets
 Multi-class (cavity + scar joint label)
 ---------------------------------------
 - **Dataset 521** — 60 cropped cases, 2-class label (cavity=1, scar=2).
+- **Dataset 531** — Same as 521 but with MCLAHE.
 - **Dataset 600** — 60 full-volume cases, 2-class label.
 
 Usage::
@@ -24,9 +25,10 @@ Usage::
     # With CLAHE
     python scripts/prep_nnunet_mri.py --db-dir ... --task 1 --mclahe  # → 511
 
-    # Multi-class (cavity + scar)
-    python scripts/prep_nnunet_mri.py --db-dir ... --task 1 --multi-class          # → 521 crop
-    python scripts/prep_nnunet_mri.py --db-dir ... --task 1 --multi-class --no-crop  # → 600 full
+    # Multi-class (cavity + scar) — must pass explicit --dataset-id-task1
+    python scripts/prep_nnunet_mri.py --db-dir ... --task 1 --multi-class --dataset-id-task1 521
+    python scripts/prep_nnunet_mri.py --db-dir ... --task 1 --multi-class --mclahe --dataset-id-task1 531
+    python scripts/prep_nnunet_mri.py --db-dir ... --task 1 --multi-class --no-crop --dataset-id-task1 600
 """
 
 import argparse

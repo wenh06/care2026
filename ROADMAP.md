@@ -10,6 +10,20 @@ Three tasks are evaluated independently; no cross-modal fusion is required.
 
 ---
 
+## Dataset ID Quick Reference
+
+| ID | Task | Content | CLAHE | Labels | Input | Creation Command |
+|----|------|--------|:---:|------|------|------|
+| 500 | CT 3 | multi-structure | — | 4-class | full volume | `python scripts/prep_nnunet_ct.py --db-dir ...` |
+| 501 | MRI 1 | scar | — | binary scar | crop 256×256×44 | `python scripts/prep_nnunet_mri.py --db-dir ... --task 1` |
+| 502 | MRI 2 | cavity | — | binary cavity | full 576×576×44 | `python scripts/prep_nnunet_mri.py --db-dir ... --task 2` |
+| 503 | CT 3 | self-trained | — | 4-class | full volume | `python scripts/self_train_nnunet.py ... --dataset-id 503` |
+| 511 | MRI 1 | scar | ✅ | binary scar | crop | `python scripts/prep_nnunet_mri.py --db-dir ... --task 1 --mclahe` |
+| 512 | MRI 2 | cavity | ✅ | binary cavity | full | `python scripts/prep_nnunet_mri.py --db-dir ... --task 2 --mclahe` |
+| 521 | MRI 1 | scar+cavity | — | 2-class | crop | `python scripts/prep_nnunet_mri.py --db-dir ... --task 1 --dataset-id-task1 521 --multi-class` |
+| 531 | MRI 1 | scar+cavity | ✅ | 2-class | crop | `python scripts/prep_nnunet_mri.py --db-dir ... --task 1 --dataset-id-task1 531 --multi-class --mclahe` |
+| 600 | MRI 1 | scar+cavity | — | 2-class | full volume | `python scripts/prep_nnunet_mri.py --db-dir ... --task 1 --dataset-id-task1 600 --multi-class --no-crop` |
+
 ## Best Model Configurations (for submission & inference)
 
 ### Task 1 — LA Scar Quantification
@@ -894,7 +908,11 @@ done
 
 ## Notes & Open Questions
 
-- **Task 2 domain shift**: Center B/C validation data (20 samples) is available for fine-tuning / histogram matching — check challenge rules whether this is permitted.
+- **Task 2 cross-scanner domain shift**: The spacing fix resolves physical resampling errors, but the remaining gap to 0.89+ DSC is likely due to scanner-level intensity differences (Center A: Siemens 1.5T/3T vs. Centers B/C: Philips 1.5T).  Possible inference-time mitigations (no retraining needed, challenge-compliant):
+  - **Histogram matching**: map test image intensity CDF to a Center A template → Philips images "look like" Siemens.
+  - **Per-case Z-score**: ``(img - mean) / std`` per individual volume instead of global normalization.
+  - **BN Test-Time Adaptation**: forward pass on test data to update BN running stats (no weight update).
+
 - **Task 3 label format**: challenge page says `cardiacSegImgMO.nii.gz` but training data uses `label_XXXX.nii.gz` — must handle both names in `data_reader.py` when validation/test data is released.
 - **G-DSC for Task 1**: evaluated alongside ACC and SEN which require binary (0/1) predictions.  Soft probability maps are NOT accepted — must submit uint8 binary mask.  G-DSC weight w_c = 1/V_c² gives scar class enormous influence (~40,000× vs background).
 - **Prizes**: only Tasks 1 and 3 are prize-eligible; prioritise these two.

@@ -66,11 +66,9 @@ class nnUNetTrainerScarGaussian(nnUNetTrainer):
         fold: int,
         dataset_json: dict,
         device: torch.device = torch.device("cuda"),
-        w0: float = 5.0,
-        sigma_mm: float = 2.0,
     ):
-        self._w0 = w0
-        self._sigma_mm = sigma_mm
+        self._w0 = 5.0
+        self._sigma_mm = 2.0
         # Find scar class index from label map
         labels = dataset_json.get("labels", {})
         self._scar_cls = 1  # fallback: last non-bg class
@@ -187,13 +185,10 @@ class nnUNetTrainerCTBoundary(nnUNetTrainer):
         fold: int,
         dataset_json: dict,
         device: torch.device = torch.device("cuda"),
-        hd_weight: float = 0.1,
-        clce_weight: float = 0.3,
-        hd_erosions: int = 10,
     ):
-        self._hd_weight = hd_weight
-        self._clce_weight = clce_weight
-        self._hd_erosions = hd_erosions
+        self._hd_weight = 0.1
+        self._clce_weight = 0.3
+        self._hd_erosions = 10
         super().__init__(plans, configuration, fold, dataset_json, device=device)
 
     def _build_loss(self):
