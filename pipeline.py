@@ -25,9 +25,18 @@ Submission format::
 from __future__ import annotations
 
 import argparse
+import os
 import warnings
 from datetime import datetime
 from pathlib import Path
+
+# Suppress noisy third-party warnings at import time
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="batchgenerators")
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="scipy")
+warnings.filterwarnings("ignore", category=UserWarning, module="google")
+warnings.filterwarnings("ignore", message=".*use of fork.*")
+warnings.filterwarnings("ignore", message=".*Protobuf gencode.*")
 from typing import List, Optional, Union
 
 import torch
