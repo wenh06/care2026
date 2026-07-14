@@ -21,6 +21,9 @@ __all__ = [
     "MRI_STAGE2_CACHE_SHAPE",
     "MRI_STAGE2_CENTROID_JITTER",
     "MRI_PATCH_SHAPE",  # alias for MRI_STAGE2_CROP_SHAPE
+    # Physical FOVs (mm) derived from shapes × training spacing
+    "MRI_CANONICAL_FOV",
+    "MRI_STAGE2_CROP_FOV",
     "CT_PATCH_SIZE",
     "CT_HU_MIN",
     "CT_HU_MAX",
@@ -89,6 +92,12 @@ MRI_STAGE2_CENTROID_JITTER = (32, 32, 0)
 
 # Backward-compatibility alias  (= Stage 2 crop shape)
 MRI_PATCH_SHAPE = MRI_STAGE2_CROP_SHAPE
+
+# Physical FOV (mm) corresponding to each shape at training spacing.
+# Computed as shape[i] × MRI_CENTER_A_SPACING[i] — invariant across native
+# spacings.  Divide by native spacing to get voxel count at any resolution.
+MRI_CANONICAL_FOV = tuple(a * b for a, b in zip(MRI_CANONICAL_SHAPE, MRI_CENTER_A_SPACING))
+MRI_STAGE2_CROP_FOV = tuple(a * b for a, b in zip(MRI_STAGE2_CROP_SHAPE, MRI_CENTER_A_SPACING))
 
 # CT: random 3-D patch size during training (isotropic cube), in voxels
 CT_PATCH_SIZE = 128  # voxels per side after isotropic resampling

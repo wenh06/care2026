@@ -35,10 +35,12 @@ from const import (
     CT_TARGET_SPACING,
     MRI_CANONICAL_SHAPE,
     MRI_STAGE1_SHAPE,
+    MRI_STAGE2_CROP_FOV,
     MRI_STAGE2_CROP_SHAPE,
 )
 from data_reader import CARE2026_CT
 from outputs import CARE2026Outputs
+from utils.centroid_crop import centroid_crop_3d
 from utils.mclahe import mclahe as _mclahe
 
 __all__ = [
@@ -359,25 +361,33 @@ def predict_mri_two_stage(
 ) -> CARE2026Outputs:
     """Two-stage MRI inference matching the training pipeline.
 
-    Pipeline
-    --------
-    1. Load NIfTI → canonical → (optional CLAHE).
-    2. **Stage 1**: downsample → 144×144×44 → binary VNet → LA cavity mask
-       in canonical space.  Also yields the LA centroid.
-    3. **Centroid crop**: 256×256×44 around centroid → resize to 128×128×44
-       (training resolution) → z-score.
-    4. **Stage 2**: dual-head VNet on 128×128×44 → scar prob map →
-       upsample back to 256×256×44 → place in canonical → resample to native.
-    5. **Post-process** (native space): keep largest LA component; constrain
-       scar to *dilated* Stage-1 LA cavity (~2 mm dilation to cover the
-       atrial wall).
+    Pipeline (nnUNet path — both stages are nnUNet models)
+    -------------------------------------------------------
+    1. Load NIfTI → (optional CLAHE) at native resolution.
+    2. **Stage 1**: nnUNet predicts LA cavity at native resolution.
+       Centroid is computed on the native-resolution mask.
+    3. **Centroid crop**: physical FOV ``MRI_STAGE2_CROP_FOV`` cropped
+       from native image around centroid.  Crop uses ``_clamp``-style
+       window placement, matching ``prep_nnunet_mri.py:_centroid_crop``.
+    4. **Stage 2**: nnUNet predicts scar on the crop at native spacing.
+    5. **Post-process** (native space).
+
+    Pipeline (VNet / mixed path — legacy)
+    --------------------------------------
+    1. Load NIfTI → canonical (576×576×44) → (optional CLAHE).
+    2. **Stage 1**: 144×144×44 → softmax → LA cavity in canonical space.
+    3. **Centroid crop**: 256×256×44 around centroid.
+    4. **Stage 2**: VNet on 128×128×44 → scar prob map →
+       upsample → place in canonical → resample to native.
+    5. **Post-process** (native space).
 
     Parameters
     ----------
     centroid : (cx, cy, cz) or None, optional
-        Pre-computed LA centroid in canonical space.  When given, Stage 1
-        is *skipped* for centroid computation (but still runs to produce
-        the LA cavity mask used for post-processing scar constraint).
+        Pre-computed LA centroid in **native voxel space** for nnUNet
+        models, or **canonical space** for VNet models.  When given,
+        Stage 1 is *skipped* for centroid computation (but still runs
+        to produce the LA cavity mask used for scar constraint).
     """
     if device is None:
         device = next(stage1_model.parameters()).device
@@ -385,7 +395,87 @@ def predict_mri_two_stage(
     if apply_mclahe is None:
         apply_mclahe = _check_model_consistency(stage1_model, stage2_model)
 
-    # Read shapes from model config (synced from train_config at init)
+    nii = nib.load(str(img_path))
+    image_raw = nii.get_fdata().astype(np.float32)
+    orig_shape = image_raw.shape
+    orig_spacing = tuple(float(s) for s in nii.header.get_zooms()[:3])
+
+    s1_nnunet = _is_nnunet(stage1_model)
+    s2_nnunet = _is_nnunet(stage2_model) if stage2_model is not None else False
+
+    # =====================================================================
+    #  nnUNet-only path — NO canonical resampling (native resolution)
+    # =====================================================================
+    if s1_nnunet and (stage2_model is None or s2_nnunet):
+        img_input = _mclahe(image_raw.copy()) if apply_mclahe else image_raw.copy()
+
+        # ── Stage 1: LA cavity at native resolution ───────────────────────
+        stage1_model.eval()
+        with torch.no_grad():
+            la_s1 = stage1_model.predict(img_input, orig_spacing, use_tta=use_tta)
+            la_s1 = (la_s1 > 0).astype(np.uint8)
+
+        if stage2_model is None:
+            la_out, _ = postprocess_mri_masks(la_s1, np.zeros_like(la_s1))
+            return CARE2026Outputs(
+                task="mri",
+                la_mask=la_out,
+                scar_mask=np.zeros_like(la_out),
+                source_affine=nii.affine,
+                source_header=nii.header,
+            )
+
+        # ── Centroid (native voxel coordinates) ───────────────────────────
+        if centroid is not None:
+            cx, cy, cz = centroid
+        else:
+            fg = np.argwhere(la_s1 > 0)
+            if len(fg) > 0:
+                cx, cy, cz = fg.mean(axis=0).round().astype(int)
+            else:
+                cx, cy, cz = [s // 2 for s in orig_shape]
+
+        # ── Centroid crop at native resolution ────────────────────────────
+        # MRI_STAGE2_CROP_FOV = physical crop FOV (mm), invariant across spacings.
+        # Divide by native spacing → crop size in native voxels.
+        _crop_vox = tuple(int(round(f / s)) for f, s in zip(MRI_STAGE2_CROP_FOV, orig_spacing))
+
+        crop, (x0, y0, z0), (px0, py0, pz0) = centroid_crop_3d(img_input, (cx, cy, cz), _crop_vox)
+        cH, cW, cD = _crop_vox
+
+        # ── Stage 2: scar at native resolution ────────────────────────────
+        scar_cls = getattr(stage2_model, "scar_class_index", 1)
+        stage2_model.eval()
+        with torch.no_grad():
+            pred_crop = stage2_model.predict(crop, orig_spacing, use_tta=use_tta)
+        if scar_cls > 1:
+            scar_crop = (pred_crop == scar_cls).astype(np.uint8)
+        else:
+            scar_crop = (pred_crop > 0).astype(np.uint8)
+
+        # Un-pad then place crop back at native resolution
+        scar_unpad = scar_crop[: cH - px0, : cW - py0, : cD - pz0] if px0 > 0 or py0 > 0 or pz0 > 0 else scar_crop
+        scar_out = np.zeros(orig_shape, dtype=np.uint8)
+        scar_out[x0 : x0 + scar_unpad.shape[0], y0 : y0 + scar_unpad.shape[1], z0 : z0 + scar_unpad.shape[2]] = scar_unpad
+
+        la_out, scar_out = postprocess_mri_masks(
+            la_s1,
+            scar_out,
+            dilation_mm=scar_dilation,
+            in_plane_spacing=(orig_spacing[0], orig_spacing[1]),
+        )
+
+        return CARE2026Outputs(
+            task="mri",
+            la_mask=la_out,
+            scar_mask=scar_out,
+            source_affine=nii.affine,
+            source_header=nii.header,
+        )
+
+    # =====================================================================
+    #  VNet / mixed path (legacy): canonical resampling
+    # =====================================================================
     cfg1 = getattr(stage1_model, "config", {}) or {}
     cfg2 = getattr(stage2_model, "config", {}) or {}
     if canonical_shape is None:
@@ -396,45 +486,40 @@ def predict_mri_two_stage(
         stage2_crop_shape = tuple(cfg2.get("patch_shape", MRI_STAGE2_CROP_SHAPE))
     s2_hw = int(cfg2.get("train_crop_hw", 128))
 
-    # ── Load & canonical ───────────────────────────────────────────────────
-    nii = nib.load(str(img_path))
-    image_raw = nii.get_fdata().astype(np.float32)
-    orig_shape = image_raw.shape
+    # ── Load & canonical ─────────────────────────────────────────────────
     img_canonical = _resample_3d(image_raw, canonical_shape)
     if apply_mclahe:
         img_canonical = _mclahe(img_canonical)
 
-    # ── Stage 1: coarse LA cavity (always run — needed for scar constraint)
-    mri_spacing = tuple(float(s) for s in nii.header.get_zooms()[:3])
-    s1_nnunet = _is_nnunet(stage1_model)
+    # Effective voxel spacing after _resample_3d to canonical_shape
+    _orig_sp = np.array(orig_spacing, dtype=np.float64)
+    _orig_sh = np.array(orig_shape, dtype=np.float64)
+    _can_sh = np.array(canonical_shape, dtype=np.float64)
+    mri_spacing = tuple(float(s) for s in _orig_sp * _orig_sh / _can_sh)
 
+    # ── Stage 1 ──────────────────────────────────────────────────────────
     if s1_nnunet:
         stage1_model.eval()
         with torch.no_grad():
             la_s1_canonical = stage1_model.predict(img_canonical, mri_spacing, use_tta=use_tta)
-            # nnUNet cavity model outputs classes {0,1} — argmax to binary
             la_s1_canonical = (la_s1_canonical > 0).astype(np.uint8)
     else:
         img_s1 = _resample_3d(img_canonical, stage1_shape)
         img_s1_norm = _zscore(img_s1)
         t_s1 = torch.from_numpy(img_s1_norm).unsqueeze(0).unsqueeze(0)
-
         stage1_model.eval()
         with torch.no_grad():
             la_prob_s1 = _stage1_tta(stage1_model, t_s1, device) if use_tta else _run_stage1_model(stage1_model, t_s1, device)
         la_mask_s1 = (la_prob_s1[1] >= s1_threshold).astype(np.uint8)
-
-        # Stage-1 LA at canonical resolution (for scar constraint)
         la_s1_canonical = _resample_mask(la_mask_s1, canonical_shape)
 
-    # Centroid
+    # Centroid (canonical space)
     if centroid is not None:
         cx, cy, cz = centroid
     else:
         fg = np.argwhere(la_s1_canonical > 0)
         cx, cy, cz = fg.mean(axis=0).round().astype(int) if len(fg) > 0 else np.array([s // 2 for s in canonical_shape])
 
-    # ── If no Stage 2 model (e.g. Task 2 cavity-only), return LA mask only
     if stage2_model is None:
         la_out = _resample_mask(la_s1_canonical, orig_shape)
         la_out, _ = postprocess_mri_masks(la_out, np.zeros_like(la_out))
@@ -465,12 +550,9 @@ def predict_mri_two_stage(
         crop = np.pad(crop, ((px0, px1), (py0, py1), (pz0, pz1)), mode="constant", constant_values=0.0)
 
     crop_h, crop_w, crop_d = crop.shape
-    s2_nnunet = _is_nnunet(stage2_model)
-
     scar_cls = getattr(stage2_model, "scar_class_index", 1)
 
     if s2_nnunet:
-        # nnUNet Stage 2: predictor handles normalization + resampling internally
         stage2_model.eval()
         with torch.no_grad():
             pred_crop = stage2_model.predict(crop, mri_spacing, use_tta=use_tta)
@@ -479,7 +561,6 @@ def predict_mri_two_stage(
         else:
             scar_crop = (pred_crop > 0).astype(np.uint8)
     else:
-        # VNet Stage 2: z-score → resize → forward → resize back
         img_s2_norm = _zscore(crop)
         use_sdf = "2ch" in str(cfg2.get("backbone", ""))
         if use_sdf:
@@ -504,19 +585,20 @@ def predict_mri_two_stage(
             _, scar_prob_s2 = (
                 _stage2_tta(stage2_model, t_s2, device) if use_tta else _run_stage2_model(stage2_model, t_s2, device)
             )
-
         scar_crop = _resample_mask((scar_prob_s2[scar_cls] >= s2_threshold).astype(np.uint8), (crop_h, crop_w, crop_d))
 
     scar_unpad = scar_crop[px0 : tH - px1, py0 : tW - py1, pz0 : tD - pz1]
     scar_canonical = np.zeros(canonical_shape, dtype=np.uint8)
     scar_canonical[xs:xe, ys:ye, zs:ze] = scar_unpad
 
-    # ── Resample to native ─────────────────────────────────────────────────
     la_out = _resample_mask(la_s1_canonical, orig_shape)
     scar_out = _resample_mask(scar_canonical, orig_shape)
-
-    # ── Post-process at native resolution ───────────────────────────────────
-    la_out, scar_out = postprocess_mri_masks(la_out, scar_out, dilation_mm=scar_dilation)
+    la_out, scar_out = postprocess_mri_masks(
+        la_out,
+        scar_out,
+        dilation_mm=scar_dilation,
+        in_plane_spacing=(orig_spacing[0], orig_spacing[1]),
+    )
 
     return CARE2026Outputs(
         task="mri",

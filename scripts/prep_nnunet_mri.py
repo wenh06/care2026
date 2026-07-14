@@ -46,6 +46,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tqdm.auto import tqdm
 
 from const import MRI_STAGE2_CROP_SHAPE
+from utils.centroid_crop import centroid_crop_3d
 from utils.mclahe import mclahe as _mclahe
 
 # ---------------------------------------------------------------------------
@@ -93,10 +94,7 @@ def _centroid_crop(
     scar_mask: np.ndarray,
     crop_shape: Tuple[int, int, int] = MRI_STAGE2_CROP_SHAPE,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Crop *image* and *scar_mask* to a fixed region centred on the LA cavity centroid.
-
-    Matches ``dataset.py:_centroid_crop`` — resample to canonical, compute centroid
-    from GT cavity mask, then crop *crop_shape* around it with zero-padding at borders.
+    """Crop *image* and *scar_mask* around the LA cavity centroid.
 
     Parameters
     ----------
@@ -107,7 +105,6 @@ def _centroid_crop(
     scar_mask : np.ndarray, shape (H, W, D), uint8
         Binary scar mask (GT).
     crop_shape : (cH, cW, cD)
-        Target crop size, default ``MRI_STAGE2_CROP_SHAPE`` = (256, 256, 44).
 
     Returns
     -------
@@ -115,35 +112,16 @@ def _centroid_crop(
     cropped_scar : np.ndarray of shape *crop_shape*
     """
     H, W, D = image.shape
-    cH, cW, cD = crop_shape
 
     # Compute centroid from cavity mask
     fg = np.where(la_mask > 0)
     if fg[0].size == 0:
-        # Fallback: image centre
         cx, cy, cz = H // 2, W // 2, D // 2
     else:
         cx, cy, cz = int(round(fg[0].mean())), int(round(fg[1].mean())), int(round(fg[2].mean()))
 
-    def _clamp(center, size, max_dim):
-        start = center - size // 2
-        return int(np.clip(start, 0, max(max_dim - size, 0)))
-
-    x0 = _clamp(cx, cH, H)
-    y0 = _clamp(cy, cW, W)
-    z0 = _clamp(cz, cD, D)
-
-    img_crop = image[x0 : x0 + cH, y0 : y0 + cW, z0 : z0 + cD]
-    scar_crop = scar_mask[x0 : x0 + cH, y0 : y0 + cW, z0 : z0 + cD]
-
-    # Zero-pad if near border
-    pad_x = max(0, cH - img_crop.shape[0])
-    pad_y = max(0, cW - img_crop.shape[1])
-    pad_z = max(0, cD - img_crop.shape[2])
-    if pad_x > 0 or pad_y > 0 or pad_z > 0:
-        img_crop = np.pad(img_crop, [(0, pad_x), (0, pad_y), (0, pad_z)])
-        scar_crop = np.pad(scar_crop, [(0, pad_x), (0, pad_y), (0, pad_z)])
-
+    img_crop, _, _ = centroid_crop_3d(image, (cx, cy, cz), crop_shape)
+    scar_crop, _, _ = centroid_crop_3d(scar_mask, (cx, cy, cz), crop_shape)
     return img_crop, scar_crop
 
 
