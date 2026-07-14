@@ -39,11 +39,39 @@ EXPECTED = {
 
 CLASS_NAMES = {1: "LA", 2: "PV", 3: "LAA"}
 
+TASK_SUBDIR = {
+    "LA scar quantification": "task1",
+    "LA cavity segmentation": "task2",
+    "LA multi-structure segmentation": "task3",
+}
+
+
+def _find_input_nii(data_dir: str, task_name: str, rec: str) -> str | None:
+    """Locate the original input NIfTI for a given validation record."""
+    subdir = TASK_SUBDIR.get(task_name)
+    if subdir is None:
+        return None
+    rec_dir = Path(data_dir) / subdir / "val_data" / rec
+    if not rec_dir.is_dir():
+        return None
+    # Task 1/2: enhanced.nii.gz; Task 3: NNNN.nii.gz (zero-padded 4-digit)
+    candidates = list(rec_dir.glob("*.nii.gz"))
+    for p in candidates:
+        if p.name == "enhanced.nii.gz" or p.stem.endswith(".nii"):
+            return str(p)
+    return str(candidates[0]) if candidates else None
+
 
 def main():
     parser = argparse.ArgumentParser(description="Validate a CARE 2026 submission zip")
     parser.add_argument("zipfile", type=str, help="Path to the submission .zip file")
     parser.add_argument("--quiet", "-q", action="store_true", help="Only print errors")
+    parser.add_argument(
+        "--data-dir",
+        type=str,
+        default=None,
+        help="Path to original validation data for shape/spacing cross-check",
+    )
     args = parser.parse_args()
 
     zf_path = Path(args.zipfile)
@@ -90,11 +118,28 @@ def main():
                         errors.append(f"{task_name}/{rec}: missing {pred_name}")
                         continue
 
-                    arr = nib.load(pred_path).get_fdata().astype(np.uint8)
+                    pred_nii = nib.load(pred_path)
+                    arr = pred_nii.get_fdata().astype(np.uint8)
                     uniq = set(arr.ravel().astype(int).tolist())
                     unexpected = uniq - spec["dtype"]
                     if unexpected:
                         errors.append(f"{task_name}/{rec}: unexpected values {unexpected} (expected {spec['dtype']})")
+
+                    # Cross-check shape & spacing against original data
+                    if args.data_dir:
+                        src = _find_input_nii(args.data_dir, task_name, rec)
+                        if src is None:
+                            errors.append(f"{task_name}/{rec}: cannot find input NIfTI under {args.data_dir}")
+                        else:
+                            src_nii = nib.load(src)
+                            if pred_nii.shape != src_nii.shape:
+                                errors.append(
+                                    f"{task_name}/{rec}: shape mismatch — pred {pred_nii.shape}, input {src_nii.shape}"
+                                )
+                            pred_zooms = tuple(float(z) for z in pred_nii.header.get_zooms()[:3])
+                            src_zooms = tuple(float(z) for z in src_nii.header.get_zooms()[:3])
+                            if not np.allclose(pred_zooms, src_zooms, atol=1e-3):
+                                errors.append(f"{task_name}/{rec}: spacing mismatch — pred {pred_zooms}, input {src_zooms}")
 
                     # Print stats per case
                     total = int(arr.size)
