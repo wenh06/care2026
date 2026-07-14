@@ -776,7 +776,8 @@ Results tracked in ``submissions`` (YAML log).
 | 3 | 2026-06-29 18:58 | 0.7511 | 37.953 | nnUNet PlainConvUNet (30.6M), fold_0 only, ep974 |
 | 4 | 2026-07-01 22:40 | 0.9495 | 17.9575 | nnUNet PlainConvUNet, fold_0 only |
 | 5 | 2026-07-06 23:26 | **0.9558** | **13.3596** | nnUNet 500 (5-fold ensemble), 1000ep |
-| 6 | 2026-07-08 01:27 | **0.9563** | **12.4547** | nnUNet 500 (5-fold ensemble), TTA on |
+| 6 | 2026-07-08 01:27 | 0.9563 | 12.4547 | nnUNet 500 (5-fold ensemble), TTA on |
+| 7 | 2026-07-13 22:42 | 0.9563 | 12.4561 | nnUNet 503 (self-trained, 5-fold ensemble), TTA on |
 
 ---
 ## Architecture — Why nnUNet > Custom VNet

@@ -145,3 +145,10 @@ Task 3 (LA multi-structure segmentation):
     model: nnUNet 500 (5-fold ensemble)
     train: 1000ep
     infer: tta=on
+  submission 7:
+    created_time: "2026-07-13 22:42:51"
+    DSC: 0.9563
+    HD: 12.4561
+    model: nnUNet 503 (5-fold ensemble, self-trained on 150 cases)
+    train: 1000ep
+    infer: tta=on
