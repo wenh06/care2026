@@ -242,8 +242,8 @@ class _CTBoundaryLoss(torch.nn.Module):
         ignore_label: int | None = None,
     ):
         super().__init__()
-        from loss.boundary_loss import HausdorffERLoss
-        from loss.centerline_loss import CenterlineCELoss
+        from .loss.boundary_loss import HausdorffERLoss
+        from .loss.centerline_loss import CenterlineCELoss
 
         self.hd_weight = hd_weight
         self.ignore_label = ignore_label
