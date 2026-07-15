@@ -438,19 +438,22 @@ nnUNet PlainConvUNet (6-stage, 30.6M) trained on Task 1 (scar, Dataset 501,
 
 **Task 1 — LA Scar (60 labeled cases, 5-fold ensemble, training-set evaluation):**
 
-| S1 | S2 | Multi-class | MCLAHE | Dilation | G-DSC | ACC | SEN |
-|----|----|:----------:|:------:|:--------:|-------|-----|-----|
-| VNet S1 | VNet S2 | — | ✅ | 2mm | 0.2034 | 0.9997 | 0.1946 |
-| 502 | 501 | — | — | 2mm | 0.3529 | 0.9998 | 0.2573 |
-| 512 | 511 | — | ✅ | 2mm | 0.3335 | 0.9998 | 0.2390 |
-| 502 | 521 | ✅ | — | 2mm | 0.3533 | 0.9998 | 0.2577 |
-| 502 | 501 | — | — | 5mm | 0.6211 | 0.9998 | 0.6242 |
-| 502 | 521 | ✅ | — | 5mm | **0.6221** | 0.9998 | 0.6267 |
-| 502 | 531 | ✅ | ✅ | 5mm | 0.6016 | 0.9998 | 0.5775 |
-| 512 | 511 | — | ✅ | 5mm | 0.5875 | 0.9998 | — |
-| 502 | 501 | — | — | none | 0.6317 | — | — |
-| 502 | 521 | ✅ | — | none | **0.6333** | — | — |
-| 512 | 511 | — | ✅ | none | 0.5976 | — | — |
+| S1 | S2 | Multi-class | MCLAHE | Dilation | G-DSC | ACC | SEN | Loss |
+|----|----|:----------:|:------:|:--------:|-------|-----|-----|------|
+| VNet S1 | VNet S2 | — | ✅ | 2mm | 0.2034 | 0.9997 | 0.1946 | ScarLoss |
+| 502 | 501 | — | — | 2mm | 0.3529 | 0.9998 | 0.2573 | default[^nnunet-loss] |
+| 512 | 511 | — | ✅ | 2mm | 0.3335 | 0.9998 | 0.2390 | default[^nnunet-loss] |
+| 502 | 521 | ✅ | — | 2mm | 0.3533 | 0.9998 | 0.2577 | default[^nnunet-loss] |
+| 502 | 501 | — | — | 5mm | 0.6211 | 0.9998 | 0.6242 | default[^nnunet-loss] |
+| 502 | 521 | ✅ | — | 5mm | **0.6221** | 0.9998 | 0.6267 | default[^nnunet-loss] |
+| 502 | 531 | ✅ | ✅ | 5mm | 0.6016 | 0.9998 | 0.5775 | default[^nnunet-loss] |
+| 512 | 511 | — | ✅ | 5mm | 0.5875 | 0.9998 | — | default[^nnunet-loss] |
+| 502 | 501 | — | — | none | 0.6317 | 0.9998 | 0.6490 | default[^nnunet-loss] |
+| 502 | 521 | ✅ | — | none | 0.6333 | 0.9998 | 0.6517 | default[^nnunet-loss] |
+| 512 | 511 | — | ✅ | none | 0.5976 | 0.9998 | 0.5788 | default[^nnunet-loss] |
+| 502 | 521 | ✅ | — | none | **0.6631** | 0.9998 | 0.6765 | ScarGaussian |
+
+[^nnunet-loss]: nnUNet's default ``DC_and_CE_loss`` (Dice + Cross-Entropy).
 
 nnUNet (502+521, dilation=none) improves G-DSC by **+212 %** over VNet best on the same training data.
 
