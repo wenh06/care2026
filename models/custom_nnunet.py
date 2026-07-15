@@ -10,8 +10,20 @@ Usage::
 nnUNet recursively scans all ``.py`` files for the requested class name.
 """
 
+import sys
+from pathlib import Path
+
+# nnUNet extTrainer uses importlib to load this file, which does not
+# set __package__ — relative imports fail.  Ensure models/ is on
+# sys.path so absolute sub-imports (loss.boundary_loss) work.
+_models_dir = str(Path(__file__).resolve().parent)
+if _models_dir not in sys.path:
+    sys.path.insert(0, _models_dir)
+
 import numpy as np
 import torch
+from loss.boundary_loss import HausdorffERLoss
+from loss.centerline_loss import CenterlineCELoss
 from nnunetv2.training.loss.deep_supervision import DeepSupervisionWrapper
 from nnunetv2.training.loss.dice import MemoryEfficientSoftDiceLoss
 from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer
@@ -242,9 +254,6 @@ class _CTBoundaryLoss(torch.nn.Module):
         ignore_label: int | None = None,
     ):
         super().__init__()
-        from .loss.boundary_loss import HausdorffERLoss
-        from .loss.centerline_loss import CenterlineCELoss
-
         self.hd_weight = hd_weight
         self.ignore_label = ignore_label
 
