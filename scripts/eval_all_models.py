@@ -51,7 +51,7 @@ from tqdm.auto import tqdm
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from pipeline import _load_model  # auto-detect VNet vs nnUNet
-from predict import predict_ct, predict_mri_two_stage
+from predict import predict_ct, predict_mri_two_stage, predict_mri_two_stage_hybrid, predict_mri_two_stage_legacy
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
@@ -128,6 +128,13 @@ def main():
     # Task 3: CT models
     parser.add_argument("--t3", type=str, action="append", default=[], dest="t3", help="CT model path (repeatable)")
     parser.add_argument("--tta", action="store_true", default=False, help="Enable 8-fold flip TTA (default: off)")
+    parser.add_argument(
+        "--mri-pipeline",
+        type=str,
+        choices=["native", "hybrid", "legacy"],
+        default="native",
+        help="MRI inference pipeline (default: native)",
+    )
     args = parser.parse_args()
 
     # Dedup
@@ -144,6 +151,12 @@ def main():
     db_dir = Path(args.db_dir)
     tasks = [int(t.strip()) for t in args.tasks.split(",")]
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+
+    _predict_fn = {
+        "native": predict_mri_two_stage,
+        "hybrid": predict_mri_two_stage_hybrid,
+        "legacy": predict_mri_two_stage_legacy,
+    }[args.mri_pipeline]
 
     print("=" * 65)
     print("  Model Evaluation on Labeled Training Data")
@@ -189,7 +202,7 @@ def main():
                 gt = (nib.load(str(gt_path)).get_fdata() > 0).astype(np.uint8)
                 if gt.sum() == 0:
                     continue
-                out = predict_mri_two_stage(img_path, s1, s2, use_tta=args.tta, apply_mclahe=use_mclahe, s2_threshold=0.5)
+                out = _predict_fn(img_path, s1, s2, use_tta=args.tta, apply_mclahe=use_mclahe, s2_threshold=0.5)
                 pred = _resample_if_needed(out.scar_mask, gt)
                 d, a, s = _binary_metrics(pred, gt)
                 dice_vals.append(d)
@@ -240,7 +253,7 @@ def main():
                     pred = model.predict(img, zooms, use_tta=args.tta)
                     pred = (pred > 0).astype(np.uint8)
                 else:
-                    out = predict_mri_two_stage(img_path, model, stage2_model=None, use_tta=args.tta)
+                    out = _predict_fn(img_path, model, stage2_model=None, use_tta=args.tta)
                     pred = out.la_mask
                 pred = _resample_if_needed(pred, gt)
                 d, _, _ = _binary_metrics(pred, gt)

@@ -27,7 +27,7 @@ from tqdm.auto import tqdm
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from models import CARE2026_CT_nnUNet, CARE2026_MRI_nnUNet
-from predict import predict_ct, predict_mri_two_stage
+from predict import predict_ct, predict_mri_two_stage, predict_mri_two_stage_hybrid, predict_mri_two_stage_legacy
 
 
 def _get_trainer_dir(ds_id: int, results_root: Path) -> Path:
@@ -88,11 +88,24 @@ def main():
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--tasks", type=str, default="1,2,3", help="Comma-separated tasks")
     parser.add_argument("--output", type=str, default=None, help="Write results to file (default: stdout only)")
+    parser.add_argument(
+        "--mri-pipeline",
+        type=str,
+        choices=["native", "hybrid", "legacy"],
+        default="native",
+        help="MRI inference pipeline (default: native)",
+    )
     args = parser.parse_args()
 
     db_dir = Path(args.db_dir)
     results_root = Path(args.nnunet_results)
     tasks = [int(t.strip()) for t in args.tasks.split(",")]
+
+    _predict_fn = {
+        "native": predict_mri_two_stage,
+        "hybrid": predict_mri_two_stage_hybrid,
+        "legacy": predict_mri_two_stage_legacy,
+    }[args.mri_pipeline]
 
     all_results: Dict[str, Dict] = {}
 
@@ -125,7 +138,7 @@ def main():
                 gt = (nib.load(str(gt_path)).get_fdata() > 0).astype(np.uint8)
                 if gt.sum() == 0:
                     continue
-                out = predict_mri_two_stage(img_path, s1, s2, use_tta=False, apply_mclahe=use_mclahe, s2_threshold=0.5)
+                out = _predict_fn(img_path, s1, s2, use_tta=False, apply_mclahe=use_mclahe, s2_threshold=0.5)
                 pred = _resample_if_needed(out.scar_mask, gt)
                 d, a, s = _binary_metrics(pred, gt)
                 dice_vals.append(d)

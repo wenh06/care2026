@@ -43,7 +43,7 @@ import torch
 from tqdm.auto import tqdm
 
 from outputs import package_submission
-from predict import predict_ct, predict_mri_two_stage
+from predict import predict_ct, predict_mri_two_stage, predict_mri_two_stage_hybrid, predict_mri_two_stage_legacy
 
 __all__ = [
     "run_task1_inference",
@@ -135,6 +135,7 @@ def run_task1_inference(
     s2_threshold: float = 0.5,
     scar_dilation: Optional[float] = None,
     overwrite: bool = False,
+    mri_pipeline: str = "native",
 ) -> None:
     """Run Task 1 (LA scar) inference."""
     val_data_root = Path(val_data_root)
@@ -148,10 +149,16 @@ def run_task1_inference(
     if device is None:
         device = next(stage1_model.parameters()).device
 
+    _predict_fn = {
+        "native": predict_mri_two_stage,
+        "hybrid": predict_mri_two_stage_hybrid,
+        "legacy": predict_mri_two_stage_legacy,
+    }[mri_pipeline]
+
     stage1_model.eval()
     stage2_model.eval()
     skipped = 0
-    for rec in tqdm(records, desc="Task 1 (LA scar)", unit="vol", dynamic_ncols=True):
+    for rec in tqdm(records, desc=f"Task 1 (LA scar) [{mri_pipeline}]", unit="vol", dynamic_ncols=True):
         if not overwrite and _output_exists(results_dir, rec, 1):
             print(f"  [SKIP] {rec}")
             skipped += 1
@@ -160,7 +167,7 @@ def run_task1_inference(
         if not img_path.exists():
             warnings.warn(f"Image not found: {img_path}")
             continue
-        out = predict_mri_two_stage(
+        out = _predict_fn(
             img_path,
             stage1_model,
             stage2_model,
@@ -183,6 +190,7 @@ def run_task2_inference(
     use_tta: bool = True,
     s1_threshold: float = 0.5,
     overwrite: bool = False,
+    mri_pipeline: str = "native",
 ) -> None:
     """Run Task 2 (LA cavity) inference."""
     val_data_root = Path(val_data_root)
@@ -196,9 +204,15 @@ def run_task2_inference(
     if device is None:
         device = next(stage1_model.parameters()).device
 
+    _predict_fn = {
+        "native": predict_mri_two_stage,
+        "hybrid": predict_mri_two_stage_hybrid,
+        "legacy": predict_mri_two_stage_legacy,
+    }[mri_pipeline]
+
     stage1_model.eval()
     skipped = 0
-    for rec in tqdm(records, desc="Task 2 (LA cavity)", unit="vol", dynamic_ncols=True):
+    for rec in tqdm(records, desc=f"Task 2 (LA cavity) [{mri_pipeline}]", unit="vol", dynamic_ncols=True):
         if not overwrite and _output_exists(results_dir, rec, 2):
             print(f"  [SKIP] {rec}")
             skipped += 1
@@ -207,7 +221,7 @@ def run_task2_inference(
         if not img_path.exists():
             warnings.warn(f"Image not found: {img_path}")
             continue
-        out = predict_mri_two_stage(
+        out = _predict_fn(
             img_path,
             stage1_model,
             stage2_model=None,
@@ -269,6 +283,7 @@ def run_all_tasks(
     overwrite: bool = False,
     scar_dilation: Optional[float] = None,
     tasks: Optional[List[int]] = None,
+    mri_pipeline: str = "native",
 ) -> None:
     """Convenience wrapper that runs all specified tasks sequentially.
 
@@ -307,6 +322,7 @@ def run_all_tasks(
                 use_tta=use_tta,
                 overwrite=overwrite,
                 scar_dilation=scar_dilation,
+                mri_pipeline=mri_pipeline,
             )
         else:
             warnings.warn("Task 1 skipped: MRI Stage-1 and/or Stage-2 model not provided.")
@@ -314,7 +330,13 @@ def run_all_tasks(
     if 2 in tasks:
         if mri_stage1_model is not None:
             run_task2_inference(
-                mri_stage1_model, val_data_root, results_dir, device=device, use_tta=use_tta, overwrite=overwrite
+                mri_stage1_model,
+                val_data_root,
+                results_dir,
+                device=device,
+                use_tta=use_tta,
+                overwrite=overwrite,
+                mri_pipeline=mri_pipeline,
             )
         else:
             warnings.warn("Task 2 skipped: MRI Stage-1 and/or Stage-2 model not provided.")
@@ -489,6 +511,14 @@ if __name__ == "__main__":
         default=None,
         help="Force MCLAHE on/off for MRI nnUNet models (default: auto-detect from VNet config, False for nnUNet).",
     )
+    parser.add_argument(
+        "--mri-pipeline",
+        type=str,
+        choices=["native", "hybrid", "legacy"],
+        default="native",
+        help="MRI inference pipeline: 'native' (native-res S1+S2), "
+        "'hybrid' (native S1 + canonical S2), 'legacy' (hardcoded-spacing S1+S2).",
+    )
     args = parser.parse_args()
 
     # Resolve --input_dir / --output_dir, with backward compatibility for
@@ -514,6 +544,7 @@ if __name__ == "__main__":
     print(f"  device          : {args.device}")
     print(f"  TTA             : {args.tta}")
     print(f"  scar_dilation   : {args.scar_dilation}")
+    print(f"  mri_pipeline    : {args.mri_pipeline}")
     print(f"  mri_mclahe      : {args.mri_mclahe}")
     print(f"  overwrite       : {args.overwrite}")
     print(f"  mri_stage1      : {args.mri_stage1_model}")
@@ -551,6 +582,7 @@ if __name__ == "__main__":
         overwrite=args.overwrite,
         scar_dilation=args.scar_dilation,
         tasks=tasks,
+        mri_pipeline=args.mri_pipeline,
     )
 
     if args.package:
