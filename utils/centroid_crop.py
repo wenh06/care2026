@@ -9,12 +9,14 @@ def centroid_crop_3d(
     image: np.ndarray,
     centroid: Tuple[int, int, int],
     crop_shape: Tuple[int, int, int],
-) -> Tuple[np.ndarray, Tuple[int, int, int], Tuple[int, int, int]]:
-    """Crop *image* around *centroid* with ``_clamp``-style window placement.
+) -> Tuple[np.ndarray, Tuple[int, int, int], Tuple[Tuple[int, int], Tuple[int, int], Tuple[int, int]]]:
+    """Crop *image* around *centroid*, keeping the centroid centred.
 
-    The crop window is shifted inward to stay within image bounds.
-    Zero-padding is only applied when the image itself is smaller than
-    *crop_shape* (never for images at least as large as the crop).
+    The crop is always centred on *centroid*; when the crop window extends
+    beyond image bounds, zero-padding is added **evenly on both sides** so
+    the valid data stays in the middle of the crop.  This matches the
+    legacy ``_crop_coords`` behaviour and ensures the region of interest
+    is never shifted to one end of the crop.
 
     Parameters
     ----------
@@ -26,27 +28,36 @@ def centroid_crop_3d(
 
     Returns
     -------
-    cropped : np.ndarray of shape *crop_shape* (or padded to it)
-    start_xyz : (x0, y0, z0) — crop start index in *image*
-    pad_xyz : (px, py, pz) — zero-padding added at the end of each axis
+    cropped : np.ndarray of shape *crop_shape* (padded as needed)
+    start_xyz : (x0, y0, z0) — inclusive start index of valid data in *image*
+    pad_xyz : ((pb_x, pa_x), (pb_y, pa_y), (pb_z, pa_z)) — zero-padding
+        *before* and *after* each axis
     """
     cH, cW, cD = crop_shape
     H, W, D = image.shape
     cx, cy, cz = centroid
 
-    def _clamp_start(center: int, size: int, max_dim: int) -> int:
-        start = center - size // 2
-        return int(np.clip(start, 0, max(max_dim - size, 0)))
+    def _crop_coords(center: int, size: int, dim_len: int) -> Tuple[int, int, int, int]:
+        half = size // 2
+        v_start = center - half
+        v_end = v_start + size
+        pb = max(0, -v_start)
+        pa = max(0, v_end - dim_len)
+        start = max(0, v_start)
+        end = min(dim_len, v_end)
+        return start, end, pb, pa
 
-    x0 = _clamp_start(cx, cH, H)
-    y0 = _clamp_start(cy, cW, W)
-    z0 = _clamp_start(cz, cD, D)
+    xs, xe, pb_x, pa_x = _crop_coords(cx, cH, H)
+    ys, ye, pb_y, pa_y = _crop_coords(cy, cW, W)
+    zs, ze, pb_z, pa_z = _crop_coords(cz, cD, D)
 
-    cropped = image[x0 : x0 + cH, y0 : y0 + cW, z0 : z0 + cD]
-    px = max(0, cH - cropped.shape[0])
-    py = max(0, cW - cropped.shape[1])
-    pz = max(0, cD - cropped.shape[2])
-    if px > 0 or py > 0 or pz > 0:
-        cropped = np.pad(cropped, [(0, px), (0, py), (0, pz)], mode="constant", constant_values=0.0)
+    cropped = image[xs:xe, ys:ye, zs:ze]
+    if pb_x > 0 or pa_x > 0 or pb_y > 0 or pa_y > 0 or pb_z > 0 or pa_z > 0:
+        cropped = np.pad(
+            cropped,
+            [(pb_x, pa_x), (pb_y, pa_y), (pb_z, pa_z)],
+            mode="constant",
+            constant_values=0.0,
+        )
 
-    return cropped, (x0, y0, z0), (px, py, pz)
+    return cropped, (xs, ys, zs), ((pb_x, pa_x), (pb_y, pa_y), (pb_z, pa_z))
