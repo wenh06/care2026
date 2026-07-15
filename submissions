@@ -31,6 +31,7 @@ Task 1 (LA scar quantification):
     model: nnUNet 502+501 (5-fold ensemble)
     train: 1000ep, no CLAHE
     infer: tta=off, dilation=2mm
+    pipeline: canonical (hardcoded 0.625mm spacing, legacy path)
   submission 5:
     created_time: "2026-07-08 01:27:44"
     G-DSC: 0.2230
@@ -39,6 +40,7 @@ Task 1 (LA scar quantification):
     model: nnUNet 502+501 (5-fold ensemble)
     train: 1000ep, no CLAHE
     infer: tta=on, dilation=2mm
+    pipeline: canonical (hardcoded 0.625mm spacing, legacy path)
   submission 6:
     created_time: "2026-07-08 16:29:24"
     G-DSC: 0.2236
@@ -47,6 +49,7 @@ Task 1 (LA scar quantification):
     model: nnUNet 512+511 (5-fold ensemble)
     train: 1000ep, CLAHE
     infer: tta=on, dilation=2mm
+    pipeline: canonical (hardcoded 0.625mm spacing, legacy path)
   submission 7:
     created_time: "2026-07-09 15:11:31"
     G-DSC: 0.4525
@@ -55,6 +58,7 @@ Task 1 (LA scar quantification):
     model: nnUNet 502+521 (5-fold ensemble, multi-class)
     train: 1000ep, no CLAHE
     infer: tta=on, dilation=5mm
+    pipeline: canonical (hardcoded 0.625mm spacing, legacy path)
   submission 8:
     created_time: "2026-07-10 01:53:31"
     G-DSC: 0.4743
@@ -63,6 +67,16 @@ Task 1 (LA scar quantification):
     model: nnUNet 502+521 (5-fold ensemble, multi-class)
     train: 1000ep, no CLAHE
     infer: tta=on, dilation=none
+    pipeline: canonical (hardcoded 0.625mm spacing, legacy path)
+  submission 9:
+    created_time: "2026-07-14 22:02:48"
+    G-DSC: 0.4411
+    ACC: 0.6944
+    SEN: 0.3889
+    model: nnUNet 502+521 (5-fold ensemble, multi-class)
+    train: 1000ep, no CLAHE
+    infer: tta=on, dilation=none
+    pipeline: native (spacing from NIfTI header, both stages native-res)
 
 Task 2 (LA cavity segmentation):
   submission 1:
@@ -90,6 +104,7 @@ Task 2 (LA cavity segmentation):
     model: nnUNet 502 (5-fold ensemble)
     train: 1000ep, no CLAHE
     infer: tta=off
+    pipeline: canonical (hardcoded 0.625mm spacing, legacy path)
   submission 5:
     created_time: "2026-07-08 01:27:44"
     DSC: 0.8828
@@ -97,6 +112,7 @@ Task 2 (LA cavity segmentation):
     model: nnUNet 502 (5-fold ensemble)
     train: 1000ep, no CLAHE
     infer: tta=on
+    pipeline: canonical (hardcoded 0.625mm spacing, legacy path)
   submission 6:
     created_time: "2026-07-08 16:29:24"
     DSC: 0.8835
@@ -104,6 +120,15 @@ Task 2 (LA cavity segmentation):
     model: nnUNet 512 (5-fold ensemble)
     train: 1000ep, CLAHE
     infer: tta=on
+    pipeline: canonical (hardcoded 0.625mm spacing, legacy path)
+  submission 7:
+    created_time: "2026-07-14 22:02:48"
+    DSC: 0.8871
+    HD: 17.5901
+    model: nnUNet 502 (5-fold ensemble)
+    train: 1000ep, no CLAHE
+    infer: tta=on
+    pipeline: native (spacing from NIfTI header, both stages native-res)
 
 Task 3 (LA multi-structure segmentation):
   submission 1:

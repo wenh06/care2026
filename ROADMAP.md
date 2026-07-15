@@ -509,13 +509,17 @@ This negative result motivates the boundary-aware trainer (B1,
 ``nnUNetTrainerCTBoundary``) — improving loss design rather than adding noisy
 pseudo-labels.
 
-**Overall leaderboard standings (2026-07-09):**
+**Overall leaderboard standings (2026-07-15):**
 
-| Task | Our best | 1st place | Gap | Rank |
-|------|----------|-----------|-----|------|
-| 1 (scar) | G-DSC **0.4743** | — | **#1** 🏆 | 1st |
-| 2 (cavity) | DSC 0.8835 | 0.8886 | −0.6 % | competitive |
-| 3 (CT) | DSC 0.9563 | 0.9579 | −0.16 pp | **2nd** ← next target |
+| Task | Our best | 1st place | Gap |
+|------|----------|-----------|-----|
+| 1 (scar) | G-DSC **0.4743** | — | **#1** 🏆 |
+| 2 (cavity) | DSC **0.8871** | 0.8886 | −0.15 pp |
+| 3 (CT) | DSC 0.9563 | 0.9579 | −0.16 pp |
+
+Task 2 native-resolution pipeline (sub 7, DSC 0.8871) closes the gap to 1st
+place from 0.51 pp to 0.15 pp — the spacing fix clearly benefits Stage 1 on
+multi-center data.  Several teams clustered between 0.8835–0.8886.
 
 **Sub 7 breakthrough (2026-07-09):** G-DSC 0.4525 — first submission using
 dilation=5mm, #1 by large margin.  **Sub 8 (2026-07-10):** dilation=None →
@@ -752,11 +756,12 @@ Results tracked in ``submissions`` (YAML log).
 | 1 | 2026-06-25 20:02 | 0.2092 | 0.5997 | 0.1997 | vnet_stage2 (1ch), SGD 300ep, CLAHE |
 | 2 | 2026-06-29 18:58 | 0.2189 | 0.6041 | 0.2085 | vnet_stage2 (1ch), SGD 300ep, CLAHE, thresh=0.7 |
 | 3 | 2026-07-01 22:40 | 0.1882 | 0.5766 | 0.1533 | vnet_stage2_2ch (MRI+SDF), SGD 600ep, CLAHE |
-| 4 | 2026-07-06 23:26 | 0.2213 | 0.5744 | 0.1489 | nnUNet 502+501, dilation=2mm |
-| 5 | 2026-07-08 01:27 | 0.2230 | 0.5747 | 0.1495 | nnUNet 502+501, TTA on, dilation=2mm |
-| 6 | 2026-07-08 16:29 | 0.2236 | 0.5743 | 0.1487 | nnUNet 512+511 (CLAHE), TTA on, dilation=2mm |
-| 7 | 2026-07-09 15:11 | 0.4525 | 0.7113 | 0.4227 | nnUNet 502+521, TTA on, dilation=5mm |
-| 8 | 2026-07-10 01:53 | **0.4743** | **0.7313** | **0.4627** | nnUNet 502+521, TTA on, dilation=none |
+| 4 | 2026-07-06 23:26 | 0.2213 | 0.5744 | 0.1489 | nnUNet 502+501, dilation=2mm[^canonical] |
+| 5 | 2026-07-08 01:27 | 0.2230 | 0.5747 | 0.1495 | nnUNet 502+501, TTA on, dilation=2mm[^canonical] |
+| 6 | 2026-07-08 16:29 | 0.2236 | 0.5743 | 0.1487 | nnUNet 512+511 (CLAHE), TTA on, dilation=2mm[^canonical] |
+| 7 | 2026-07-09 15:11 | 0.4525 | 0.7113 | 0.4227 | nnUNet 502+521, TTA on, dilation=5mm[^canonical] |
+| 8 | 2026-07-10 01:53 | **0.4743** | **0.7313** | **0.4627** | nnUNet 502+521, TTA on, dilation=none[^canonical] |
+| 9 | 2026-07-14 22:02 | 0.4411 | 0.6944 | 0.3889 | nnUNet 502+521, TTA on, dilation=none[^native] |
 
 ### Task 2 (LA cavity segmentation) — DSC / HD (mm)
 
@@ -765,7 +770,10 @@ Results tracked in ``submissions`` (YAML log).
 | 1 | 2026-06-25 20:02 | 0.8538 | 21.9227 | vnet_stage1, SGD 300ep |
 | 2 | 2026-06-29 18:58 | **0.8602** | **18.4552** | vnet_stage1, SGD 300ep, CLAHE |
 | 3 | 2026-07-01 22:40 | 0.8602 | 18.4552 | same as #2 (Stage 1 unchanged) |
-| 4 | 2026-07-06 23:26 | **0.8832** | **17.549** | nnUNet 502 (5-fold ensemble), 1000ep, no CLAHE |
+| 4 | 2026-07-06 23:26 | 0.8832 | 17.549 | nnUNet 502 (5-fold ensemble), 1000ep, no CLAHE[^canonical] |
+| 5 | 2026-07-08 01:27 | 0.8828 | 17.6501 | nnUNet 502, TTA on[^canonical] |
+| 6 | 2026-07-08 16:29 | 0.8835 | 18.5298 | nnUNet 512 (CLAHE), TTA on[^canonical] |
+| 7 | 2026-07-14 22:02 | **0.8871** | **17.5901** | nnUNet 502, TTA on[^native] |
 
 ### Task 3 (LA multi-structure segmentation) — DSC / HD (mm)
 
@@ -778,6 +786,10 @@ Results tracked in ``submissions`` (YAML log).
 | 5 | 2026-07-06 23:26 | **0.9558** | **13.3596** | nnUNet 500 (5-fold ensemble), 1000ep |
 | 6 | 2026-07-08 01:27 | 0.9563 | 12.4547 | nnUNet 500 (5-fold ensemble), TTA on |
 | 7 | 2026-07-13 22:42 | 0.9563 | 12.4561 | nnUNet 503 (self-trained, 5-fold ensemble), TTA on |
+
+[^canonical]: **Canonical pipeline** (``predict_mri_two_stage_legacy``): image resampled to canonical grid (576×576×44), hardcoded spacing (0.625, 0.625, 2.5mm).  Produced sub 7–8 (G-DSC 0.4525–0.4743).
+[^native]: **Native pipeline** (``predict_mri_two_stage``): spacing read from NIfTI header, inference at native resolution.  Produced sub 9 (G-DSC 0.4411) and Task 2 sub 7 (DSC 0.8871).
+[^hybrid]: **Hybrid pipeline** (``predict_mri_two_stage_hybrid``): native Stage 1 + canonical Stage 2.  Not yet submitted.
 
 ---
 ## Architecture — Why nnUNet > Custom VNet
