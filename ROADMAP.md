@@ -31,11 +31,11 @@ Three tasks are evaluated independently; no cross-modal fusion is required.
 | Role | Dataset | Trainer | Notes |
 |------|---------|----------|-------|
 | **Stage 1** (cavity) | 502 | `nnUNetTrainer__nnUNetPlans__3d_fullres` | 190 cases, no CLAHE |
-| **Stage 2** (scar) | 521 | `nnUNetTrainer__nnUNetPlans__3d_fullres` | 60 cases, multi-class (cav=1, scar=2), no CLAHE |
+| **Stage 2** (scar) | 521 | `nnUNetTrainerScarGaussian` | 60 cases, multi-class (cav=1, scar=2), no CLAHE, GPU Gaussian spatial weight |
 | Dilation | `None` | — | no LA cavity constraint |
 | TTA | on | — | marginal gain (+0.0017 G-DSC) |
 
-**Pipeline**: ``predict_mri_two_stage`` with 502→centroid crop→521, ``scar_dilation=None``
+**Pipeline**: ``predict_mri_two_stage_hybrid`` (native Stage 1 + canonical Stage 2), 502→centroid crop→521 (ScarGaussian), ``scar_dilation=None``
 
 ### Task 2 — LA Cavity Segmentation
 
@@ -512,11 +512,11 @@ This negative result motivates the boundary-aware trainer (B1,
 ``nnUNetTrainerCTBoundary``) — improving loss design rather than adding noisy
 pseudo-labels.
 
-**Overall leaderboard standings (2026-07-15):**
+**Overall leaderboard standings (2026-07-17):**
 
 | Task | Our best | 1st place | Gap |
 |------|----------|-----------|-----|
-| 1 (scar) | G-DSC **0.4743** | — | **#1** 🏆 |
+| 1 (scar) | G-DSC **0.4791** | — | **#1** 🏆 |
 | 2 (cavity) | DSC **0.8871** | 0.8886 | −0.15 pp |
 | 3 (CT) | DSC 0.9563 | 0.9579 | −0.16 pp |
 
@@ -526,9 +526,15 @@ multi-center data.  Several teams clustered between 0.8835–0.8886.
 
 **Sub 7 breakthrough (2026-07-09):** G-DSC 0.4525 — first submission using
 dilation=5mm, #1 by large margin.  **Sub 8 (2026-07-10):** dilation=None →
-G-DSC **0.4743**, ACC 0.7313, SEN 0.4627 — further +0.022 G-DSC over sub 7,
+G-DSC 0.4743, ACC 0.7313, SEN 0.4627 — further +0.022 G-DSC over sub 7,
 confirming the training-set trend that removing the LA cavity constraint
-entirely is optimal.  All three metrics are #1 on the leaderboard.
+entirely is optimal.  All three metrics were #1 on the leaderboard.
+
+**Sub 10 (2026-07-16):** ScarGaussian loss + hybrid pipeline (native Stage 1 +
+canonical Stage 2) → G-DSC **0.4791**, ACC 0.736, SEN 0.4722 — +0.0048 G-DSC,
++0.0047 ACC, +0.0095 SEN over sub 8.  ScarGaussian contributes most of the gain;
+hybrid pipeline adds stability by keeping Stage 2 at its training resolution.
+All three personal-best metrics.
 
 ### 6.3 CT Semi-Supervised (Task 3) — 🔄 Iterating
 
@@ -763,8 +769,9 @@ Results tracked in ``submissions`` (YAML log).
 | 5 | 2026-07-08 01:27 | 0.2230 | 0.5747 | 0.1495 | nnUNet 502+501, TTA on, dilation=2mm[^canonical] |
 | 6 | 2026-07-08 16:29 | 0.2236 | 0.5743 | 0.1487 | nnUNet 512+511 (CLAHE), TTA on, dilation=2mm[^canonical] |
 | 7 | 2026-07-09 15:11 | 0.4525 | 0.7113 | 0.4227 | nnUNet 502+521, TTA on, dilation=5mm[^canonical] |
-| 8 | 2026-07-10 01:53 | **0.4743** | **0.7313** | **0.4627** | nnUNet 502+521, TTA on, dilation=none[^canonical] |
+| 8 | 2026-07-10 01:53 | 0.4743 | 0.7313 | 0.4627 | nnUNet 502+521, TTA on, dilation=none[^canonical] |
 | 9 | 2026-07-14 22:02 | 0.4411 | 0.6944 | 0.3889 | nnUNet 502+521, TTA on, dilation=none[^native] |
+| 10 | 2026-07-16 22:02 | **0.4791** | **0.736** | **0.4722** | nnUNet 502+521, ScarGaussian, TTA on, dilation=none[^hybrid] |
 
 ### Task 2 (LA cavity segmentation) — DSC / HD (mm)
 
@@ -792,7 +799,7 @@ Results tracked in ``submissions`` (YAML log).
 
 [^canonical]: **Canonical pipeline** (``predict_mri_two_stage_legacy``): image resampled to canonical grid (576×576×44), hardcoded spacing (0.625, 0.625, 2.5mm).  Produced sub 7–8 (G-DSC 0.4525–0.4743).
 [^native]: **Native pipeline** (``predict_mri_two_stage``): spacing read from NIfTI header, inference at native resolution.  Produced sub 9 (G-DSC 0.4411) and Task 2 sub 7 (DSC 0.8871).
-[^hybrid]: **Hybrid pipeline** (``predict_mri_two_stage_hybrid``): native Stage 1 + canonical Stage 2.  Not yet submitted.
+[^hybrid]: **Hybrid pipeline** (``predict_mri_two_stage_hybrid``): native Stage 1 + canonical Stage 2.  Produced sub 10 (G-DSC 0.4791) with ScarGaussian loss.
 
 ---
 ## Architecture — Why nnUNet > Custom VNet
@@ -909,7 +916,7 @@ done
 | # | Task | Description | Status |
 |---|------|-------------|--------|
 | D2 | Dataset 600 | nnUNet on 2-class full volume (backup) | ⏳ |
-| D3 | Custom nnUNet loss | `nnUNetTrainerScarGaussian` — test on 521 | ⏳ |
+| D3 | Custom nnUNet loss | `nnUNetTrainerScarGaussian` — test on 521 | ✅ Done — sub 10 G-DSC 0.4791 (+0.0048) |
 | B1 | VNet + nnUNet recipe | Train VNet on Dataset 501, SGD+polyLR 1000ep | ⏳ |
 | B2 | 4-stage nnUNet | PlainConvUNet reduced to 4 stages | ⏳ |
 
