@@ -95,11 +95,20 @@ def main():
         default="native",
         help="MRI inference pipeline (default: native)",
     )
+    parser.add_argument(
+        "--use",
+        type=str,
+        choices=["auto", "best", "final", "latest"],
+        default="auto",
+        help="Which checkpoint to load (default: auto-detect best→final→latest).",
+    )
     args = parser.parse_args()
 
     db_dir = Path(args.db_dir)
     results_root = Path(args.nnunet_results)
     tasks = [int(t.strip()) for t in args.tasks.split(",")]
+
+    nnunet_checkpoint = None if args.use == "auto" else f"checkpoint_{args.use}.pth"
 
     _predict_fn = {
         "native": predict_mri_two_stage,
@@ -127,8 +136,14 @@ def main():
         for label, ds_s1, ds_s2, use_mclahe, desc in combos:
             s1_dir = _get_trainer_dir(ds_s1, results_root)
             s2_dir = _get_trainer_dir(ds_s2, results_root)
-            s1 = CARE2026_MRI_nnUNet(train_config={"nnunet_model_dir": str(s1_dir)}, apply_mclahe=use_mclahe)
-            s2 = CARE2026_MRI_nnUNet(train_config={"nnunet_model_dir": str(s2_dir)}, apply_mclahe=use_mclahe)
+            _tc = {"nnunet_model_dir": str(s1_dir)}
+            if nnunet_checkpoint:
+                _tc["nnunet_checkpoint"] = nnunet_checkpoint
+            s1 = CARE2026_MRI_nnUNet(train_config=_tc, apply_mclahe=use_mclahe)
+            _tc = {"nnunet_model_dir": str(s2_dir)}
+            if nnunet_checkpoint:
+                _tc["nnunet_checkpoint"] = nnunet_checkpoint
+            s2 = CARE2026_MRI_nnUNet(train_config=_tc, apply_mclahe=use_mclahe)
             dice_vals, acc_vals, sen_vals = [], [], []
             for rec_dir in tqdm(records, desc=f"  T1 {label}", unit="case"):
                 img_path = rec_dir / "enhanced.nii.gz"
@@ -169,7 +184,10 @@ def main():
         for ds_id, label in [(502, "no CLAHE"), (512, "CLAHE")]:
             trainer_dir = _get_trainer_dir(ds_id, results_root)
             use_mclahe = ds_id >= 510
-            model = CARE2026_MRI_nnUNet(train_config={"nnunet_model_dir": str(trainer_dir)}, apply_mclahe=use_mclahe)
+            _tc = {"nnunet_model_dir": str(trainer_dir)}
+            if nnunet_checkpoint:
+                _tc["nnunet_checkpoint"] = nnunet_checkpoint
+            model = CARE2026_MRI_nnUNet(train_config=_tc, apply_mclahe=use_mclahe)
             dice_vals = []
             dice_vals = []
             for rec_dir in tqdm(all_cases, desc=f"  T2 {ds_id}", unit="case"):
@@ -205,7 +223,10 @@ def main():
             key=lambda p: int(p.name.split("_")[1]),
         )
         trainer_dir = _get_trainer_dir(500, results_root)
-        ct_model = CARE2026_CT_nnUNet(train_config={"nnunet_model_dir": str(trainer_dir)})
+        _tc = {"nnunet_model_dir": str(trainer_dir)}
+        if nnunet_checkpoint:
+            _tc["nnunet_checkpoint"] = nnunet_checkpoint
+        ct_model = CARE2026_CT_nnUNet(train_config=_tc)
         per_class = {1: [], 2: [], 3: []}
         labeled = 0
         for rec_dir in tqdm(records, desc="  T3 500", unit="case"):

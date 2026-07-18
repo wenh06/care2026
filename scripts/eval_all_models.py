@@ -135,6 +135,13 @@ def main():
         default="native",
         help="MRI inference pipeline (default: native)",
     )
+    parser.add_argument(
+        "--use",
+        type=str,
+        choices=["auto", "best", "final", "latest"],
+        default="auto",
+        help="Which checkpoint to load (default: auto-detect best→final→latest).",
+    )
     args = parser.parse_args()
 
     # Dedup
@@ -152,6 +159,8 @@ def main():
     tasks = [int(t.strip()) for t in args.tasks.split(",")]
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
+    nnunet_checkpoint = None if args.use == "auto" else f"checkpoint_{args.use}.pth"
+
     _predict_fn = {
         "native": predict_mri_two_stage,
         "hybrid": predict_mri_two_stage_hybrid,
@@ -161,11 +170,12 @@ def main():
     print("=" * 65)
     print("  Model Evaluation on Labeled Training Data")
     print("=" * 65)
-    print(f"  Data root: {db_dir}")
-    print(f"  Tasks    : {tasks}")
-    print(f"  Task 1   : {n_t1} combo(s)")
-    print(f"  Task 2   : {len(args.t2)} model(s)")
-    print(f"  Task 3   : {len(args.t3)} model(s)")
+    print(f"  Data root  : {db_dir}")
+    print(f"  Tasks      : {tasks}")
+    print(f"  Checkpoint : {args.use}")
+    print(f"  Task 1     : {n_t1} combo(s)")
+    print(f"  Task 2     : {len(args.t2)} model(s)")
+    print(f"  Task 3     : {len(args.t3)} model(s)")
     print()
 
     all_results: Dict[str, Dict[str, Any]] = {}
@@ -186,8 +196,8 @@ def main():
             s2_path = args.t1_s2[i]
             label = f"S1={_short_label(s1_path)} + S2={_short_label(s2_path)}"
 
-            s1 = _load_model("mri_stage1", s1_path, device)
-            s2 = _load_model("mri_stage2", s2_path, device)
+            s1 = _load_model("mri_stage1", s1_path, device, nnunet_checkpoint=nnunet_checkpoint)
+            s2 = _load_model("mri_stage2", s2_path, device, nnunet_checkpoint=nnunet_checkpoint)
             # Auto-read MCLAHE
             s1_mc = bool((getattr(s1, "config", {}) or {}).get("apply_mclahe", False))
             s2_mc = bool((getattr(s2, "config", {}) or {}).get("apply_mclahe", False))
@@ -232,7 +242,7 @@ def main():
         task2_results: Dict[str, Dict] = {}
         for model_path in args.t2:
             label = _short_label(model_path)
-            model = _load_model("mri_stage1", model_path, device)
+            model = _load_model("mri_stage1", model_path, device, nnunet_checkpoint=nnunet_checkpoint)
             use_mclahe = bool((getattr(model, "config", {}) or {}).get("apply_mclahe", False))
             dice_vals = []
             for rec_dir in tqdm(all_cases, desc=f"  T2 [{label}]", unit="case"):
@@ -280,7 +290,7 @@ def main():
         task3_results: Dict[str, Dict] = {}
         for model_path in args.t3:
             label = _short_label(model_path)
-            model = _load_model("ct", model_path, device)
+            model = _load_model("ct", model_path, device, nnunet_checkpoint=nnunet_checkpoint)
             per_class = {1: [], 2: [], 3: []}
             labeled = 0
             for rec_dir in tqdm(records, desc=f"  T3 [{label}]", unit="case"):

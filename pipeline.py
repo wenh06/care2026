@@ -353,7 +353,9 @@ def run_all_tasks(
 # ---------------------------------------------------------------------------
 
 
-def _load_model(name: str, model_path: str, device: torch.device, mri_mclahe: Optional[bool] = None):
+def _load_model(
+    name: str, model_path: str, device: torch.device, mri_mclahe: Optional[bool] = None, nnunet_checkpoint: Optional[str] = None
+):
     """Load a model from *model_path*, auto-detecting VNet (file) vs nnUNet (directory)."""
     from cfg import CT_TrainCfg_nnUNet as _nnunet_cfg
     from models import (
@@ -371,6 +373,8 @@ def _load_model(name: str, model_path: str, device: torch.device, mri_mclahe: Op
         if is_nnunet:
             _tc = dict(_nnunet_cfg)
             _tc["nnunet_model_dir"] = str(path)
+            if nnunet_checkpoint is not None:
+                _tc["nnunet_checkpoint"] = nnunet_checkpoint
             model = CARE2026_CT_nnUNet(train_config=_tc)
             print(f"[CT] nnUNet model from {path}")
         else:
@@ -381,7 +385,10 @@ def _load_model(name: str, model_path: str, device: torch.device, mri_mclahe: Op
 
     if name == "mri_stage1":
         if is_nnunet:
-            kwargs = {"train_config": {"nnunet_model_dir": str(path)}}
+            _tc = {"nnunet_model_dir": str(path)}
+            if nnunet_checkpoint is not None:
+                _tc["nnunet_checkpoint"] = nnunet_checkpoint
+            kwargs = {"train_config": _tc}
             if mri_mclahe is not None:
                 kwargs["apply_mclahe"] = mri_mclahe
             model = CARE2026_MRI_nnUNet(**kwargs)
@@ -394,7 +401,10 @@ def _load_model(name: str, model_path: str, device: torch.device, mri_mclahe: Op
 
     if name == "mri_stage2":
         if is_nnunet:
-            kwargs = {"train_config": {"nnunet_model_dir": str(path)}}
+            _tc = {"nnunet_model_dir": str(path)}
+            if nnunet_checkpoint is not None:
+                _tc["nnunet_checkpoint"] = nnunet_checkpoint
+            kwargs = {"train_config": _tc}
             if mri_mclahe is not None:
                 kwargs["apply_mclahe"] = mri_mclahe
             model = CARE2026_MRI_nnUNet(**kwargs)
@@ -519,6 +529,14 @@ if __name__ == "__main__":
         help="MRI inference pipeline: 'native' (native-res S1+S2), "
         "'hybrid' (native S1 + canonical S2), 'legacy' (hardcoded-spacing S1+S2).",
     )
+    parser.add_argument(
+        "--use",
+        type=str,
+        choices=["auto", "best", "final", "latest"],
+        default="auto",
+        help="Which checkpoint to load: 'auto' (best→final→latest auto-detect), "
+        "'best', 'final', or 'latest'.  Error if specified checkpoint not found.",
+    )
     args = parser.parse_args()
 
     # Resolve --input_dir / --output_dir, with backward compatibility for
@@ -535,6 +553,8 @@ if __name__ == "__main__":
         warnings.warn("CUDA not available. Falling back to CPU.")
     device = torch.device(args.device)
 
+    nnunet_checkpoint = None if args.use == "auto" else f"checkpoint_{args.use}.pth"
+
     tasks = [int(t.strip()) for t in args.tasks.split(",")]
 
     print("Inference config:")
@@ -543,6 +563,7 @@ if __name__ == "__main__":
     print(f"  tasks           : {tasks}")
     print(f"  device          : {args.device}")
     print(f"  TTA             : {args.tta}")
+    print(f"  checkpoint      : {args.use}")
     print(f"  scar_dilation   : {args.scar_dilation}")
     print(f"  mri_pipeline    : {args.mri_pipeline}")
     print(f"  mri_mclahe      : {args.mri_mclahe}")
@@ -557,17 +578,17 @@ if __name__ == "__main__":
 
     if 1 in tasks or 2 in tasks:
         try:
-            mri_stage1_model = _load_model("mri_stage1", args.mri_stage1_model, device, args.mri_mclahe)
+            mri_stage1_model = _load_model("mri_stage1", args.mri_stage1_model, device, args.mri_mclahe, nnunet_checkpoint)
         except FileNotFoundError as e:
             warnings.warn(f"MRI Stage-1: {e}. Tasks 1 & 2 will be skipped.")
         try:
-            mri_stage2_model = _load_model("mri_stage2", args.mri_stage2_model, device, args.mri_mclahe)
+            mri_stage2_model = _load_model("mri_stage2", args.mri_stage2_model, device, args.mri_mclahe, nnunet_checkpoint)
         except FileNotFoundError as e:
             warnings.warn(f"MRI Stage-2: {e}. Tasks 1 & 2 will be skipped.")
 
     if 3 in tasks:
         try:
-            ct_model = _load_model("ct", args.ct_model, device)
+            ct_model = _load_model("ct", args.ct_model, device, nnunet_checkpoint=nnunet_checkpoint)
         except FileNotFoundError as e:
             warnings.warn(f"CT: {e}. Task 3 will be skipped.")
 
