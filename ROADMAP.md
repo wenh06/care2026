@@ -41,9 +41,9 @@ Three tasks are evaluated independently; no cross-modal fusion is required.
 
 | Role | Dataset | Trainer | Notes |
 |------|---------|----------|-------|
-| **Model** | 512 | `nnUNetTrainer__nnUNetPlans__3d_fullres` | 190 cases, CLAHE (marginal +0.25pp) |
+| **Model** | 502 | `nnUNetTrainer__nnUNetPlans__3d_fullres` | 190 cases, no CLAHE, DSC 0.8871 (native pipeline; 512 CLAHE not tested with native) |
 
-**Pipeline**: ``predict_mri_two_stage`` with stage2_model=None (cavity-only)
+**Pipeline**: ``predict_mri_two_stage`` (native), stage2_model=None (cavity-only)
 
 ### Task 3 — LA Multi-Structure Segmentation (CT)
 
@@ -51,7 +51,7 @@ Three tasks are evaluated independently; no cross-modal fusion is required.
 |------|---------|----------|-------|
 | **Primary** | 500 | `nnUNetTrainer__nnUNetPlans__3d_fullres` | 50 labeled, no CLAHE, DSC 0.9563 (#2) |
 | **Secondary** | 503 | `nnUNetTrainer__nnUNetPlans__3d_fullres` | self-trained on 150 cases, DSC 0.9745 (training-set; worse than 500 but complementary) |
-| **Planned** | 500 | `nnUNetTrainerCTBoundary` | boundary-aware loss, not yet trained |
+| **Tested** | 500 | `nnUNetTrainerCTBoundary` | boundary loss (HausdorffER + CenterlineCE), training-set Mean DSC 0.9812 (−0.0011 vs baseline) |
 
 **Pipeline**: ``predict_ct``.  Ensemble 500 + 503 if complementary errors provide gain.
 
@@ -500,6 +500,7 @@ from Center B/C — consistent with the known challenge of multi-center LGE-MRI.
 | Model | LA | PV | LAA | Mean | Notes |
 |-------|-----|-----|-----|------|-------|
 | Dataset 500 (50 labeled) | **0.9938** | **0.9832** | **0.9700** | **0.9823** | nnUNet baseline |
+| Dataset 500 CTBoundary | 0.9934 | 0.9820 | 0.9680 | 0.9812 | HausdorffER + CenterlineCE loss; −0.0011 vs baseline |
 | Dataset 503 (self-trained, 150 cases) | 0.9916 | 0.9771 | 0.9547 | 0.9745 | hard pseudo-labels from 500 → hurts all classes |
 
 Self-training with hard pseudo-labels **degrades performance across all classes**
@@ -907,7 +908,7 @@ done
 
 | # | Strategy | Rationale | Status |
 |---|----------|-----------|--------|
-| **B1** | **Boundary-aware nnUNet** | HausdorffERLoss + CenterlineCELoss for PV/LAA | Code ready, need GPU |
+| **B1** | **Boundary-aware nnUNet** | HausdorffERLoss + CenterlineCELoss for PV/LAA | ❌ Tested — training-set Mean DSC 0.9812 (−0.0011 vs baseline) |
 | S1 | Soft pseudo-labels | KL divergence on unlabeled cases | De-prioritized after 503 failure |
 | S3 | Ensemble 500 + 503 | Different training data → complementary errors | Low-cost, try after B1 |
 
