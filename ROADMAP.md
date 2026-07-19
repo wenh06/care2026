@@ -418,7 +418,7 @@ negatives; the ScarLoss penalises false scar predictions on these samples.
 
 | Backbone | Epochs | In Channels | Task 1 G-DSC | Notes |
 |----------|--------|------------|-------------|-------|
-| `vnet_stage2` | 300 | 1 (MRI only) | **0.2189** | current best |
+| `vnet_stage2` | 300 | 1 (MRI only) | **0.2189** (val) / 0.3468 (train, none) | current best; dilation=none → +70% train |
 | `vnet_stage2_2ch` | 600 | 2 (MRI+SDF) | 0.1882 | −3.1pp vs baseline; rolled back |
 | `vnet_stage2_l` | — | 1 | — | underperformed baseline |
 | `nested_vnet_stage2` | — | 1 | — | underperformed baseline; deep sup disabled |

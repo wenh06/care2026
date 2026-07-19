@@ -7,29 +7,27 @@ on:
     branches: [ master ]
 
 env:
-  status: pre
+  status: alpha
   CARE2026_TEST: 1
   download_data_dir: ${{ github.workspace }}/download_data
   output_dir: ${{ github.workspace }}/output
   mount_data_dir: /input
   mount_output_dir: /output
-  model_cache_dir: /challenge/cache/model_dir
-  docker_main_filename: Dockerfile
   DOCKER_HUB_REPOSITORY: care2026-docker-image
   DOCKER_IMAGE_TAG: latest
 
 jobs:
 
-  build:
+  build-and-test:
     if: contains(fromJson('["wenh06", "DeepPSP"]'), github.repository_owner)
-
     runs-on: ubuntu-22.04
 
     steps:
     - uses: actions/checkout@v4
       with:
         submodules: recursive
-    - name: Clear unnecessary system components
+
+    - name: Free disk space
       run: |
         echo "Free space before cleanup:"
         df -h
@@ -40,47 +38,80 @@ jobs:
         sudo rm -rf "$AGENT_TOOLSDIRECTORY"
         echo "Free space after cleanup:"
         df -h
-    - name: Set up QEMU
-      uses: docker/setup-qemu-action@v3
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-      with:
-        driver: docker
-    - name: Build the Docker image
-      uses: docker/build-push-action@v6
-      with:
-        context: .
-        file: ${{ env.docker_main_filename }}
-        push: false
-        tags: ${{ env.DOCKER_HUB_REPOSITORY }}:${{ env.DOCKER_IMAGE_TAG }}
 
+    # ----------------------------------------------------------------
+    # Download fold_0 model zips from Google Drive → checkpoints/
+    # ----------------------------------------------------------------
+    - name: Download model zips
+      env:
+        GDRIVE_ID_500: ${{ secrets.MODEL_GDRIVE_ID_500 }}
+        GDRIVE_ID_502: ${{ secrets.MODEL_GDRIVE_ID_502 }}
+        GDRIVE_ID_521W: ${{ secrets.MODEL_GDRIVE_ID_521W }}
+      run: |
+        pip install gdown
+        mkdir -p checkpoints
+
+        for id_var in GDRIVE_ID_500 GDRIVE_ID_502 GDRIVE_ID_521W; do
+          gdrive_id="${!id_var}"
+          if [ -z "$gdrive_id" ]; then
+            echo "  SKIP $id_var (not set)"
+            continue
+          fi
+          ds_id=$(echo "$id_var" | sed 's/GDRIVE_ID_//' | tr '[:upper:]' '[:lower:]')
+          zip_name="${ds_id}_f0_model.zip"
+          echo "Downloading $zip_name ..."
+          gdown -O "$zip_name" "$gdrive_id"
+          unzip -q "$zip_name" -d checkpoints/
+          rm "$zip_name"
+        done
+
+        echo "checkpoints/ layout:"
+        find checkpoints -type f \( -name '*.pth' -o -name '*.json' \) | sort
+
+    # ----------------------------------------------------------------
+    # Build Docker image (COPY ./ → /challenge; post_docker_build.py)
+    # ----------------------------------------------------------------
+    - name: Build Docker image
+      run: |
+        docker build -t ${{ env.DOCKER_HUB_REPOSITORY }}:${{ env.DOCKER_IMAGE_TAG }} .
+
+    # ----------------------------------------------------------------
+    # Download test data & smoke test
+    # ----------------------------------------------------------------
     - name: Set up Python 3.10
+      if: ${{ env.status != 'pre' }}
       uses: actions/setup-python@v5
       with:
         python-version: "3.10"
-    - name: Download the test data
-      if: ${{ env.status != 'pre' }}
-      run: |
-        python -m pip install gdown
-        mkdir -p ${{ env.download_data_dir }} ${{ env.output_dir }}
-        # TODO: set data_gdrive_id once data is available
-        # gdown -O ${{ env.download_data_dir }}/care2026.zip ${{ env.data_gdrive_id }}
-        # unzip ${{ env.download_data_dir }}/care2026.zip -d ${{ env.download_data_dir }}
-        # rm ${{ env.download_data_dir }}/care2026.zip
-        du -sh ${{ env.download_data_dir }}
 
-    - name: Run the Docker image
+    - name: Download test data
       if: ${{ env.status != 'pre' }}
+      env:
+        GDRIVE_ID_TEST_DATA: ${{ secrets.TEST_DATA_GDRIVE_ID }}
+      run: |
+        pip install gdown
+        mkdir -p ${{ env.download_data_dir }} ${{ env.output_dir }}
+        if [ -n "$GDRIVE_ID_TEST_DATA" ]; then
+          echo "Downloading mini-mock-test-set.tar.gz ..."
+          gdown -O mini-mock-test-set.tar.gz "$GDRIVE_ID_TEST_DATA"
+          tar xzf mini-mock-test-set.tar.gz -C ${{ env.download_data_dir }}
+          rm mini-mock-test-set.tar.gz
+          echo "Test data:"
+          find ${{ env.download_data_dir }} -type f | sort
+        else
+          echo "TEST_DATA_GDRIVE_ID not set — skipping smoke test."
+        fi
+
+    - name: Run the Docker image (smoke test)
+      if: ${{ env.status != 'pre' && hashFiles(format('{0}/mini-mock-test-set/**/*.nii.gz', env.download_data_dir)) != '' }}
       run: |
         docker images
         docker run \
           -e PYTHONUNBUFFERED=1 \
           -e CARE2026_TEST=${{ env.CARE2026_TEST }} \
-          -e model_cache_dir=${{ env.model_cache_dir }} \
-          -e mount_data_dir=${{ env.mount_data_dir }} \
-          -e mount_output_dir=${{ env.mount_output_dir }} \
-          -v ${{ env.download_data_dir }}:${{ env.mount_data_dir }} \
+          -v ${{ env.download_data_dir }}/mini-mock-test-set:${{ env.mount_data_dir }}:ro \
           -v ${{ env.output_dir }}:${{ env.mount_output_dir }} \
           ${{ env.DOCKER_HUB_REPOSITORY }}:${{ env.DOCKER_IMAGE_TAG }}
         docker ps -a
-        ls -l ${{ env.output_dir }}
+        echo "Output files:"
+        find ${{ env.output_dir }} -type f | sort

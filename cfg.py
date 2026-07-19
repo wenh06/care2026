@@ -65,8 +65,8 @@ BaseCfg.random_seed = 42
 
 PredictCfg = CFG()
 PredictCfg.ct_model = str(_BASE_DIR / "checkpoints" / "ct_model")
-PredictCfg.mri_stage1_model = str(_BASE_DIR / "checkpoints" / "mri_stage1_model.safetensors")
-PredictCfg.mri_stage2_model = str(_BASE_DIR / "checkpoints" / "mri_stage2_model.safetensors")
+PredictCfg.mri_stage1_model = str(_BASE_DIR / "checkpoints" / "mri_stage1_model")
+PredictCfg.mri_stage2_model = str(_BASE_DIR / "checkpoints" / "mri_stage2_model")
 PredictCfg.mri_apply_mclahe = False
 
 # ---------------------------------------------------------------------------
@@ -140,8 +140,7 @@ MRI_Stage2_TrainCfg = deepcopy(BaseCfg)
 
 MRI_Stage2_TrainCfg.task = "mri"
 MRI_Stage2_TrainCfg.stage = 2
-# MRI_Stage2_TrainCfg.backbone = "vnet_stage2"
-MRI_Stage2_TrainCfg.backbone = "vnet_stage2_2ch"  # "vnet_stage2" | "nested_vnet_stage2" | "vnet_stage2_2ch" | "vnet_stage2_mc"
+MRI_Stage2_TrainCfg.backbone = "vnet_stage2"  # "vnet_stage2" | "nested_vnet_stage2" | "vnet_stage2_2ch" | "vnet_stage2_mc"
 MRI_Stage2_TrainCfg.label_mode = "binary"  # "binary" = scar only, "multi_class" = cavity + scar
 # Label mapping for multi-class mode (must match prep_nnunet_mri.py --multi-class)
 MRI_Stage2_TrainCfg.label_map = {"background": 0, "LA_cavity": 1, "LA_scar": 2}
