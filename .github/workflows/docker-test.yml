@@ -51,6 +51,16 @@ jobs:
         pip install gdown
         mkdir -p checkpoints
 
+        # Debug: check if secrets are actually set (show length only)
+        for v in GDRIVE_ID_500 GDRIVE_ID_502 GDRIVE_ID_521W; do
+          val="${!v}"
+          if [ -z "$val" ]; then
+            echo "  SKIP $v (env var empty or unset)"
+          else
+            echo "  OK $v (len=${#val})"
+          fi
+        done
+
         for id_var in GDRIVE_ID_500 GDRIVE_ID_502 GDRIVE_ID_521W; do
           gdrive_id="${!id_var}"
           if [ -z "$gdrive_id" ]; then
