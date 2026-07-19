@@ -109,6 +109,7 @@ jobs:
         docker run \
           -e PYTHONUNBUFFERED=1 \
           -e CARE2026_TEST=${{ env.CARE2026_TEST }} \
+          -e CARE2026_ACTION_TEST=1 \
           -v ${{ env.download_data_dir }}/mini-mock-test-set:${{ env.mount_data_dir }}:ro \
           -v ${{ env.output_dir }}:${{ env.mount_output_dir }} \
           ${{ env.DOCKER_HUB_REPOSITORY }}:${{ env.DOCKER_IMAGE_TAG }}

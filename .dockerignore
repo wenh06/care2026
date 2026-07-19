@@ -1,0 +1,31 @@
+# Git
+.git/
+.gitignore
+.gitmodules
+.gitattributes
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.egg
+
+# Dev / test
+tmp/
+log/
+saved_models/
+*.ipynb
+.ipynb_checkpoints/
+
+# Old model files (VNet safetensors, bak)
+checkpoints/bak/
+checkpoints/*.safetensors
+checkpoints/config.json
+
+# CI / workflows
+.github/
+
+# Docs
+README.md
+LICENSE
