@@ -44,6 +44,13 @@ import os
 import sys
 from pathlib import Path
 
+
+# Python < 3.12 compat: relative_to(walk=True) doesn't exist yet
+def _relpath(path: Path, start: Path) -> Path:
+    """Return *path* relative to *start*, even if they don't share a direct ancestor."""
+    return Path(os.path.relpath(str(path), str(start)))
+
+
 CHALLENGE_DIR = Path(__file__).resolve().parent
 CKPT_DIR = CHALLENGE_DIR / "checkpoints"
 PATHS_JSON = CKPT_DIR / "model_paths.json"
@@ -148,7 +155,7 @@ def main() -> None:
     for role, path in roles.items():
         link = CKPT_DIR / role
         if not link.exists():
-            target = path.relative_to(CKPT_DIR, walk=True) if path.is_relative_to(CKPT_DIR) else path
+            target = _relpath(path, CKPT_DIR) if path.is_relative_to(CKPT_DIR) else path
             link.symlink_to(target)
             print(f"  symlink: {role} -> {target}")
 
