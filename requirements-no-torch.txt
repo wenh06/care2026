@@ -15,7 +15,7 @@ opencv-python
 acvl-utils>=0.2.6,<0.3
 dynamic-network-architectures>=0.4.4,<0.5
 batchgenerators>=0.25.1
-batchgeneratorsv2>=0.3.2
+batchgeneratorsv2>=0.3.5
 blosc2>=3.3.2
 graphviz
 tifffile
