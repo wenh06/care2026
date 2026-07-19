@@ -33,7 +33,7 @@ diff-binom-confint
 # to avoid pip touching the pre-installed torch)
 acvl-utils>=0.2.6,<0.3
 dynamic-network-architectures>=0.4.4,<0.5
-batchgenerators>=0.25.1
+batchgenerators>=0.25.3
 batchgeneratorsv2>=0.3.2
 blosc2>=3.3.2
 graphviz
