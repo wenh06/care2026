@@ -40,27 +40,29 @@ jobs:
         df -h
 
     # ----------------------------------------------------------------
-    # Download fold_0 model zips from Google Drive → checkpoints/
+    # Set up Python (needed for gdown)
     # ----------------------------------------------------------------
-    - name: Download model zips
+    - name: Set up Python 3.10
+      if: ${{ env.status != 'pre' }}
+      uses: actions/setup-python@v6
+      with:
+        python-version: "3.10"
+
+    # ----------------------------------------------------------------
+    # Download models & test data from Google Drive
+    # ----------------------------------------------------------------
+    - name: Download models and test data
+      if: ${{ env.status != 'pre' }}
       env:
         GDRIVE_ID_500: ${{ secrets.MODEL_GDRIVE_ID_500 }}
         GDRIVE_ID_502: ${{ secrets.MODEL_GDRIVE_ID_502 }}
         GDRIVE_ID_521W: ${{ secrets.MODEL_GDRIVE_ID_521W }}
+        GDRIVE_ID_TEST_DATA: ${{ secrets.TEST_DATA_GDRIVE_ID }}
       run: |
         pip install gdown
-        mkdir -p checkpoints
+        mkdir -p checkpoints ${{ env.download_data_dir }} ${{ env.output_dir }}
 
-        # Debug: check if secrets are actually set (show length only)
-        for v in GDRIVE_ID_500 GDRIVE_ID_502 GDRIVE_ID_521W; do
-          val="${!v}"
-          if [ -z "$val" ]; then
-            echo "  SKIP $v (env var empty or unset)"
-          else
-            echo "  OK $v (len=${#val})"
-          fi
-        done
-
+        # --- Model zips ---
         for id_var in GDRIVE_ID_500 GDRIVE_ID_502 GDRIVE_ID_521W; do
           gdrive_id="${!id_var}"
           if [ -z "$gdrive_id" ]; then
@@ -78,29 +80,7 @@ jobs:
         echo "checkpoints/ layout:"
         find checkpoints -type f \( -name '*.pth' -o -name '*.json' \) | sort
 
-    # ----------------------------------------------------------------
-    # Build Docker image (COPY ./ → /challenge; post_docker_build.py)
-    # ----------------------------------------------------------------
-    - name: Build Docker image
-      run: |
-        docker build -t ${{ env.DOCKER_HUB_REPOSITORY }}:${{ env.DOCKER_IMAGE_TAG }} .
-
-    # ----------------------------------------------------------------
-    # Download test data & smoke test
-    # ----------------------------------------------------------------
-    - name: Set up Python 3.10
-      if: ${{ env.status != 'pre' }}
-      uses: actions/setup-python@v6
-      with:
-        python-version: "3.10"
-
-    - name: Download test data
-      if: ${{ env.status != 'pre' }}
-      env:
-        GDRIVE_ID_TEST_DATA: ${{ secrets.TEST_DATA_GDRIVE_ID }}
-      run: |
-        pip install gdown
-        mkdir -p ${{ env.download_data_dir }} ${{ env.output_dir }}
+        # --- Test data ---
         if [ -n "$GDRIVE_ID_TEST_DATA" ]; then
           echo "Downloading mini-mock-test-set.tar.gz ..."
           gdown -O mini-mock-test-set.tar.gz "$GDRIVE_ID_TEST_DATA"
@@ -109,8 +89,15 @@ jobs:
           echo "Test data:"
           find ${{ env.download_data_dir }} -type f | sort
         else
-          echo "TEST_DATA_GDRIVE_ID not set — skipping smoke test."
+          echo "TEST_DATA_GDRIVE_ID not set — skipping test data download."
         fi
+
+    # ----------------------------------------------------------------
+    # Build Docker image (COPY ./ → /challenge; post_docker_build.py)
+    # ----------------------------------------------------------------
+    - name: Build Docker image
+      run: |
+        docker build -t ${{ env.DOCKER_HUB_REPOSITORY }}:${{ env.DOCKER_IMAGE_TAG }} .
 
     - name: Run the Docker image (smoke test)
       if: ${{ env.status != 'pre' && hashFiles(format('{0}/mini-mock-test-set/**/*.nii.gz', env.download_data_dir)) != '' }}

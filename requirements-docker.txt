@@ -26,6 +26,7 @@ seaborn
 requests
 PyYAML
 IPython
+ipywidgets
 bib-lookup
 diff-binom-confint
 
