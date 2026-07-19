@@ -62,5 +62,4 @@ RUN python post_docker_build.py
 RUN du -sh $INPUT_DIR
 RUN du -sh $MODEL_CACHE_DIR
 
-CMD ["pipeline.py"]
-ENTRYPOINT ["python3"]
+ENTRYPOINT ["python3", "-u", "docker_entry.py"]
