@@ -80,7 +80,7 @@ Data are provided in NIfTI format:
 - [const.py](const.py): shared project-wide constants — MRI/CT spatial shapes and spacings, class maps, dataset size counts, cache directory paths, and a `REMOTE_MODELS` placeholder for cloud-hosted checkpoint URLs.
 - [data_reader.py](data_reader.py): NIfTI data reader classes (`CARE2026_MRI`, `CARE2026_CT`) built on `torch_ecg` — file listing, label loading, LA bounding-box extraction, resampling, HU windowing, and cropped data access.
 - [dataset.py](dataset.py): PyTorch `Dataset` classes for all three tasks (`CARE2026_MRI_Stage1_Dataset`, `CARE2026_MRI_Stage2_Dataset`, `CARE2026_CT_Dataset`) with RAM caching, on-the-fly augmentation, foreground-biased patch sampling, and CLAHE support.
-- [Dockerfile](Dockerfile): Docker image definition for challenge submission (base: `pytorch/pytorch:2.9.1-cuda12.8-cudnn9-runtime`). Entry point: `python3 pipeline.py`.
+- [Dockerfile](Dockerfile): Docker image definition for challenge submission (base: `pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime`). Entry point: `python3 -u docker_entry.py`.
 - [outputs.py](outputs.py): `CARE2026Outputs` dataclass container for model predictions with `save_as_nifti()` (challenge-compliant directory layout) and `package_submission()` (submission zip creation).
 - [pipeline.py](pipeline.py): high-level inference orchestration (`run_task1/2/3_inference`, `run_all_tasks`) plus the **unified CLI** for model loading, inference, and submission packaging. Serves as the Docker `ENTRYPOINT`.
 - [predict.py](predict.py): core volume-level inference functions — `predict_mri_two_stage()` (two-stage coarse-to-fine MRI pipeline), `predict_ct()` (sliding-window CT inference), 8-fold flip TTA, and post-processing utilities (`keep_largest_component`, `postprocess_mri_masks`, `postprocess_ct_mask`).
@@ -95,7 +95,7 @@ Data are provided in NIfTI format:
 
 ### Top-level directories
 
-- [checkpoints](checkpoints): trained model weights (`.safetensors`). Canonical names: `mri_stage1_model.safetensors`, `mri_stage2_model.safetensors`, `ct_model.safetensors`; also contains epoch snapshots for rollback.
+- [checkpoints](checkpoints): trained model weights as nnUNet result directories (`Dataset*_CARE2026*/`) with symlinks (`ct_model`, `mri_stage1_model`, `mri_stage2_model`) and `model_paths.json`.  See `post_docker_build.py` for auto-discovery logic.
 - [log](log): training logs (`.txt` + `.csv` metrics from `torch_ecg` trainers) and TensorBoard event files.
 - [evaluate-results](evaluate-results): output directory for local validation-set evaluation metrics.
 - [scripts](scripts): diagnostic, evaluation, and data preparation scripts —
@@ -135,15 +135,36 @@ Data are provided in NIfTI format:
 
 ## Leaderboards
 
-Validation leaderboard results (nnUNet 5-fold ensemble, no CLAHE):
+Validation leaderboard results (nnUNet 5-fold ensemble, ScarGaussian loss, hybrid pipeline):
 
 | Task | Metric | Score | Rank |
 |------|--------|-------|------|
-| Task 1 (scar) | G-DSC / ACC / SEN | 0.4743 / 0.7313 / 0.4627 | **#1** |
-| Task 2 (cavity) | DSC / HD | 0.8835 / 18.53 mm | competitive |
+| Task 1 (scar) | G-DSC / ACC / SEN | 0.4791 / 0.736 / 0.4722 | **#1** |
+| Task 2 (cavity) | DSC / HD | 0.8871 / 17.59 mm | competitive |
 | Task 3 (CT) | DSC / HD | 0.9563 / 12.45 mm | #2 |
 
 See `submissions` for full submission log and `ROADMAP.md` for development history.
+
+## Docker
+
+### Build
+
+```bash
+docker build -t care2026-docker-image:latest .
+```
+
+### Run
+
+```bash
+docker run --gpus all --shm-size=16g \
+    -v /path/to/test-data:/input:ro \
+    -v /path/to/output:/output \
+    care2026-docker-image:latest
+```
+
+> **Note:** `--gpus all` enables GPU inference.  `--shm-size=16g` is required
+> because nnUNet's multiprocessing preprocessing uses `/dev/shm` (default 64 MB
+> in Docker is insufficient).
 
 ## Citations
 

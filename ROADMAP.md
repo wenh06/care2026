@@ -752,7 +752,7 @@ Results tracked in ``submissions`` (YAML log).
 - [x] MRI nnUNet models trained: Task 1 scar (Dataset 501), Task 2 cavity (Dataset 502); MCLAHE variants (511/512) also done.
 - [x] Submit all-task validation predictions to official evaluation platform (Tasks 1, 2, 3).
 - [x] nnUNet inference pipeline complete: `CARE2026_MRI_nnUNet` + `PredictCfg` + `_load_model()`.
-- [ ] Docker end-to-end test.
+- [x] Docker end-to-end test.
 - [ ] Docker submit.
 
 ---
@@ -925,7 +925,7 @@ done
 
 | # | Task | Description |
 |---|------|-------------|
-| C1 | Docker build & test | Finalize `post_docker_build.py`, build image, end-to-end smoke test |
+| C1 | Docker build & test | Finalize `post_docker_build.py`, build image, end-to-end smoke test | ✅ |
 | C2 | Docker submit | Three images (one per task) |
 
 ---
