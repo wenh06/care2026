@@ -1,6 +1,29 @@
 # https://hub.docker.com/r/pytorch/pytorch
 # PyTorch 2.9.1, CUDA 12.8, cuDNN 9 -- released Oct 2025, stable and widely used
+#
+# Build examples:
+#
+#   docker build -t care2026-docker-image:latest .
+#   docker build -t care2026-docker-image:latest \
+#       --build-arg HTTP_PROXY=http://127.0.0.1:7890 \
+#       --build-arg HTTPS_PROXY=http://127.0.0.1:7890 .
+#
 FROM pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime
+
+# --- Proxy (build-time, optional) ---
+ARG HTTP_PROXY=
+ARG HTTPS_PROXY=
+ARG NO_PROXY=
+
+ENV HTTP_PROXY=${HTTP_PROXY}
+ENV HTTPS_PROXY=${HTTPS_PROXY}
+ENV NO_PROXY=${NO_PROXY}
+
+# apt reads from this file (ENV alone does NOT work for apt)
+RUN if [ -n "${HTTP_PROXY}" ]; then \
+      echo "Acquire::http::Proxy \"${HTTP_PROXY}\";"  > /etc/apt/apt.conf.d/99proxy; \
+      echo "Acquire::https::Proxy \"${HTTPS_PROXY}\";" >> /etc/apt/apt.conf.d/99proxy; \
+    fi
 
 LABEL maintainer="wenh06@gmail.com"
 
@@ -25,7 +48,13 @@ RUN if [ -x "$(command -v nvcc)" ]; then nvcc --version; fi
 
 RUN apt update
 RUN apt install build-essential -y
-RUN apt install git ffmpeg libsm6 libxext6 vim libsndfile1 libxrender1 unzip -y
+RUN apt install git ffmpeg libsm6 libxext6 vim libsndfile1 libxrender1 unzip libgl1-mesa-glx graphviz -y
+
+# git proxy (git must already be installed)
+RUN if [ -n "${HTTP_PROXY}" ]; then \
+      git config --global http.proxy "${HTTP_PROXY}"; \
+      git config --global https.proxy "${HTTPS_PROXY}"; \
+    fi
 
 RUN mkdir /challenge
 COPY ./requirements-docker.txt /challenge
