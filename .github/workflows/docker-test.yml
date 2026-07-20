@@ -104,6 +104,7 @@ jobs:
       run: |
         docker images
         docker run \
+          --shm-size=2g \
           -e PYTHONUNBUFFERED=1 \
           -e CARE2026_TEST=${{ env.CARE2026_TEST }} \
           -e CARE2026_ACTION_TEST=1 \
