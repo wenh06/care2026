@@ -14,9 +14,9 @@ __all__ = ["CARE2026Outputs"]
 
 # Challenge-compliant submission directory names
 _TASK_DIRNAME = {
-    1: "LA scar quantification",
-    2: "LA cavity segmentation",
-    3: "LA multi-structure segmentation",
+    1: "task1",
+    2: "task2",
+    3: "task3",
 }
 
 
