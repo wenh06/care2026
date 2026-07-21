@@ -513,13 +513,18 @@ This negative result motivates the boundary-aware trainer (B1,
 ``nnUNetTrainerCTBoundary``) — improving loss design rather than adding noisy
 pseudo-labels.
 
-**Overall leaderboard standings (2026-07-17):**
+**Overall leaderboard standings (2026-07-21):**
 
 | Task | Our best | 1st place | Gap |
 |------|----------|-----------|-----|
-| 1 (scar) | G-DSC **0.4791** | — | **#1** 🏆 |
+| 1 (scar) | G-DSC **0.4791** | OrganAgent **0.4907** | −0.0116 |
 | 2 (cavity) | DSC **0.8871** | 0.8886 | −0.15 pp |
 | 3 (CT) | DSC 0.9563 | 0.9579 | −0.16 pp |
+
+**OrganAgent** (submitted 2026-07-19) surpassed us on Task 1 by +0.0116 G-DSC,
++0.0204 ACC, and +0.0407 SEN.  Their much higher sensitivity suggests better
+scar recall — possibly from extra training data (LAScarQS 2022), a larger
+backbone (SwinUNETR / ResEnc L), or more sophisticated anatomical priors (SDM).
 
 Task 2 native-resolution pipeline (sub 7, DSC 0.8871) closes the gap to 1st
 place from 0.51 pp to 0.15 pp — the spacing fix clearly benefits Stage 1 on
@@ -754,6 +759,7 @@ Results tracked in ``submissions`` (YAML log).
 - [x] nnUNet inference pipeline complete: `CARE2026_MRI_nnUNet` + `PredictCfg` + `_load_model()`.
 - [x] Docker end-to-end test.
 - [ ] Docker submit.
+- [x] Docker CI `--shm-size=2g` fix.
 
 ---
 
@@ -912,12 +918,15 @@ done
 | S1 | Soft pseudo-labels | KL divergence on unlabeled cases | De-prioritized after 503 failure |
 | S3 | Ensemble 500 + 503 | Different training data → complementary errors | Low-cost, try after B1 |
 
-### MRI — remaining items (lower priority after sub 7)
+### MRI — reclaim Task 1 #1 (surpassed by OrganAgent +0.0116 G-DSC on 2026-07-19)
 
 | # | Task | Description | Status |
 |---|------|-------------|--------|
 | D2 | Dataset 600 | nnUNet on 2-class full volume (backup) | ⏳ |
 | D3 | Custom nnUNet loss | `nnUNetTrainerScarGaussian` — test on 521 | ✅ Done — sub 10 G-DSC 0.4791 (+0.0048) |
+| E1 | **ResEnc L backbone** | `nnUNetPlannerResEncL` + ScarGaussian on Dataset 521 | 🔄 Training (AutoDL RTX 5090) |
+| E2 | **Cavity-wall spatial loss** | `nnUNetTrainerScarCavityWall` on Dataset 521 — cavity blur weight instead of scar blur | 🔄 Training (AutoDL RTX 5090) |
+| E3 | **ResEnc L + CavityWall** | Combined: ResEnc L plans + CavityWall trainer | 🔄 Training (AutoDL RTX 5090) |
 | B1 | VNet + nnUNet recipe | Train VNet on Dataset 501, SGD+polyLR 1000ep | ⏳ |
 | B2 | 4-stage nnUNet | PlainConvUNet reduced to 4 stages | ⏳ |
 
@@ -925,8 +934,8 @@ done
 
 | # | Task | Description |
 |---|------|-------------|
-| C1 | Docker build & test | Finalize `post_docker_build.py`, build image, end-to-end smoke test | ✅ |
-| C2 | Docker submit | Three images (one per task) |
+| C1 | Docker build & test | ✅ Finalized: `post_docker_build.py`, local smoke test, CI `--shm-size=2g` fix |
+| C2 | Docker submit | Three images (one per task) — exported, MEGA links ready, emails pending |
 
 ---
 

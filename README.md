@@ -137,11 +137,14 @@ Data are provided in NIfTI format:
 
 Validation leaderboard results (nnUNet 5-fold ensemble, ScarGaussian loss, hybrid pipeline):
 
-| Task | Metric | Score | Rank |
-|------|--------|-------|------|
-| Task 1 (scar) | G-DSC / ACC / SEN | 0.4791 / 0.736 / 0.4722 | **#1** |
-| Task 2 (cavity) | DSC / HD | 0.8871 / 17.59 mm | competitive |
-| Task 3 (CT) | DSC / HD | 0.9563 / 12.45 mm | #2 |
+| Task | Metric | Our Score | Rank | 1st Place |
+|------|--------|-----------|------|-----------|
+| Task 1 (scar) | G-DSC / ACC / SEN | 0.4791 / 0.736 / 0.4722 | **#2** | OrganAgent 0.4907 / 0.7564 / 0.5129 |
+| Task 2 (cavity) | DSC / HD | 0.8871 / 17.59 mm | competitive | 0.8886 |
+| Task 3 (CT) | DSC / HD | 0.9563 / 12.45 mm | #2 | 0.9579 |
+
+> **Ongoing**: ResEnc L backbone + cavity-wall spatial weighting loss
+> experiments on Dataset 521 to reclaim Task 1 #1.  See `ROADMAP.md` for details.
 
 See `submissions` for full submission log and `ROADMAP.md` for development history.
 
