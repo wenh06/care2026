@@ -181,6 +181,92 @@ class _ScarGaussianLoss(torch.nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# Cavity-Wall Spatial Weighting Loss
+# ---------------------------------------------------------------------------
+
+
+class _ScarCavityWallLoss(_ScarGaussianLoss):
+    """Like _ScarGaussianLoss but weights based on cavity wall distance.
+
+    Instead of blurring the GT scar mask (which biases toward known scar
+    patterns), blurs the cavity mask and excludes the lumen interior.
+    Produces a band of high weight around the LA wall — the anatomically
+    plausible region for myocardial scar.
+
+    Intended for multi-class datasets (521, 531, 600) where cavity = class 1
+    and scar = class 2.
+
+    ``w(x) = 1 + w₀·blur(cavity_mask)·(1 − cavity_mask)``
+    """
+
+    def __init__(self, scar_class: int, cavity_class: int = 1, **kwargs):
+        super().__init__(scar_class=scar_class, **kwargs)
+        self.cavity_class = cavity_class
+
+    def _compute_weight(self, tgt: torch.Tensor) -> torch.Tensor:
+        cavity = (tgt == self.cavity_class).float().unsqueeze(1)  # (B,1,H,W,D)
+        blurred = self._blur3d(cavity)
+        # Exclude interior → weight focused on wall region only
+        wall = blurred.squeeze(1) * (1.0 - cavity.squeeze(1))
+        return 1.0 + self.w0 * wall
+
+
+class nnUNetTrainerScarCavityWall(nnUNetTrainer):
+    """nnUNet with cavity-wall spatial weighting for scar segmentation.
+
+    Replaces the scar-centric Gaussian weight of ScarGaussian with an
+    anatomically motivated cavity-wall distance weight.  Requires a
+    multi-class dataset with both cavity and scar labels (521, 531, 600).
+
+    Usage::
+
+        export nnUNet_extTrainer="$PWD/models"
+        nnUNetv2_train 521 3d_fullres 0 -tr nnUNetTrainerScarCavityWall
+    """
+
+    def __init__(
+        self,
+        plans: dict,
+        configuration: str,
+        fold: int,
+        dataset_json: dict,
+        device: torch.device = torch.device("cuda"),
+    ):
+        self._w0 = 5.0
+        self._sigma_mm = 2.0
+        labels = dataset_json.get("labels", {})
+        self._scar_cls = 1
+        for name, idx in labels.items():
+            if "scar" in name.lower():
+                self._scar_cls = int(idx)
+                break
+        self._cavity_cls = 1  # cavity is always class 1 in our datasets
+        super().__init__(plans, configuration, fold, dataset_json, device=device)
+
+    def _build_loss(self):
+        loss = _ScarCavityWallLoss(
+            scar_class=self._scar_cls,
+            cavity_class=self._cavity_cls,
+            w0=self._w0,
+            sigma_mm=self._sigma_mm,
+            batch_dice=self.configuration_manager.batch_dice,
+            ignore_label=self.label_manager.ignore_label,
+        )
+        if self._do_i_compile():
+            loss.dice = torch.compile(loss.dice)
+        if self.enable_deep_supervision:
+            deep_supervision_scales = self._get_deep_supervision_scales()
+            weights = np.array([1 / (2**i) for i in range(len(deep_supervision_scales))])
+            if self.is_ddp and not self._do_i_compile():
+                weights[-1] = 1e-6
+            else:
+                weights[-1] = 0
+            weights = weights / weights.sum()
+            loss = DeepSupervisionWrapper(loss, weights)
+        return loss
+
+
+# ---------------------------------------------------------------------------
 # CT Boundary-aware Trainer
 # ---------------------------------------------------------------------------
 
