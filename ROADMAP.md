@@ -924,9 +924,10 @@ done
 |---|------|-------------|--------|
 | D2 | Dataset 600 | nnUNet on 2-class full volume (backup) | ⏳ |
 | D3 | Custom nnUNet loss | `nnUNetTrainerScarGaussian` — test on 521 | ✅ Done — sub 10 G-DSC 0.4791 (+0.0048) |
-| E1 | **ResEnc L backbone** | `nnUNetPlannerResEncL` + ScarGaussian on Dataset 521 | 🔄 Training (AutoDL RTX 5090) |
-| E2 | **Cavity-wall spatial loss** | `nnUNetTrainerScarCavityWall` on Dataset 521 — cavity blur weight instead of scar blur | 🔄 Training (AutoDL RTX 5090) |
-| E3 | **ResEnc L + CavityWall** | Combined: ResEnc L plans + CavityWall trainer | 🔄 Training (AutoDL RTX 5090) |
+| E1 | **ResEnc M backbone** | `nnUNetPlannerResEncM` + ScarGaussian on Dataset 521 — residual encoder for architecture gain | ⏳ pending |
+| E2 | **Cavity-wall spatial loss** | `nnUNetTrainerScarCavityWall` on Dataset 521 — cavity blur weight instead of scar blur | ⏳ pending |
+| E3 | **ResEnc M + CavityWall** | Combined: ResEnc M plans + CavityWall trainer | ⏳ pending |
+| E4 | **ResEnc L (if M shows gain)** | ResEnc L + best trainer from E1/E2/E3 — M/L/XL share same architecture, only VRAM budget scales | ⏳ depends on E1/E3 |
 | B1 | VNet + nnUNet recipe | Train VNet on Dataset 501, SGD+polyLR 1000ep | ⏳ |
 | B2 | 4-stage nnUNet | PlainConvUNet reduced to 4 stages | ⏳ |
 
