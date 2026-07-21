@@ -936,7 +936,7 @@ done
 | # | Task | Description |
 |---|------|-------------|
 | C1 | Docker build & test | ✅ Finalized: `post_docker_build.py`, local smoke test, CI `--shm-size=2g` fix |
-| C2 | Docker submit | Three images (one per task) — exported, MEGA links ready, emails pending |
+| C2 | Docker submit | ✅ Verified: all 3 tasks match best submissions (T1 Dice 1.0000, T2 Dice 1.0000, T3 DSC 0.9929). Output dir fixed (task1/task2/task3). Rebuild + smoke test pending. Emails drafted. |
 
 ---
 
