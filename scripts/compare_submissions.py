@@ -23,6 +23,7 @@ import numpy as np
 TASK_DIR = {
     1: "LA scar quantification",
     2: "LA cavity segmentation",
+    3: "LA multi-structure segmentation",
 }
 
 
@@ -48,6 +49,18 @@ def _dice(a: np.ndarray, b: np.ndarray) -> float:
     return float(2 * inter / denom) if denom > 0 else 0.0
 
 
+def _mean_dsc(a: np.ndarray, b: np.ndarray) -> float:
+    """Mean DSC across all foreground classes (for multi-class tasks)."""
+    classes = sorted(set(np.unique(a).tolist()) | set(np.unique(b).tolist()) - {0})
+    if not classes:
+        return 0.0
+    dscs = []
+    for c in classes:
+        a_c, b_c = (a == c).astype(np.uint8), (b == c).astype(np.uint8)
+        dscs.append(_dice(a_c, b_c))
+    return float(np.mean(dscs))
+
+
 def _centroid(mask: np.ndarray) -> Tuple[float, float, float]:
     fg = np.argwhere(mask > 0)
     if len(fg) == 0:
@@ -56,10 +69,10 @@ def _centroid(mask: np.ndarray) -> Tuple[float, float, float]:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Compare Task 1/2 predictions across submission zips")
+    parser = argparse.ArgumentParser(description="Compare Task 1/2/3 predictions across submission zips")
     parser.add_argument("zips", nargs="+", type=str, help="Submission zip files (2 or more)")
     parser.add_argument("--labels", nargs="*", default=None, help="Short labels for each zip (default: stem of filename)")
-    parser.add_argument("--task", type=int, choices=[1, 2], default=1, help="Task number (1=scar, 2=cavity)")
+    parser.add_argument("--task", type=int, choices=[1, 2, 3], default=1, help="Task number (1=scar, 2=cavity, 3=CT)")
     parser.add_argument("--output", type=str, default=None, help="Save comparison table to file")
     args = parser.parse_args()
 
@@ -120,7 +133,7 @@ def main():
     for rec in common_cases:
         masks = [p[rec] for p in all_preds]
         shape = masks[0].shape
-        counts = [int(m.sum()) for m in masks]
+        counts = [int(m.sum()) if is_binary else int((m > 0).sum()) for m in masks]
 
         row = f"{rec:<8} {str(shape):<20}"
         for c in counts:
@@ -135,7 +148,7 @@ def main():
             all_counts[i].append(counts[i])
         for i in range(n):
             for j in range(i + 1, n):
-                d = _dice(masks[i], masks[j])
+                d = _dice(masks[i], masks[j]) if is_binary else _mean_dsc(masks[i], masks[j])
                 pair_dice_sums[(i, j)] = pair_dice_sums.get((i, j), 0.0) + d
                 pair_dice_counts[(i, j)] = pair_dice_counts.get((i, j), 0) + 1
 
@@ -148,7 +161,7 @@ def main():
 
     # ── Pairwise Dice matrix ─────────────────────────────────────────────
     lines.append("")
-    lines.append("Pairwise mean Dice:")
+    lines.append("Pairwise mean Dice:" if is_binary else "Pairwise mean DSC:")
     header2 = f"{'':>12}"
     for lbl in all_labels:
         header2 += f" {lbl:>10}"
