@@ -452,8 +452,32 @@ nnUNet PlainConvUNet (6-stage, 30.6M) trained on Task 1 (scar, Dataset 501,
 | 502 | 521 | ✅ | — | none | 0.6333 | 0.9998 | 0.6517 | default[^nnunet-loss] |
 | 512 | 511 | — | ✅ | none | 0.5976 | 0.9998 | 0.5788 | default[^nnunet-loss] |
 | 502 | 521 | ✅ | — | none | **0.6631** | 0.9998 | 0.6765 | ScarGaussian |
+| 502 | 521 | ✅ | — | none | 0.6629 | 0.9998 | **0.6837** | ScarCavityWall |
+| 502 | 521 | ✅ | — | none | **0.6682** | **0.9999** | 0.6779 | ScarGaussian + ResEnc M |
 
 [^nnunet-loss]: nnUNet's default ``DC_and_CE_loss`` (Dice + Cross-Entropy).
+
+**Backbone & Loss Ablation (2026-07-24) — training-set, no TTA, native pipeline:**
+
+| Backbone | Loss | G-DSC | ACC | SEN | Δ vs baseline |
+|----------|------|-------|-----|-----|:---:|
+| PlainConvUNet | ScarGaussian | 0.6631 | 0.9998 | 0.6765 | — (baseline) |
+| PlainConvUNet | ScarCavityWall | 0.6629 | 0.9998 | **0.6837** | −0.0002 |
+| **ResEnc M** | ScarGaussian | **0.6682** | **0.9999** | 0.6779 | **+0.0051** |
+
+**Pipeline comparison (native vs hybrid, no TTA):**
+
+| Backbone | Loss | Native | Hybrid | Δ |
+|----------|------|:---:|:---:|:---:|
+| PlainConvUNet | ScarGaussian | 0.6631 | — | — |
+| PlainConvUNet | ScarCavityWall | 0.6629 | 0.6386 | −0.0243 |
+| ResEnc M | ScarGaussian | **0.6682** | 0.6422 | −0.0260 |
+
+Key findings:
+- **ResEnc M confirms residual encoder architecture gain** (+0.0051 G-DSC over PlainConvUNet).
+- **CavityWall flat vs. ScarGaussian** — higher SEN (+0.0072) but G-DSC unchanged; recall gains offset by precision losses.
+- **Hybrid pipeline harmful for both E1 and E2** (−0.024 to −0.026 vs native).  Double interpolation (native→canonical→nnUNet internal) degrades predictions when training spacing = test spacing.
+- E3 (ResEnc M + CavityWall) not yet trained — orthogonal gains (architecture + higher SEN) could compound.
 
 nnUNet (502+521, dilation=none) improves G-DSC by **+212 %** over VNet best on the same training data.
 
@@ -779,6 +803,7 @@ Results tracked in ``submissions`` (YAML log).
 | 8 | 2026-07-10 01:53 | 0.4743 | 0.7313 | 0.4627 | nnUNet 502+521, TTA on, dilation=none[^canonical] |
 | 9 | 2026-07-14 22:02 | 0.4411 | 0.6944 | 0.3889 | nnUNet 502+521, TTA on, dilation=none[^native] |
 | 10 | 2026-07-16 22:02 | **0.4791** | **0.736** | **0.4722** | nnUNet 502+521, ScarGaussian, TTA on, dilation=none[^hybrid] |
+| 11 | 2026-07-23 23:54 | 0.4767 | 0.7361 | 0.4722 | nnUNet 502+521, ScarCavityWall, TTA on, dilation=none[^hybrid] |
 
 ### Task 2 (LA cavity segmentation) — DSC / HD (mm)
 
@@ -924,10 +949,10 @@ done
 |---|------|-------------|--------|
 | D2 | Dataset 600 | nnUNet on 2-class full volume (backup) | ⏳ |
 | D3 | Custom nnUNet loss | `nnUNetTrainerScarGaussian` — test on 521 | ✅ Done — sub 10 G-DSC 0.4791 (+0.0048) |
-| E1 | **ResEnc M backbone** | `nnUNetPlannerResEncM` + ScarGaussian on Dataset 521 — residual encoder for architecture gain | ⏳ pending |
-| E2 | **Cavity-wall spatial loss** | `nnUNetTrainerScarCavityWall` on Dataset 521 — cavity blur weight instead of scar blur | ⏳ pending |
+| E1 | **ResEnc M backbone** | `nnUNetPlannerResEncM` + ScarGaussian on Dataset 521 — residual encoder for architecture gain | ✅ Done — G-DSC 0.6682 (+0.0051 vs PlainConvUNet baseline); native > hybrid (−0.026) |
+| E2 | **Cavity-wall spatial loss** | `nnUNetTrainerScarCavityWall` on Dataset 521 — cavity blur weight instead of scar blur | ✅ Done — Val leaderboard G-DSC 0.4767 (−0.0024 vs ScarGaussian 0.4791), ACC 0.7361, SEN 0.4722. CavityWall does not improve over ScarGaussian. |
 | E3 | **ResEnc M + CavityWall** | Combined: ResEnc M plans + CavityWall trainer | ⏳ pending |
-| E4 | **ResEnc L (if M shows gain)** | ResEnc L + best trainer from E1/E2/E3 — M/L/XL share same architecture, only VRAM budget scales | ⏳ depends on E1/E3 |
+| E4 | **ResEnc L (M confirmed gain)** | ResEnc L + ScarGaussian on Dataset 521 — scale up now that M proves +0.0051 G-DSC | 🔴 2nd Docker candidate |
 | B1 | VNet + nnUNet recipe | Train VNet on Dataset 501, SGD+polyLR 1000ep | ⏳ |
 | B2 | 4-stage nnUNet | PlainConvUNet reduced to 4 stages | ⏳ |
 
