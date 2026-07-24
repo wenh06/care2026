@@ -29,6 +29,8 @@ TRAINER_SUFFIX = {
     "nnUNetTrainer__nnUNetPlans__3d_fullres": "",
     "nnUNetTrainerCTBoundary__nnUNetPlans__3d_fullres": "b",
     "nnUNetTrainerScarGaussian__nnUNetPlans__3d_fullres": "w",
+    "nnUNetTrainerScarGaussian__nnUNetResEncUNetMPlans__3d_fullres": "rm",
+    "nnUNetTrainerScarCavityWall__nnUNetPlans__3d_fullres": "cw",
 }
 
 # Files at the dataset-directory level to include for every model
