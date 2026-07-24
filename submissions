@@ -86,6 +86,33 @@ Task 1 (LA scar quantification):
     train: 1000ep, no CLAHE
     infer: tta=on, dilation=none
     pipeline: hybrid (native Stage 1 + canonical Stage 2)
+  submission 11:
+    created_time: "2026-07-23 23:54:50"
+    G-DSC: 0.4767
+    ACC: 0.7361
+    SEN: 0.4722
+    model: nnUNet 502+521 (5-fold ensemble, multi-class), ScarCavityWall loss
+    train: 1000ep, no CLAHE
+    infer: tta=on, dilation=none
+    pipeline: hybrid (native Stage 1 + canonical Stage 2)
+  submission 12:
+    created_time: "2026-07-24"  # pending
+    G-DSC: TBD
+    ACC: TBD
+    SEN: TBD
+    model: nnUNet 502+521 (5-fold ensemble, multi-class), ScarGaussian loss + ResEnc M
+    train: 1000ep, no CLAHE
+    infer: tta=on, dilation=none
+    pipeline: native (spacing from NIfTI header, both stages native-res)
+  submission 13:
+    created_time: "2026-07-25"  # pending
+    G-DSC: TBD
+    ACC: TBD
+    SEN: TBD
+    model: nnUNet 502+521 (5-fold ensemble, multi-class), ScarGaussian loss + ResEnc M
+    train: 1000ep, no CLAHE
+    infer: tta=on, dilation=none
+    pipeline: hybrid (native Stage 1 + canonical Stage 2)
 
 Task 2 (LA cavity segmentation):
   submission 1:
