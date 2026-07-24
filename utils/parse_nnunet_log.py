@@ -9,8 +9,10 @@ Usage::
     print(df.head())
 """
 
+import argparse
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -124,3 +126,112 @@ def parse_nnunet_log(log_path: str, class_names: Optional[List[str]] = None) -> 
             df = df.rename(columns=renames)
 
     return df
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def _short_name(trainer_name: str) -> str:
+    """Abbreviate trainer name for display."""
+    return (
+        trainer_name.replace("nnUNetTrainer", "")
+        .replace("__nnUNetPlans__3d_fullres", "")
+        .replace("__nnUNetResEncUNetMPlans__3d_fullres", " (ResEncM)")
+        .strip("_")
+        or "default"
+    )
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Parse nnUNet training logs into a CSV + summary table")
+    parser.add_argument("--log-dir", required=True, help="Root directory of extracted training logs")
+    parser.add_argument("--output", default=None, help="Save merged epoch-level DataFrame as CSV")
+    parser.add_argument("--summary", default=None, help="Save per-fold best-epoch summary as CSV")
+    args = parser.parse_args()
+
+    log_dir = Path(args.log_dir)
+    if not log_dir.is_dir():
+        print(f"ERROR: {log_dir} is not a directory", file=sys.stderr)
+        sys.exit(1)
+
+    all_dfs: list[pd.DataFrame] = []
+    summaries: list[dict] = []
+    total_folds = 0
+
+    for txt in sorted(log_dir.rglob("training_log_*.txt")):
+        rel = txt.relative_to(log_dir)
+        parts = rel.parts
+        ds_name = parts[0]
+        trainer_name = parts[1]
+        fold = parts[2].replace("fold_", "")
+
+        df = parse_nnunet_log(str(txt))
+        if df.empty:
+            continue
+
+        df["dataset"] = ds_name
+        df["trainer"] = trainer_name
+        df["fold"] = int(fold)
+        all_dfs.append(df)
+        total_folds += 1
+
+        best = df.loc[df["mean_dice"].idxmax()]
+        summaries.append(
+            {
+                "dataset": ds_name,
+                "trainer": trainer_name,
+                "fold": int(fold),
+                "best_epoch": int(best["epoch"]),
+                "best_ema_dice": best["mean_dice"],
+                "train_loss": best["train_loss"],
+                "val_loss": best["val_loss"],
+                "total_epochs": int(df["epoch"].max()),
+            }
+        )
+
+    if not all_dfs:
+        print("No training logs found.")
+        sys.exit(0)
+
+    merged = pd.concat(all_dfs, ignore_index=True)
+
+    # ── Save CSV ───────────────────────────────────────────────────────
+    if args.output:
+        out_path = Path(args.output)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        merged.to_csv(out_path, index=False)
+        print(f"Merged epoch-level data ({len(merged)} rows) saved to {out_path}")
+
+    if args.summary:
+        sum_df = pd.DataFrame(summaries).sort_values(["dataset", "trainer", "fold"])
+        out_path = Path(args.summary)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        sum_df.to_csv(out_path, index=False)
+        print(f"Per-fold summary ({len(sum_df)} folds) saved to {out_path}")
+
+    # ── Print summary table ────────────────────────────────────────────
+    print()
+    print("=" * 95)
+    print(f"{'Dataset/Trainer':<60} {'Fold':>4}  {'BestEMA':>7}  {'@Ep':>5}  {'Ep':>5}")
+    print("-" * 95)
+
+    prev_ds = ""
+    for s in summaries:
+        ds = s["dataset"].replace("Dataset", "").split("_")[0]
+        if ds != prev_ds:
+            if prev_ds:
+                print()
+            prev_ds = ds
+        short = f"{s['dataset']}/{_short_name(s['trainer'])}"
+        if len(short) > 59:
+            short = short[:56] + "..."
+        print(f"{short:<60}  {s['fold']:>4}  {s['best_ema_dice']:>7.4f}  {s['best_epoch']:>5}  {s['total_epochs']:>5}")
+
+    print("-" * 95)
+    print(f"{total_folds} fold(s) total\n")
+
+
+if __name__ == "__main__":
+    main()
