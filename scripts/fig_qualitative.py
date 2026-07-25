@@ -55,34 +55,36 @@ def _normalize_image(img: np.ndarray, p_low: float = 1, p_high: float = 99) -> n
     return np.clip((img - vmin) / (vmax - vmin + 1e-8), 0, 1)
 
 
-def _plot_case(ax_row, img_slice: np.ndarray, scar_gt: np.ndarray, scar_pred: np.ndarray, slice_idx: int):
+def _draw_mask(ax, mask, color, alpha=0.25):
+    """Draw a binary mask as a filled contour overlay (viz.py style)."""
+    if mask.max() == 0:
+        return
+    ax.contourf(mask, levels=[0.5, 1], colors=[color], alpha=alpha, antialiased=True)
+
+
+def _plot_case(ax_row, img_slice: np.ndarray, scar_gt: np.ndarray, scar_pred: np.ndarray):
     """Plot one case row: [Image+GT, Image+Pred, Diff map]."""
-    # --- Column 1: Image + GT outline ---
+    # --- Column 1: Image + GT ---
     ax = ax_row[0]
-    ax.imshow(img_slice, cmap="gray", vmin=0, vmax=1)
-    gt_mask = np.ma.masked_where(scar_gt == 0, scar_gt)
-    ax.imshow(gt_mask, cmap="Greens", alpha=0.7, vmin=0, vmax=1)
+    ax.imshow(img_slice, cmap="gray", origin="lower")
+    _draw_mask(ax, scar_gt, "#00FF00")
     ax.axis("off")
 
-    # --- Column 2: Image + Pred outline ---
+    # --- Column 2: Image + Pred ---
     ax = ax_row[1]
-    ax.imshow(img_slice, cmap="gray", vmin=0, vmax=1)
-    pred_mask = np.ma.masked_where(scar_pred == 0, scar_pred)
-    ax.imshow(pred_mask, cmap="Reds", alpha=0.7, vmin=0, vmax=1)
+    ax.imshow(img_slice, cmap="gray", origin="lower")
+    _draw_mask(ax, scar_pred, "#FF4444")
     ax.axis("off")
 
-    # --- Column 3: Difference map ---
+    # --- Column 3: Difference map (TP / FP / FN) ---
     ax = ax_row[2]
-    diff = np.zeros((*scar_gt.shape, 3), dtype=np.float32)
+    ax.imshow(img_slice, cmap="gray", origin="lower")
     tp = (scar_pred > 0) & (scar_gt > 0)
     fp = (scar_pred > 0) & (scar_gt == 0)
     fn = (scar_pred == 0) & (scar_gt > 0)
-    diff[tp] = [0.2, 0.8, 0.2]  # green: correct
-    diff[fp] = [0.9, 0.2, 0.2]  # red: FP
-    diff[fn] = [0.2, 0.4, 0.9]  # blue: FN
-    diff_bg = img_slice[..., None] * 0.3
-    diff_out = diff * 0.7 + diff_bg * 0.7
-    ax.imshow(diff_out)
+    _draw_mask(ax, tp.astype(np.uint8), "#00FF00", alpha=0.30)  # green: correct
+    _draw_mask(ax, fp.astype(np.uint8), "#FF4444", alpha=0.30)  # red: FP
+    _draw_mask(ax, fn.astype(np.uint8), "#4488FF", alpha=0.30)  # blue: FN
     ax.axis("off")
 
 
@@ -167,7 +169,7 @@ def main():
 
         dice, _, _ = _binary_metrics(pred, gt)
         img = nib.load(str(img_path)).get_fdata().astype(np.float32)
-        best_z = int(np.argmax(gt.sum(axis=(1, 2))))
+        best_z = int(np.argmax(gt.sum(axis=(0, 1))))
         per_case.append(
             {
                 "name": rec_dir.name,
@@ -196,7 +198,12 @@ def main():
 
     # Build figure: rows = cases, cols = 3 (Image+GT, Image+Pred, Diff)
     n_cases = len(selected)
-    fig, axes = plt.subplots(n_cases, 3, figsize=(6.5, 2.2 * n_cases))
+    # Determine panel aspect ratio from first selected case's slice shape
+    h, w = selected[0]["gt"][..., selected[0]["best_z"]].shape
+    panel_aspect = h / w if w > 0 else 1.0
+    panel_w = 2.5  # inches per panel
+    panel_h = panel_w * panel_aspect
+    fig, axes = plt.subplots(n_cases, 3, figsize=(3 * panel_w, n_cases * panel_h))
 
     if n_cases == 1:
         axes = axes[np.newaxis, :]
@@ -208,13 +215,7 @@ def main():
     for i, case in enumerate(selected):
         img_norm = _normalize_image(case["img"])
         z = case["best_z"]
-        _plot_case(
-            axes[i],
-            img_norm[z],
-            case["gt"][z],
-            case["pred"][z],
-            z,
-        )
+        _plot_case(axes[i], img_norm[..., z], case["gt"][..., z], case["pred"][..., z])
         # Row label
         axes[i, 0].set_ylabel(
             f"{labels[i]}\n({case['name']}, G-DSC={case['dice']:.3f})",
