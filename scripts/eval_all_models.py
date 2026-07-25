@@ -142,6 +142,12 @@ def main():
         default="auto",
         help="Which checkpoint to load (default: auto-detect best→final→latest).",
     )
+    parser.add_argument(
+        "--per-case-output",
+        type=str,
+        default=None,
+        help="Write per-case metrics to CSV (Task 1 only, {task} replaced with label).",
+    )
     args = parser.parse_args()
 
     # Dedup
@@ -204,6 +210,7 @@ def main():
             use_mclahe = s1_mc or s2_mc
 
             dice_vals, acc_vals, sen_vals = [], [], []
+            per_case = []
             for rec_dir in tqdm(records, desc=f"  T1 [{label}]", unit="case"):
                 img_path = rec_dir / "enhanced.nii.gz"
                 gt_path = rec_dir / "scarSegImgM.nii.gz"
@@ -218,11 +225,24 @@ def main():
                 dice_vals.append(d)
                 acc_vals.append(a)
                 sen_vals.append(s)
+                per_case.append((rec_dir.name, d, a, s, gt.sum()))
             task1_results[label] = {
                 "G-DSC": np.mean(dice_vals),
                 "ACC": np.mean(acc_vals),
                 "SEN": np.mean(sen_vals),
             }
+            if args.per_case_output:
+                import csv
+
+                safe_label = label.replace(" ", "_").replace("=", "-").replace("+", "p")
+                out_path = Path(args.per_case_output.replace("{task}", safe_label))
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(out_path, "w", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["case", "G-DSC", "ACC", "SEN", "scar_voxels"])
+                    for name, d, a, s, v in per_case:
+                        writer.writerow([name, f"{d:.4f}", f"{a:.4f}", f"{s:.4f}", v])
+                print(f"  Per-case saved to {out_path}")
         all_results[f"Task 1 — LA Scar ({len(records)} cases)"] = task1_results
 
     # ==================================================================
