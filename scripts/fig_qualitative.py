@@ -79,36 +79,42 @@ def _draw_mask(ax, mask, color, alpha=0.25):
 
 
 def _plot_case(ax_row, img_slice: np.ndarray, scar_gt: np.ndarray, scar_pred: np.ndarray):
-    """Plot one case row: [Image+GT, Image+Pred, Diff on image, Diff only]."""
-    # --- Column 1: Image + GT ---
-    ax = ax_row[0]
-    ax.imshow(img_slice, cmap="gray", origin="lower")
-    _draw_mask(ax, scar_gt, "#00FF00")
-    ax.axis("off")
-
-    # --- Column 2: Image + Pred ---
-    ax = ax_row[1]
-    ax.imshow(img_slice, cmap="gray", origin="lower")
-    _draw_mask(ax, scar_pred, "#FF4444")
-    ax.axis("off")
-
-    # --- Column 3: Difference map with image background ---
-    ax = ax_row[2]
-    ax.imshow(img_slice, cmap="gray", origin="lower")
+    """Plot one case row: [Image, Image+GT, Image+Pred, Diff on image, Diff only]."""
     tp = (scar_pred > 0) & (scar_gt > 0)
     fp = (scar_pred > 0) & (scar_gt == 0)
     fn = (scar_pred == 0) & (scar_gt > 0)
-    _draw_mask(ax, tp.astype(np.uint8), "#00FF00", alpha=0.30)
-    _draw_mask(ax, fp.astype(np.uint8), "#FF4444", alpha=0.30)
-    _draw_mask(ax, fn.astype(np.uint8), "#4488FF", alpha=0.30)
+
+    # --- Column 1: Image only ---
+    ax = ax_row[0]
+    ax.imshow(img_slice, cmap="gray", origin="lower")
     ax.axis("off")
 
-    # --- Column 4: Difference map only (no background) ---
+    # --- Column 2: Image + GT ---
+    ax = ax_row[1]
+    ax.imshow(img_slice, cmap="gray", origin="lower")
+    _draw_mask(ax, scar_gt, "#00FF00", alpha=0.60)
+    ax.axis("off")
+
+    # --- Column 3: Image + Pred ---
+    ax = ax_row[2]
+    ax.imshow(img_slice, cmap="gray", origin="lower")
+    _draw_mask(ax, scar_pred, "#FF4444", alpha=0.60)
+    ax.axis("off")
+
+    # --- Column 4: Difference map with image background ---
     ax = ax_row[3]
+    ax.imshow(img_slice, cmap="gray", origin="lower")
+    _draw_mask(ax, tp.astype(np.uint8), "#00CC00", alpha=0.60)
+    _draw_mask(ax, fp.astype(np.uint8), "#CC00CC", alpha=0.60)
+    _draw_mask(ax, fn.astype(np.uint8), "#FF8800", alpha=0.60)
+    ax.axis("off")
+
+    # --- Column 5: Difference map only (no background) ---
+    ax = ax_row[4]
     diff = np.zeros((*scar_gt.shape, 3), dtype=np.float32)
-    diff[tp] = [0.0, 0.8, 0.0]
-    diff[fp] = [0.9, 0.0, 0.0]
-    diff[fn] = [0.0, 0.4, 0.9]
+    diff[tp] = [0.0, 0.7, 0.0]
+    diff[fp] = [0.7, 0.0, 0.7]
+    diff[fn] = [1.0, 0.55, 0.0]
     ax.imshow(diff, origin="lower")
     ax.axis("off")
 
@@ -235,7 +241,7 @@ def main():
     panel_aspect = max_h / max_w if max_w > 0 else 1.0
     panel_w = 2.2  # inches per panel
     panel_h = panel_w * panel_aspect
-    fig, axes = plt.subplots(n_cases, 4, figsize=(4 * panel_w, n_cases * panel_h))
+    fig, axes = plt.subplots(n_cases, 5, figsize=(5 * panel_w, n_cases * panel_h))
 
     if n_cases == 1:
         axes = axes[np.newaxis, :]
