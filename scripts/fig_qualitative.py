@@ -49,6 +49,22 @@ def _binary_metrics(pred: np.ndarray, gt: np.ndarray, eps: float = 1e-7) -> Tupl
     return float(dice), float(inter), float(denom)
 
 
+def _crop_roi(img_slice, gt_slice, pred_slice, margin=20):
+    """Crop to the bounding box of GT and predicted scar, plus margin."""
+    roi = (gt_slice > 0) | (pred_slice > 0)
+    if roi.sum() == 0:
+        return img_slice, gt_slice, pred_slice
+    rows = np.any(roi, axis=1)
+    cols = np.any(roi, axis=0)
+    rmin, rmax = np.where(rows)[0][[0, -1]]
+    cmin, cmax = np.where(cols)[0][[0, -1]]
+    rmin = max(0, rmin - margin)
+    rmax = min(img_slice.shape[0], rmax + margin + 1)
+    cmin = max(0, cmin - margin)
+    cmax = min(img_slice.shape[1], cmax + margin + 1)
+    return img_slice[rmin:rmax, cmin:cmax], gt_slice[rmin:rmax, cmin:cmax], pred_slice[rmin:rmax, cmin:cmax]
+
+
 def _normalize_image(img: np.ndarray, p_low: float = 1, p_high: float = 99) -> np.ndarray:
     """Percentile-based normalization for display."""
     vmin, vmax = np.percentile(img, [p_low, p_high])
@@ -198,10 +214,17 @@ def main():
 
     # Build figure: rows = cases, cols = 3 (Image+GT, Image+Pred, Diff)
     n_cases = len(selected)
-    # Determine panel aspect ratio from first selected case's slice shape
-    h, w = selected[0]["gt"][..., selected[0]["best_z"]].shape
-    panel_aspect = h / w if w > 0 else 1.0
-    panel_w = 2.5  # inches per panel
+    # Pre-crop to determine panel dimensions
+    cropped = []
+    for case in selected:
+        img_norm = _normalize_image(case["img"])
+        z = case["best_z"]
+        cropped.append(_crop_roi(img_norm[..., z], case["gt"][..., z], case["pred"][..., z]))
+
+    max_h = max(c[0].shape[0] for c in cropped)
+    max_w = max(c[0].shape[1] for c in cropped)
+    panel_aspect = max_h / max_w if max_w > 0 else 1.0
+    panel_w = 2.2  # inches per panel
     panel_h = panel_w * panel_aspect
     fig, axes = plt.subplots(n_cases, 3, figsize=(3 * panel_w, n_cases * panel_h))
 
@@ -212,10 +235,8 @@ def main():
     for j, title in enumerate(col_titles):
         axes[0, j].set_title(title, fontsize=10, fontweight="bold")
 
-    for i, case in enumerate(selected):
-        img_norm = _normalize_image(case["img"])
-        z = case["best_z"]
-        _plot_case(axes[i], img_norm[..., z], case["gt"][..., z], case["pred"][..., z])
+    for i, (case, (img_s, gt_s, pred_s)) in enumerate(zip(selected, cropped)):
+        _plot_case(axes[i], img_s, gt_s, pred_s)
         # Row label
         axes[i, 0].set_ylabel(
             f"{labels[i]}\n({case['name']}, G-DSC={case['dice']:.3f})",
