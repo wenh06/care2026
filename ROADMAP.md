@@ -550,6 +550,24 @@ pseudo-labels.
 scar recall — possibly from extra training data (LAScarQS 2022), a larger
 backbone (SwinUNETR / ResEnc L), or more sophisticated anatomical priors (SDM).
 
+### VNet 4-Stage Progression Experiments (2026-07-26)
+
+All on VNet (4-stage, 6.9M params, SGD, CLAHE).  Training-set 5-fold CV without TTA.
+
+| Configuration | Train G-DSC | Val G-DSC | Notes |
+|---------------|:---:|:---:|-------|
+| Baseline (1ch, DC+CE) | 0.3463 | 0.2189 | sub 2 config |
+| + Cavity SDM (2ch) | 0.3573 | 0.1882 | sub 3 config |
+| + 5mm cavity dilation | 0.3309 | — | post-processing only |
+
+Key: SDM improves train (+0.0110) but degrades val (−0.0307); hard dilation hurts both.
+
+### Multi-Class vs Binary Training (2026-07-26)
+
+Under DC+CE loss, 6-stage Plain U-Net, 5-fold CV:
+- 502+501 binary scar: 0.6317
+- 502+521 multi-class (cavity + scar): 0.6333 (+0.0016, +0.25%)
+
 Task 2 native-resolution pipeline (sub 7, DSC 0.8871) closes the gap to 1st
 place from 0.51 pp to 0.15 pp — the spacing fix clearly benefits Stage 1 on
 multi-center data.  Several teams clustered between 0.8835–0.8886.
