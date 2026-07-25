@@ -231,10 +231,6 @@ def main():
     if n_cases == 1:
         axes = axes[np.newaxis, :]
 
-    col_titles = ["Image + GT", "Image + Pred", "TP / FP / FN"]
-    for j, title in enumerate(col_titles):
-        axes[0, j].set_title(title, fontsize=10, fontweight="bold")
-
     for i, (case, (img_s, gt_s, pred_s)) in enumerate(zip(selected, cropped)):
         _plot_case(axes[i], img_s, gt_s, pred_s)
         # Row label
