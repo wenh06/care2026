@@ -94,6 +94,12 @@ def main():
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--output", type=str, default="figures/qualitative.pdf", help="Output figure path")
     parser.add_argument("--n-cases", type=int, default=3, help="Number of cases to show (default: 3)")
+    parser.add_argument(
+        "--per-case-csv",
+        type=str,
+        default=None,
+        help="Optional CSV with per-case G-DSC (avoids full inference; only selected cases are inferred).",
+    )
     args = parser.parse_args()
 
     db_dir = Path(args.db_dir)
@@ -101,22 +107,47 @@ def main():
     output_path.parent.mkdir(parents=True, exist_ok=True)
     device = args.device
 
+    task1_dir = db_dir / "LA scar quantification（MRI）" / "train_data"
+
+    # --- Determine which cases to infer ---
+    if args.per_case_csv:
+        # Read pre-computed G-DSC, select worst/median/best
+        import csv
+
+        rows = []
+        with open(args.per_case_csv, newline="") as f:
+            for row in csv.DictReader(f):
+                rows.append((row["case"], float(row["G-DSC"])))
+        rows.sort(key=lambda x: x[1])
+        n = len(rows)
+        selected_names = [rows[i][0] for i in [0, n // 2, n - 1]]
+        labels = ["Worst", "Median", "Best"]
+        print("Selected from CSV:")
+        for label, name in zip(labels, selected_names):
+            gdsc = [r[1] for r in rows if r[0] == name][0]
+            print(f"  {label}: {name} (G-DSC = {gdsc:.4f})")
+        target_names = set(selected_names)
+    else:
+        target_names = None  # infer all, then select
+
+    # --- Load models ---
     s1 = _load_model("mri_stage1", args.s1, device)
     s2 = _load_model("mri_stage2", args.s2, device)
     s1_mc = bool((getattr(s1, "config", {}) or {}).get("apply_mclahe", False))
     s2_mc = bool((getattr(s2, "config", {}) or {}).get("apply_mclahe", False))
     use_mclahe = s1_mc or s2_mc
 
-    # Run inference on all training cases and collect per-case metrics
-    task1_dir = db_dir / "LA scar quantification（MRI）" / "train_data"
+    # --- Run inference ---
     records = sorted(
         [d for d in task1_dir.iterdir() if d.is_dir() and d.name.startswith("train_")],
         key=lambda p: int(p.name.split("_")[1]),
     )
 
-    print(f"Running inference on {len(records)} training cases...")
+    print(f"Running inference on {len(records) if target_names is None else len(target_names)} training cases...")
     per_case: List[Dict] = []
     for rec_dir in records:
+        if target_names is not None and rec_dir.name not in target_names:
+            continue
         img_path = rec_dir / "enhanced.nii.gz"
         gt_path = rec_dir / "scarSegImgM.nii.gz"
         if not img_path.exists() or not gt_path.exists():
@@ -136,7 +167,6 @@ def main():
 
         dice, _, _ = _binary_metrics(pred, gt)
         img = nib.load(str(img_path)).get_fdata().astype(np.float32)
-        # Find representative slices (most scar)
         best_z = int(np.argmax(gt.sum(axis=(1, 2))))
         per_case.append(
             {
@@ -150,13 +180,16 @@ def main():
         )
         print(f"  {rec_dir.name}: G-DSC = {dice:.4f}")
 
-    # Sort by G-DSC and select representative cases: best, median, worst
+    # Sort by G-DSC and select
     per_case.sort(key=lambda x: x["dice"])
-    n = len(per_case)
-    selected_indices = [0, n // 2, n - 1]  # worst, median, best
-    selected = [per_case[i] for i in selected_indices]
-
-    labels = ["Worst", "Median", "Best"]
+    if target_names is None:
+        n = len(per_case)
+        indices = [0, n // 2, n - 1]
+        selected = [per_case[i] for i in indices]
+        labels = ["Worst", "Median", "Best"]
+    else:
+        selected = sorted(per_case, key=lambda x: x["dice"])
+        # labels already set from CSV selection
     print("\nSelected cases for figure:")
     for label, case in zip(labels, selected):
         print(f"  {label}: {case['name']} (G-DSC = {case['dice']:.4f})")
