@@ -24,7 +24,7 @@ matplotlib.use("Agg")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from models import CARE2026_MRI_nnUNet
+from pipeline import _load_model
 from predict import predict_mri_two_stage_hybrid
 
 plt.rcParams.update(
@@ -40,13 +40,6 @@ plt.rcParams.update(
 )
 
 
-def _get_trainer_dir(ds_id: int, results_root: Path) -> Path:
-    candidates = sorted(results_root.glob(f"Dataset{ds_id}_*/nnUNetTrainer__*"))
-    if not candidates:
-        raise FileNotFoundError(f"No trainer dir for Dataset {ds_id} in {results_root}")
-    return candidates[0]
-
-
 def _binary_metrics(pred: np.ndarray, gt: np.ndarray, eps: float = 1e-7) -> Tuple[float, float, float]:
     pred_b = pred.astype(bool)
     gt_b = gt.astype(bool)
@@ -54,19 +47,6 @@ def _binary_metrics(pred: np.ndarray, gt: np.ndarray, eps: float = 1e-7) -> Tupl
     denom = pred_b.sum() + gt_b.sum()
     dice = (2 * inter + eps) / (denom + eps) if denom > 0 else 1.0
     return float(dice), float(inter), float(denom)
-
-
-def _find_representative_slices(scar_gt: np.ndarray, n_slices: int = 3) -> List[int]:
-    """Find slices with most scar for visualization, spread across z-axis."""
-    scar_per_slice = scar_gt.sum(axis=(1, 2))
-    valid = np.where(scar_per_slice > 0)[0]
-    if len(valid) == 0:
-        return [scar_gt.shape[0] // 2]
-    if len(valid) <= n_slices:
-        return sorted(valid.tolist())
-    # Pick slices evenly across scar-containing region
-    indices = np.linspace(0, len(valid) - 1, n_slices, dtype=int)
-    return sorted(valid[i] for i in indices)
 
 
 def _normalize_image(img: np.ndarray, p_low: float = 1, p_high: float = 99) -> np.ndarray:
@@ -109,22 +89,23 @@ def _plot_case(ax_row, img_slice: np.ndarray, scar_gt: np.ndarray, scar_pred: np
 def main():
     parser = argparse.ArgumentParser(description="Generate qualitative comparison figure for the paper.")
     parser.add_argument("--db-dir", required=True, help="CARE2026 data root")
-    parser.add_argument("--nnunet-results", default="tmp/nnUNet_results", help="nnUNet results directory")
+    parser.add_argument("--s1", required=True, help="Phase 1 (cavity) model path")
+    parser.add_argument("--s2", required=True, help="Phase 2 (scar) model path")
+    parser.add_argument("--device", default="cuda")
     parser.add_argument("--output", type=str, default="figures/qualitative.pdf", help="Output figure path")
     parser.add_argument("--n-cases", type=int, default=3, help="Number of cases to show (default: 3)")
-    parser.add_argument("--n-slices", type=int, default=1, help="Slices per case (default: 1)")
     args = parser.parse_args()
 
     db_dir = Path(args.db_dir)
-    results_root = Path(args.nnunet_results)
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    device = args.device
 
-    # Load models (best config: Dataset 521 scar + Dataset 502 cavity)
-    s1_dir = _get_trainer_dir(502, results_root)
-    s2_dir = _get_trainer_dir(521, results_root)
-    s1 = CARE2026_MRI_nnUNet(train_config={"nnunet_model_dir": str(s1_dir)})
-    s2 = CARE2026_MRI_nnUNet(train_config={"nnunet_model_dir": str(s2_dir)})
+    s1 = _load_model("mri_stage1", args.s1, device)
+    s2 = _load_model("mri_stage2", args.s2, device)
+    s1_mc = bool((getattr(s1, "config", {}) or {}).get("apply_mclahe", False))
+    s2_mc = bool((getattr(s2, "config", {}) or {}).get("apply_mclahe", False))
+    use_mclahe = s1_mc or s2_mc
 
     # Run inference on all training cases and collect per-case metrics
     task1_dir = db_dir / "LA scar quantification（MRI）" / "train_data"
@@ -144,7 +125,7 @@ def main():
         if gt.sum() == 0:
             continue
 
-        out = predict_mri_two_stage_hybrid(img_path, s1, s2, use_tta=False, s2_threshold=0.5)
+        out = predict_mri_two_stage_hybrid(img_path, s1, s2, use_tta=False, apply_mclahe=use_mclahe, s2_threshold=0.5)
         pred = out.scar_mask
         if pred.shape != gt.shape:
             import torch
