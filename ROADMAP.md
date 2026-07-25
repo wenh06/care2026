@@ -834,6 +834,33 @@ Results tracked in ``submissions`` (YAML log).
 [^hybrid]: **Hybrid pipeline** (``predict_mri_two_stage_hybrid``): native Stage 1 + canonical Stage 2.  Produced sub 10 (G-DSC 0.4791) with ScarGaussian loss.
 
 ---
+## Test Phase Leaderboard (2026-07-25)
+
+Test set composition per [challenge page](care-webpages/CARE-Left Atrium.md):
+- Task 1: 24 LGE-MRIs from Center A
+- Task 2: 14 Center A + 20 Center B + 10 Center C (44 total)
+- Task 3: 130 CTs from Center D
+
+### Test-sub1 Results
+
+| Task | Metric | Value | Val Best | Δ | Notes |
+|------|--------|:---:|:---:|:---:|-------|
+| 1 (scar) | G-DSC | **0.4298** | 0.4791 | −0.0493 | 24 Center A cases |
+| | ACC | 0.7087 | 0.736 | −0.027 | |
+| | SEN | 0.4176 | 0.4722 | −0.0546 | |
+| 2 (cavity) | DSC | **0.8285** | 0.8871 | −0.0586 | 44 cases incl. Center B/C |
+| | HD | 20.27 | 17.59 | +2.68 | test_4 DSC=0.0 (complete failure) |
+| 3 (CT) | DSC | **0.9543** | 0.9563 | −0.0020 | 130 Center D cases |
+| | HD | 9.72 | 12.45 | −2.73 | |
+
+**Model**: nnUNet 502+521 (ScarGaussian, 5-fold, hybrid pipeline, TTA on) for Task 1; nnUNet 502 (5-fold, native pipeline, TTA on) for Task 2; nnUNet 500 (5-fold, TTA on) for Task 3.
+
+**Key observations**:
+- **Task 3 very stable** (Δ −0.0020 DSC): same-center test, nnUNet generalises well.
+- **Task 2 severe drop** (−5.86 pp DSC, HD +2.68 mm): 68% of test cases from unseen centers (B/C) with different scanners and spacings.  test_4 DSC=0.0 suggests extreme spacing/scanner failure.
+- **Task 1 moderate drop** (−4.93 pp G-DSC): all Center A but larger test set (24 vs 10 val) + Phase 1 errors propagate.  G-DSC range 0.239–0.561.
+
+---
 ## Architecture — Why nnUNet > Custom VNet
 
 nnUNet PlainConvUNet (6-stage, 30.6M params, deep supervision at every decoder level)
@@ -973,5 +1000,5 @@ done
   - **BN Test-Time Adaptation**: forward pass on test data to update BN running stats (no weight update).
 
 - **Task 3 label format**: challenge page says `cardiacSegImgMO.nii.gz` but training data uses `label_XXXX.nii.gz` — must handle both names in `data_reader.py` when validation/test data is released.
-- **G-DSC for Task 1**: evaluated alongside ACC and SEN which require binary (0/1) predictions.  Soft probability maps are NOT accepted — must submit uint8 binary mask.  G-DSC weight w_c = 1/V_c² gives scar class enormous influence (~40,000× vs background).
+- **G-DSC for Task 1**: evaluated alongside ACC and SEN which require binary (0/1) predictions.  Soft probability maps are NOT accepted — must submit uint8 binary mask.  G-DSC weight w_c = 1/V_c² gives the rare scar class orders of magnitude more influence than background.
 - **Prizes**: only Tasks 1 and 3 are prize-eligible; prioritise these two.

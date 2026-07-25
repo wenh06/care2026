@@ -102,6 +102,12 @@ def main():
         default="auto",
         help="Which checkpoint to load (default: auto-detect best→final→latest).",
     )
+    parser.add_argument(
+        "--per-case-output",
+        type=str,
+        default=None,
+        help="Write per-case metrics to CSV (one file per task, with {task} placeholder).",
+    )
     args = parser.parse_args()
 
     db_dir = Path(args.db_dir)
@@ -145,6 +151,7 @@ def main():
                 _tc["nnunet_checkpoint"] = nnunet_checkpoint
             s2 = CARE2026_MRI_nnUNet(train_config=_tc, apply_mclahe=use_mclahe)
             dice_vals, acc_vals, sen_vals = [], [], []
+            per_case = []  # list of (case_name, gdsc, acc, sen)
             for rec_dir in tqdm(records, desc=f"  T1 {label}", unit="case"):
                 img_path = rec_dir / "enhanced.nii.gz"
                 gt_path = rec_dir / "scarSegImgM.nii.gz"
@@ -159,11 +166,23 @@ def main():
                 dice_vals.append(d)
                 acc_vals.append(a)
                 sen_vals.append(s)
+                per_case.append((rec_dir.name, d, a, s, gt.sum()))
             task1_results[f"{label} ({desc})"] = {
                 "G-DSC": np.mean(dice_vals),
                 "ACC": np.mean(acc_vals),
                 "SEN": np.mean(sen_vals),
             }
+            if args.per_case_output:
+                import csv
+
+                out_path = Path(args.per_case_output.replace("{task}", f"task1_{label}"))
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(out_path, "w", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["case", "G-DSC", "ACC", "SEN", "scar_voxels"])
+                    for name, d, a, s, v in per_case:
+                        writer.writerow([name, f"{d:.4f}", f"{a:.4f}", f"{s:.4f}", v])
+                print(f"  Per-case saved to {out_path}")
         all_results[f"Task 1 — LA Scar ({len(records)} cases)"] = task1_results
 
     # ==================================================================
@@ -189,7 +208,7 @@ def main():
                 _tc["nnunet_checkpoint"] = nnunet_checkpoint
             model = CARE2026_MRI_nnUNet(train_config=_tc, apply_mclahe=use_mclahe)
             dice_vals = []
-            dice_vals = []
+            per_case_t2 = []
             for rec_dir in tqdm(all_cases, desc=f"  T2 {ds_id}", unit="case"):
                 img_path = rec_dir / "enhanced.nii.gz"
                 gt_path = rec_dir / "atriumSegImgMO.nii.gz"
@@ -210,7 +229,19 @@ def main():
                 pred = _resample_if_needed(pred, gt)
                 d, _, _ = _binary_metrics(pred, gt)
                 dice_vals.append(d)
+                per_case_t2.append((rec_dir.name, d, gt.sum()))
             task2_results[f"Dataset {ds_id} ({label})"] = {"DSC": np.mean(dice_vals)}
+            if args.per_case_output:
+                import csv as _csv_t2
+
+                out_path = Path(args.per_case_output.replace("{task}", f"task2_{ds_id}"))
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(out_path, "w", newline="") as f:
+                    writer = _csv_t2.writer(f)
+                    writer.writerow(["case", "DSC", "cavity_voxels"])
+                    for name, d, v in per_case_t2:
+                        writer.writerow([name, f"{d:.4f}", v])
+                print(f"  Per-case saved to {out_path}")
         all_results[f"Task 2 — LA Cavity ({len(all_cases)} cases)"] = task2_results
 
     # ==================================================================
