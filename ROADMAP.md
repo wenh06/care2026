@@ -550,6 +550,13 @@ pseudo-labels.
 scar recall — possibly from extra training data (LAScarQS 2022), a larger
 backbone (SwinUNETR / ResEnc L), or more sophisticated anatomical priors (SDM).
 
+**ResEnc M validation results (2026-07-24/25):** Sub12 (native pipeline) and Sub13
+(hybrid pipeline) both underperformed our best PlainConvUNet submission (sub10,
+G-DSC 0.4791).  ResEnc M achieves higher training-set G-DSC (0.6682 vs 0.6631)
+but generalizes poorly to validation (0.4736 hybrid, 0.4324 native).  This confirms
+the paper's finding that a properly configured Plain U-Net already lies near the
+performance frontier, with further architectural complexity bringing no benefit.
+
 ### VNet 4-Stage Progression Experiments (2026-07-26)
 
 All on VNet (4-stage, 6.9M params, SGD, CLAHE).  Training-set 5-fold CV without TTA.
@@ -822,6 +829,8 @@ Results tracked in ``submissions`` (YAML log).
 | 9 | 2026-07-14 22:02 | 0.4411 | 0.6944 | 0.3889 | nnUNet 502+521, TTA on, dilation=none[^native] |
 | 10 | 2026-07-16 22:02 | **0.4791** | **0.736** | **0.4722** | nnUNet 502+521, ScarGaussian, TTA on, dilation=none[^hybrid] |
 | 11 | 2026-07-23 23:54 | 0.4767 | 0.7361 | 0.4722 | nnUNet 502+521, ScarCavityWall, TTA on, dilation=none[^hybrid] |
+| 12 | 2026-07-24 13:36 | 0.4324 | 0.6886 | 0.3772 | nnUNet 502+521, ScarGaussian + ResEnc M, TTA on, dilation=none[^native] |
+| 13 | 2026-07-25 00:53 | 0.4736 | 0.7309 | 0.4620 | nnUNet 502+521, ScarGaussian + ResEnc M, TTA on, dilation=none[^hybrid] |
 
 ### Task 2 (LA cavity segmentation) — DSC / HD (mm)
 
@@ -994,10 +1003,10 @@ done
 |---|------|-------------|--------|
 | D2 | Dataset 600 | nnUNet on 2-class full volume (backup) | ⏳ |
 | D3 | Custom nnUNet loss | `nnUNetTrainerScarGaussian` — test on 521 | ✅ Done — sub 10 G-DSC 0.4791 (+0.0048) |
-| E1 | **ResEnc M backbone** | `nnUNetPlannerResEncM` + ScarGaussian on Dataset 521 — residual encoder for architecture gain | ✅ Done — G-DSC 0.6682 (+0.0051 vs PlainConvUNet baseline); native > hybrid (−0.026) |
+| E1 | **ResEnc M backbone** | `nnUNetPlannerResEncM` + ScarGaussian on Dataset 521 — residual encoder for architecture gain | ✅ Done — Training-set G-DSC 0.6682 (+0.0051 vs PlainConvUNet); Val: native 0.4324 (sub12), hybrid 0.4736 (sub13). ResEnc M **does not improve** over PlainConvUNet on validation (best Plain 0.4791 > ResEnc M 0.4736). |
 | E2 | **Cavity-wall spatial loss** | `nnUNetTrainerScarCavityWall` on Dataset 521 — cavity blur weight instead of scar blur | ✅ Done — Val leaderboard G-DSC 0.4767 (−0.0024 vs ScarGaussian 0.4791), ACC 0.7361, SEN 0.4722. CavityWall does not improve over ScarGaussian. |
-| E3 | **ResEnc M + CavityWall** | Combined: ResEnc M plans + CavityWall trainer | ⏳ pending |
-| E4 | **ResEnc L (M confirmed gain)** | ResEnc L + ScarGaussian on Dataset 521 — scale up now that M proves +0.0051 G-DSC | 🔴 2nd Docker candidate |
+| E3 | **ResEnc M + CavityWall** | Combined: ResEnc M plans + CavityWall trainer | ❌ Cancelled — ResEnc M alone does not improve validation; combining with CavityWall unlikely to help. |
+| E4 | **ResEnc L (M confirmed gain)** | ResEnc L + ScarGaussian on Dataset 521 — scale up now that M proves +0.0051 G-DSC | ❌ Cancelled — ResEnc M does not improve validation; scaling to L not justified. |
 | B1 | VNet + nnUNet recipe | Train VNet on Dataset 501, SGD+polyLR 1000ep | ⏳ |
 | B2 | 4-stage nnUNet | PlainConvUNet reduced to 4 stages | ⏳ |
 
