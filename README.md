@@ -76,16 +76,19 @@ Data are provided in NIfTI format:
 
 - [README.md](README.md): this file — project overview, task definitions, data layout, and module descriptions.
 - [ROADMAP.md](ROADMAP.md): development roadmap covering approach design, phased implementation plan, MBAS2024 insights, experiment matrix, and next steps.
-- [cfg.py](cfg.py): centralized configuration objects (`BaseCfg`, `MRI_Stage1_TrainCfg`, `MRI_Stage2_TrainCfg`, `CT_TrainCfg`, `CT_TrainCfgV2`, `CT_TrainCfg_nnUNet`, `ModelCfg`) via `torch_ecg.cfg.CFG`. Covers optimiser, scheduler, per-task augmentation presets, loss weights, semi-supervised mode (CPS/Mean Teacher), and architecture hyper-parameters.  ``CT_TrainCfg_nnUNet`` points to an nnUNet results directory for inference with nnUNet's native preprocessing pipeline.
+- [cfg.py](cfg.py): centralized configuration objects (`BaseCfg`, `ModelCfg`, `PredictCfg`, `MRI_Stage1_TrainCfg`, `MRI_Stage2_TrainCfg`, `CT_TrainCfg`, `CT_TrainCfgV2`, `CT_TrainCfg_nnUNet`, `CT_TrainCfg_MT_nnUNet`) via `torch_ecg.cfg.CFG`. Covers optimiser, scheduler, per-task augmentation presets, loss weights, semi-supervised mode (CPS/Mean Teacher), inference model paths, and architecture hyper-parameters.
 - [const.py](const.py): shared project-wide constants — MRI/CT spatial shapes and spacings, class maps, dataset size counts, cache directory paths, and a `REMOTE_MODELS` placeholder for cloud-hosted checkpoint URLs.
 - [data_reader.py](data_reader.py): NIfTI data reader classes (`CARE2026_MRI`, `CARE2026_CT`) built on `torch_ecg` — file listing, label loading, LA bounding-box extraction, resampling, HU windowing, and cropped data access.
 - [dataset.py](dataset.py): PyTorch `Dataset` classes for all three tasks (`CARE2026_MRI_Stage1_Dataset`, `CARE2026_MRI_Stage2_Dataset`, `CARE2026_CT_Dataset`) with RAM caching, on-the-fly augmentation, foreground-biased patch sampling, and CLAHE support.
 - [Dockerfile](Dockerfile): Docker image definition for challenge submission (base: `pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime`). Entry point: `python3 -u docker_entry.py`.
+- [docker_entry.py](docker_entry.py): Docker `ENTRYPOINT` script — auto-detects available models and input data, then runs the appropriate tasks (`run_all_tasks`). No CLI arguments required.
+- [instruction-la.md](instruction-la.md): official Docker submission instructions mirrored from the challenge page (test data format, output naming, run commands).
 - [outputs.py](outputs.py): `CARE2026Outputs` dataclass container for model predictions with `save_as_nifti()` (challenge-compliant directory layout) and `package_submission()` (submission zip creation).
-- [pipeline.py](pipeline.py): high-level inference orchestration (`run_task1/2/3_inference`, `run_all_tasks`) plus the **unified CLI** for model loading, inference, and submission packaging. Serves as the Docker `ENTRYPOINT`.
+- [pipeline.py](pipeline.py): high-level inference orchestration (`run_task1/2/3_inference`, `run_all_tasks`) plus the **unified CLI** for model loading, inference, and submission packaging.
 - [predict.py](predict.py): core volume-level inference functions — `predict_mri_two_stage()` (two-stage coarse-to-fine MRI pipeline), `predict_ct()` (sliding-window CT inference), 8-fold flip TTA, and post-processing utilities (`keep_largest_component`, `postprocess_mri_masks`, `postprocess_ct_mask`).
 - [viz.py](viz.py): Jupyter notebook visualization and evaluation utilities — `view_prediction()`, `evaluate_stage1/2()`, `evaluate_ct()`, `evaluate_training_sample()`. Supports both VNet and nnUNet model backends.
-- [post_docker_build.py](post_docker_build.py): downloads and caches trained model weights into the Docker image at build time (executed during `docker build`).
+- [notebook_ui.py](notebook_ui.py): interactive Jupyter dashboard — model loading, run browsing, threshold adjustment with live preview, and submission packaging.
+- [post_docker_build.py](post_docker_build.py): discovers trained model weights in `checkpoints/`, creates role-based symlinks (`ct_model`, `mri_stage1_model`, `mri_stage2_model`), and writes `model_paths.json` at `docker build` time.
 - [trainer.py](trainer.py): three trainer classes (`CARE2026_MRI_Stage1_Trainer`, `CARE2026_MRI_Stage2_Trainer`, `CARE2026_CT_Trainer`) with AMP, gradient accumulation, cosine/poly LR, and a CLI for launching training runs.  Supports `--ct-model v1|v2|nnunet` and `--backbone vnet|nested_vnet`.
 - [requirements.txt](requirements.txt): full requirements for local development.
 - [requirements-docker.txt](requirements-docker.txt): requirements for the Docker image (torch pre-installed in base image).
@@ -99,19 +102,18 @@ Data are provided in NIfTI format:
 - [log](log): training logs (`.txt` + `.csv` metrics from `torch_ecg` trainers) and TensorBoard event files.
 - [evaluate-results](evaluate-results): output directory for local validation-set evaluation metrics.
 - [scripts](scripts): diagnostic, evaluation, and data preparation scripts —
-  `eval_all_models.py` (unified VNet + nnUNet evaluation on training data),
-  `create_mock_test_set.py` (mock test set from validation data for Docker smoke tests),
-  `prep_nnunet_mri.py` / `prep_nnunet_ct.py` (nnUNet v2 dataset preparation),
-  `self_train_nnunet.py` (pseudo-label generation + dataset construction),
-  `sweep_scar_dilation.py` (offline dilation sweep),
-  `diagnose_ct.py` (full per-class metrics on labelled CTs).
+  nnUNet dataset preparation (`prep_nnunet_mri.py`, `prep_nnunet_ct.py`),
+  unified evaluation (`eval_all_models.py`, `eval_all_nnunet.py`),
+  figure generation (`fig_qualitative.py`, `fig_scar_cavity_distance.py`),
+  submission packaging (`package_models.py`, `check_submission.py`),
+  and various sweeps/diagnostics (`sweep_scar_dilation.py`, `sweep_scar_threshold.py`, `diagnose_ct.py`, etc.).
 - [results](results): local prediction outputs and submission zip archives.
 
 ### Folders (Modules)
 
 - [models](models): model architecture definitions and high-level wrappers.
-  - [`__init__.py`](models/__init__.py): model wrapper classes — `CARE2026_MRI_Stage1_Model` (VNet for coarse LA localisation), `CARE2026_MRI_Stage2_Model` (single-head VNet for scar-only, trained on centroid-cropped region), `CARE2026_CT_Model` (VNet(s) supporting CPS dual-model and Mean Teacher semi-supervised modes), `CARE2026_CT_ModelV2` (supervised-first variant with InstanceNorm+Mish+AdamW option), `CARE2026_CT_nnUNet` / `CARE2026_MRI_nnUNet` (wraps nnUNet's PlainConvUNet + predictor for inference, 6-stage ResEnc U-Net with deep supervision). All wrappers compute loss inside `forward()` and support checkpoint save/load.
-  - [`custom_nnunet.py`](models/custom_nnunet.py): custom nnUNet trainers — `nnUNetTrainerScarWeighted` (per-class CE weights), `nnUNetTrainerScarGaussian` (Gaussian spatial weight map), `nnUNetTrainerCTBoundary` (HausdorffER + CenterlineCE for PV/LAA boundary). Loaded via `nnUNet_extTrainer` environment variable.
+  - [`__init__.py`](models/__init__.py): model wrapper classes — `CARE2026_MRI_Stage1_Model` (VNet for coarse LA localisation), `CARE2026_MRI_Stage2_Model` (single-head VNet for scar-only, trained on centroid-cropped region), `CARE2026_CT_Model` (VNet(s) supporting CPS dual-model and Mean Teacher semi-supervised modes), `CARE2026_CT_ModelV2` (supervised-first variant with InstanceNorm+Mish+AdamW option), `CARE2026_CT_nnUNet` / `CARE2026_MRI_nnUNet` (wrap nnUNet's PlainConvUNet + predictor for inference, 6-stage with deep supervision), `CARE2026_CT_MT_nnUNet` (Mean Teacher semi-supervised nnUNet). All wrappers compute loss inside `forward()` and support checkpoint save/load.
+  - [`custom_nnunet.py`](models/custom_nnunet.py): custom nnUNet trainers — `nnUNetTrainerScarWeighted` (per-class CE weights), `nnUNetTrainerScarGaussian` (Gaussian spatial weight map derived from scar GT), `nnUNetTrainerScarCavityWall` (cavity-wall-derived Gaussian weighting), `nnUNetTrainerCTBoundary` (HausdorffER + CenterlineCE for PV/LAA boundary). Loaded via `nnUNet_extTrainer` environment variable.
   - [vnet.py](models/vnet.py): 3D V-Net backbone — `VNet` (encoder-decoder with skip connections). Supports optional `BottleneckTransformer3D` at the bottleneck and `ECAGate3D` on skip connections.
   - [nested_vnet.py](models/nested_vnet.py): UNet++-style NestedVNet with dense skip connections and deep supervision at multiple decoder resolutions. Used for CT via `--backbone nested_vnet`.
   - [layers.py](models/layers.py): shared 3-D building blocks — `ConvNormAct`, `ResBlock3D`, `DownBlock3D`, `UpBlock3D`, `NestedUpBlock3D`, `ECAGate3D` (efficient channel attention), `WindowedMHSA3D` (windowed multi-head self-attention), `BottleneckTransformer3D` (Swin-style transformer block).
@@ -126,6 +128,9 @@ Data are provided in NIfTI format:
 - [utils](utils): utility functions.
   - [scoring_metrics.py](utils/scoring_metrics.py): evaluation metrics specification for all three tasks (G-DSC, ACC, SEN for Task 1; DSC, HD for Tasks 2 & 3). Metric computation is inline in `trainer.py`.
   - [mclahe.py](utils/mclahe.py): Multi-dimensional Contrast Limited Adaptive Histogram Equalization (MCLAHE) for LGE-MRI contrast enhancement, via TensorFlow 1.x compatibility mode.
+  - [centroid_crop.py](utils/centroid_crop.py): centroid-based 3D cropping shared by data prep and inference.
+  - [parse_nnunet_log.py](utils/parse_nnunet_log.py): parse epoch-level metrics from nnUNet training logs.
+  - [viz_utils.py](utils/viz_utils.py): low-level visualisation helpers shared by `data_reader` and `viz`.
 
 ## Deep learning models for medical image studies
 
@@ -135,18 +140,16 @@ Data are provided in NIfTI format:
 
 ## Leaderboards
 
-Validation leaderboard results (nnUNet 5-fold ensemble, ScarGaussian loss, hybrid pipeline):
+Best validation and official test results (nnUNet 5-fold ensemble, 8-fold flip TTA):
 
-| Task | Metric | Our Score | Rank | 1st Place |
-|------|--------|-----------|------|-----------|
-| Task 1 (scar) | G-DSC / ACC / SEN | 0.4791 / 0.736 / 0.4722 | **#2** | OrganAgent 0.4907 / 0.7564 / 0.5129 |
-| Task 2 (cavity) | DSC / HD | 0.8871 / 17.59 mm | competitive | 0.8886 |
-| Task 3 (CT) | DSC / HD | 0.9563 / 12.45 mm | #2 | 0.9579 |
+| Task | Metric | Val | Test | Rank | 1st Place |
+|------|--------|-----|------|------|-----------|
+| Task 1 (scar) | G-DSC / ACC / SEN | 0.4791 / 0.736 / 0.4722 | 0.4298 / 0.7087 / 0.4176 | **#2** | OrganAgent 0.4907 / 0.7564 / 0.5129 |
+| Task 2 (cavity) | DSC / HD | 0.8871 / 17.59 mm | 0.8285 / 20.27 mm | competitive | 0.8886 |
+| Task 3 (CT) | DSC / HD | 0.9563 / 12.45 mm | 0.9543 / 9.72 mm | **#2** | 0.9579 |
 
-> **Ongoing**: ResEnc L backbone + cavity-wall spatial weighting loss
-> experiments on Dataset 521 to reclaim Task 1 #1.  See `ROADMAP.md` for details.
-
-See `submissions` for full submission log and `ROADMAP.md` for development history.
+> **Competition phase complete.** No further submissions are planned.
+> See `ROADMAP.md` for full development history and ablation details.
 
 ## Docker
 

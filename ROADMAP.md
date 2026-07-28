@@ -767,7 +767,7 @@ Results tracked in ``submissions`` (YAML log).
 
 ---
 
-## Phase 7 — Experiments & Ablations ⏳
+## Phase 7 — Experiments & Ablations ✅
 
 ### Core ablations
 
@@ -785,16 +785,16 @@ Results tracked in ``submissions`` (YAML log).
 
 | Experiment | Goal | Priority | Status |
 |------------|------|----------|--------|
-| **Extend MRI training: 150 → 400 epochs** | Close epoch-count gap vs. winning teams (1000 epochs) | 🔴 High | ⏳ |
+| **Extend MRI training: 150 → 400 epochs** | Close epoch-count gap vs. winning teams (1000 epochs) | 🔴 High | ❌ Not pursued (competition ended) |
 | **CLAHE preprocessing** — enable `utils/mclahe.py` in MRI dataset | Improve low-SNR scar boundary accuracy | 🔴 High | ✅ Done (auto-detected in predict; `--mclahe` flag in trainer) |
 | **Connected-component post-processing** — keep largest component per class | Eliminate segmentation leakage | 🔴 High | ✅ Done (`keep_largest_component`, `postprocess_mri_masks`, `postprocess_ct_mask` in `predict.py`) |
 | **Test-time augmentation (TTA)** — flip + 90° rotations, average logits | Low-cost accuracy boost; especially useful for Task 2 domain generalisation | 🔴 High | ✅ Done (8-fold flip TTA in `predict.py`; toggle via `--tta` flag) |
 | **5-fold CV + ensemble** — train 5 folds, ensemble predictions | Expected +1–2 pp DSC; mandatory for final submission | ✅ Done — built into nnUNet (all 5 folds trained) | ✅ |
 | **SGD + polynomial LR for MRI** (vs. AdamW) | Winning teams used SGD lr=0.01; compare convergence | 🟡 Medium | ✅ Done — S1 0.88→0.93, S2 0.44→0.48 |
-| **Slice-position encoding** — append z-coordinate channel to input | Help model handle hard superior/inferior slices | 🟡 Medium | ⏳ |
-| **Histogram matching / intensity standardisation** | Domain-shift mitigation for Task 2 unseen centers without changing the model | 🟡 Medium | ⏳ |
-| **UMamba backbone** — replace VNet encoder with Mamba SSM | Near-ResUNet accuracy, more efficient; possible scar segmentation alternative | 🟢 Low | ⏳ |
-| **Shape-constrained regularisation** — atlas-based prior or topology loss | Anatomy-aware design; reduce leakage at vascular junctions | 🟢 Low | ⏳ |
+| **Slice-position encoding** — append z-coordinate channel to input | Help model handle hard superior/inferior slices | 🟡 Medium | ❌ Not pursued (competition ended) |
+| **Histogram matching / intensity standardisation** | Domain-shift mitigation for Task 2 unseen centers without changing the model | 🟡 Medium | ❌ Not pursued (competition ended) |
+| **UMamba backbone** — replace VNet encoder with Mamba SSM | Near-ResUNet accuracy, more efficient; possible scar segmentation alternative | 🟢 Low | ❌ Not pursued (competition ended) |
+| **Shape-constrained regularisation** — atlas-based prior or topology loss | Anatomy-aware design; reduce leakage at vascular junctions | 🟢 Low | ❌ Not pursued (competition ended) |
 
 ---
 
@@ -807,7 +807,7 @@ Results tracked in ``submissions`` (YAML log).
 - [x] Submit all-task validation predictions to official evaluation platform (Tasks 1, 2, 3).
 - [x] nnUNet inference pipeline complete: `CARE2026_MRI_nnUNet` + `PredictCfg` + `_load_model()`.
 - [x] Docker end-to-end test.
-- [ ] Docker submit.
+- [x] Docker submit.
 - [x] Docker CI `--shm-size=2g` fix.
 
 ---
@@ -1001,14 +1001,14 @@ done
 
 | # | Task | Description | Status |
 |---|------|-------------|--------|
-| D2 | Dataset 600 | nnUNet on 2-class full volume (backup) | ⏳ |
+| D2 | Dataset 600 | nnUNet on 2-class full volume (backup) | ❌ Cancelled (competition ended) |
 | D3 | Custom nnUNet loss | `nnUNetTrainerScarGaussian` — test on 521 | ✅ Done — sub 10 G-DSC 0.4791 (+0.0048) |
 | E1 | **ResEnc M backbone** | `nnUNetPlannerResEncM` + ScarGaussian on Dataset 521 — residual encoder for architecture gain | ✅ Done — Training-set G-DSC 0.6682 (+0.0051 vs PlainConvUNet); Val: native 0.4324 (sub12), hybrid 0.4736 (sub13). ResEnc M **does not improve** over PlainConvUNet on validation (best Plain 0.4791 > ResEnc M 0.4736). |
 | E2 | **Cavity-wall spatial loss** | `nnUNetTrainerScarCavityWall` on Dataset 521 — cavity blur weight instead of scar blur | ✅ Done — Val leaderboard G-DSC 0.4767 (−0.0024 vs ScarGaussian 0.4791), ACC 0.7361, SEN 0.4722. CavityWall does not improve over ScarGaussian. |
 | E3 | **ResEnc M + CavityWall** | Combined: ResEnc M plans + CavityWall trainer | ❌ Cancelled — ResEnc M alone does not improve validation; combining with CavityWall unlikely to help. |
 | E4 | **ResEnc L (M confirmed gain)** | ResEnc L + ScarGaussian on Dataset 521 — scale up now that M proves +0.0051 G-DSC | ❌ Cancelled — ResEnc M does not improve validation; scaling to L not justified. |
-| B1 | VNet + nnUNet recipe | Train VNet on Dataset 501, SGD+polyLR 1000ep | ⏳ |
-| B2 | 4-stage nnUNet | PlainConvUNet reduced to 4 stages | ⏳ |
+| B1 | VNet + nnUNet recipe | Train VNet on Dataset 501, SGD+polyLR 1000ep | ❌ Cancelled (competition ended) |
+| B2 | 4-stage nnUNet | PlainConvUNet reduced to 4 stages | ❌ Cancelled (competition ended) |
 
 ### Infrastructure
 
