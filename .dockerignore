@@ -26,6 +26,8 @@ checkpoints/config.json
 # CI / workflows
 .github/
 
+.claude
+
 # Docs
 README.md
 LICENSE

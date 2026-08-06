@@ -78,6 +78,8 @@ Thumbs.db
 *.npy
 *.npz
 
+.claude
+
 # Project-specific
 log/*
 !log/.gitkeep
