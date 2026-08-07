@@ -78,7 +78,9 @@ Thumbs.db
 *.npy
 *.npz
 
+.agents
 .claude
+.codex
 
 # Project-specific
 log/*
