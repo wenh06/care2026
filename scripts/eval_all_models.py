@@ -61,12 +61,25 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 # ---------------------------------------------------------------------------
 
 
-def _binary_metrics(pred: np.ndarray, gt: np.ndarray, eps: float = 1e-7) -> Tuple[float, float, float]:
+def _binary_metrics(pred: np.ndarray, gt: np.ndarray, eps: float = 1e-7, metric: str = "dice") -> Tuple[float, float, float]:
+    """Per-case metrics.  ``metric="dice"`` (default) matches the paper's training-set
+    convention (per-case Dice averaged over cases); ``metric="gdsc"`` computes the
+    official CARE Task-1 G-DSC (w_c = 1/|GT_c|^2) for cross-checking."""
     pred_b = pred.astype(bool)
     gt_b = gt.astype(bool)
     inter = np.logical_and(pred_b, gt_b).sum()
     denom = pred_b.sum() + gt_b.sum()
-    dice = (2 * inter + eps) / (denom + eps) if denom > 0 else 1.0
+    if metric == "gdsc":
+        p_bg = ~pred_b
+        g_bg = ~gt_b
+        w_bg = 1.0 / (max(g_bg.sum(), 1) ** 2)
+        w_sc = 1.0 / (max(gt_b.sum(), 1) ** 2)
+        inter_bg = np.logical_and(p_bg, g_bg).sum()
+        numerator = 2 * (w_bg * inter_bg + w_sc * inter)
+        denominator = w_bg * (p_bg.sum() + g_bg.sum()) + w_sc * denom
+        dice = float(numerator / denominator) if denominator > 0 else 1.0
+    else:
+        dice = (2 * inter + eps) / (denom + eps) if denom > 0 else 1.0
     acc = float((pred_b == gt_b).mean())
     tp = inter
     fn = np.logical_and(~pred_b, gt_b).sum()
@@ -134,6 +147,12 @@ def main():
         choices=["native", "hybrid", "legacy"],
         default="native",
         help="MRI inference pipeline (default: native)",
+    )
+    parser.add_argument(
+        "--metric",
+        choices=["dice", "gdsc"],
+        default="dice",
+        help="Task-1 per-case metric: 'dice' (paper convention, default) or 'gdsc' (official CARE G-DSC, for cross-checking)",
     )
     parser.add_argument(
         "--use",
@@ -221,7 +240,7 @@ def main():
                     continue
                 out = _predict_fn(img_path, s1, s2, use_tta=args.tta, apply_mclahe=use_mclahe, s2_threshold=0.5)
                 pred = _resample_if_needed(out.scar_mask, gt)
-                d, a, s = _binary_metrics(pred, gt)
+                d, a, s = _binary_metrics(pred, gt, metric=args.metric)
                 dice_vals.append(d)
                 acc_vals.append(a)
                 sen_vals.append(s)

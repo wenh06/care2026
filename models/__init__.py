@@ -5,6 +5,7 @@ Loss is computed inside forward() when labels are provided (MBAS2024 pattern).
 The Trainer reads out_tensors["total_loss"] and calls loss.backward().
 """
 
+import os
 import re
 from collections import OrderedDict
 from copy import deepcopy
@@ -18,6 +19,11 @@ from safetensors.torch import load_file as _load_sft
 from torch_ecg.cfg import CFG
 from torch_ecg.utils.misc import CitationMixin
 from torch_ecg.utils.utils_nn import CkptMixin, SizeMixin
+
+# nnUNet resolves custom trainers (nnUNetTrainerScarGaussian, ...) via the
+# nnUNet_extTrainer env var; point it at our models/ dir so custom-trainer
+# checkpoints load without a manual `export nnUNet_extTrainer=...`.
+os.environ["nnUNet_extTrainer"] = str(Path(__file__).resolve().parent)
 
 from cfg import (
     CT_TrainCfg,
@@ -1250,6 +1256,16 @@ class CARE2026_MRI_nnUNet(nn.Module, SizeMixin, CkptMixin, CitationMixin):
     def scar_class_index(self) -> int:
         return self._scar_class_index
 
+    @property
+    def num_input_channels(self) -> int:
+        """Number of input channels, from the trained model's dataset.json.
+
+        1 for the standard single-channel (LGE) models; 2 for the SDM variant
+        (LGE + cavity signed distance field, Dataset 524).
+        """
+        ds_json = getattr(self._predictor, "dataset_json", None) or {}
+        return len(ds_json.get("channel_names", {"0": "LGE-MRI"}))
+
     # ------------------------------------------------------------------
     # Full-volume inference (delegates to nnUNetPredictor)
     # ------------------------------------------------------------------
@@ -1260,8 +1276,9 @@ class CARE2026_MRI_nnUNet(nn.Module, SizeMixin, CkptMixin, CitationMixin):
 
         Parameters
         ----------
-        image_npy : np.ndarray, shape (H, W, D), float32
+        image_npy : np.ndarray, shape (H, W, D) or (C, H, W, D), float32
             Pre-processed image (e.g. canonical, possibly MCLAHE-enhanced).
+            The 2-channel SDM variant passes (2, H, W, D).
         spacing : (float, float, float)
             Voxel spacing in mm (x, y, z).
         use_tta : bool
@@ -1277,6 +1294,9 @@ class CARE2026_MRI_nnUNet(nn.Module, SizeMixin, CkptMixin, CitationMixin):
         # nnUNet's NibabelIOWithReorient transposes (x,y,z) → (z,y,x)
         if image_npy.ndim == 3:
             image_npy = np.transpose(image_npy, (2, 1, 0))
+        elif image_npy.ndim == 4:
+            # (C, H, W, D) → (C, Z, Y, X), same per-channel transpose
+            image_npy = np.transpose(image_npy, (0, 3, 2, 1))
         spacing_nnunet = (float(spacing[2]), float(spacing[1]), float(spacing[0]))
         ret = self._predictor.predict_from_list_of_npy_arrays(
             image_or_list_of_images=image_npy[None].astype(np.float32),

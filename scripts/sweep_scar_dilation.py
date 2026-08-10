@@ -1,13 +1,16 @@
 """Sweep scar dilation constraint radius on labeled training data.
 
 Runs inference ONCE, then applies different dilation values offline
-to the cached raw scar + LA predictions.
+to the cached raw scar + LA predictions.  Metrics match the paper's
+training-set convention (per-case Dice/ACC/SEN averaged over cases,
+see eval_all_models.py), so the sweep baseline (dilation=none) is
+directly comparable with the reported train G-DSC values.
 
 Usage::
 
     python scripts/sweep_scar_dilation.py --db-dir <data_root> \\
-        --s1 .../Dataset502_*/... --s2 .../Dataset501_*/... \\
-        [--output results.txt]
+        --s1 .../Dataset502_*/... --s2 .../Dataset521_*/... \\
+        --pipeline hybrid --dilations none,3,5,7 [--output results.txt]
 """
 
 import argparse
@@ -25,20 +28,42 @@ from tqdm.auto import tqdm
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from pipeline import _load_model
-from predict import keep_largest_component, predict_mri_two_stage
+from predict import keep_largest_component, predict_mri_two_stage, predict_mri_two_stage_hybrid
 
 
-def _binary_metrics(pred, gt, eps=1e-7):
-    pb = pred.astype(bool)
-    gb = gt.astype(bool)
-    inter = np.logical_and(pb, gb).sum()
-    denom = pb.sum() + gb.sum()
-    d = (2 * inter + eps) / (denom + eps) if denom > 0 else 1.0
-    a = float((pb == gb).mean())
+def _binary_metrics(pred, gt, eps=1e-7, metric: str = "dice"):
+    """Per-case metrics, averaged over cases — matches eval_all_models.py /
+    eval_all_nnunet.py, i.e. the metric used for all training-set results in the paper
+    (labelled "G-DSC" there).  Kept identical so the camera-ready rows are directly
+    comparable with the reported baselines (e.g. train 0.6631).
+
+    ``metric="gdsc"`` computes the official CARE Task-1 G-DSC (w_c = 1/|GT_c|^2)
+    instead of per-case Dice, for cross-checking against the platform convention.
+    """
+    pred_b = pred.astype(bool)
+    gt_b = gt.astype(bool)
+    inter = np.logical_and(pred_b, gt_b).sum()
+    denom = pred_b.sum() + gt_b.sum()
+    if metric == "gdsc":
+        # w_c = 1 / |gt_c|^2  for each class; G-DSC = 2 * sum(w_c * |p_c ∩ g_c|) / sum(w_c * (|p_c| + |g_c|))
+        p_bg = ~pred_b
+        g_bg = ~gt_b
+        w_bg = 1.0 / (max(g_bg.sum(), 1) ** 2)
+        w_sc = 1.0 / (max(gt_b.sum(), 1) ** 2)
+        inter_bg = np.logical_and(p_bg, g_bg).sum()
+        inter_sc = inter
+        union_bg = p_bg.sum() + g_bg.sum()
+        union_sc = denom
+        numerator = 2 * (w_bg * inter_bg + w_sc * inter_sc)
+        denominator = w_bg * union_bg + w_sc * union_sc
+        dice = float(numerator / denominator) if denominator > 0 else 1.0
+    else:
+        dice = (2 * inter + eps) / (denom + eps) if denom > 0 else 1.0
+    acc = float((pred_b == gt_b).mean())
     tp = inter
-    fn = np.logical_and(~pb, gb).sum()
-    s = tp / (tp + fn + eps) if (tp + fn) > 0 else 1.0
-    return float(d), float(a), float(s)
+    fn = np.logical_and(~pred_b, gt_b).sum()
+    sens = (tp + eps) / (tp + fn + eps) if (tp + fn) > 0 else 1.0
+    return float(dice), float(acc), float(sens)
 
 
 def main():
@@ -48,6 +73,18 @@ def main():
     parser.add_argument("--s2", required=True, help="Stage 2 (scar) model path")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--dilations", type=str, default="none,2,3,4,5,6,8,10")
+    parser.add_argument(
+        "--pipeline",
+        choices=["native", "hybrid"],
+        default="native",
+        help="Inference pipeline: native (both stages native resolution) or hybrid (mixed-spacing)",
+    )
+    parser.add_argument(
+        "--metric",
+        choices=["dice", "gdsc"],
+        default="dice",
+        help="Per-case metric: 'dice' (paper convention, default) or 'gdsc' (official CARE G-DSC, for cross-checking)",
+    )
     parser.add_argument("--output", type=str, default=None)
     args = parser.parse_args()
 
@@ -78,7 +115,11 @@ def main():
         if gt.sum() == 0:
             continue
         # Get raw scar prediction (no post-processing)
-        out = predict_mri_two_stage(
+        _predict_fn = {
+            "native": predict_mri_two_stage,
+            "hybrid": predict_mri_two_stage_hybrid,
+        }[args.pipeline]
+        out = _predict_fn(
             img_path,
             s1,
             s2,
@@ -112,7 +153,7 @@ def main():
             else:
                 la_dilated = binary_dilation(la_clean.astype(bool), structure=structure, iterations=1)
                 scar_proc = (scar_raw.astype(bool) & la_dilated).astype(np.uint8)
-            d, a, s = _binary_metrics(scar_proc, gt)
+            d, a, s = _binary_metrics(scar_proc, gt, metric=args.metric)
             dice_vals.append(d)
             acc_vals.append(a)
             sen_vals.append(s)

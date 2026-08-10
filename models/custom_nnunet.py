@@ -22,6 +22,14 @@ if _models_dir not in sys.path:
 
 import numpy as np
 import torch
+from batchgeneratorsv2.transforms.base.basic_transform import BasicTransform
+from batchgeneratorsv2.transforms.intensity.brightness import MultiplicativeBrightnessTransform
+from batchgeneratorsv2.transforms.intensity.contrast import ContrastTransform
+from batchgeneratorsv2.transforms.intensity.gamma import GammaTransform
+from batchgeneratorsv2.transforms.intensity.gaussian_noise import GaussianNoiseTransform
+from batchgeneratorsv2.transforms.noise.gaussian_blur import GaussianBlurTransform
+from batchgeneratorsv2.transforms.utils.compose import ComposeTransforms
+from batchgeneratorsv2.transforms.utils.random import RandomTransform
 from loss.boundary_loss import HausdorffERLoss
 from loss.centerline_loss import CenterlineCELoss
 from nnunetv2.training.loss.deep_supervision import DeepSupervisionWrapper
@@ -178,6 +186,94 @@ class _ScarGaussianLoss(torch.nn.Module):
         ce_pixel = self.ce(pred, tgt)
         ce_loss = (ce_pixel * self._cached_weight).mean()
         return self.dice_weight * dice_loss + self.ce_weight * ce_loss
+
+
+# ---------------------------------------------------------------------------
+# SDM Input Channel Trainer (Dataset 524: LGE + cavity signed distance field)
+# ---------------------------------------------------------------------------
+
+
+class _Channel0OnlyTransform(BasicTransform):
+    """Apply an inner transform to channel 0 of ``image`` only; other channels pass through untouched.
+
+    nnUNet's default intensity augmentations (noise, blur, brightness, contrast,
+    gamma) are applied per channel and would destroy the signed-distance
+    semantics of the SDM channel (e.g. gamma on negative values produces NaN).
+    Wrapping them in this transform restricts them to the LGE channel while
+    spatial transforms (rotation, scaling, mirroring) still act on all channels.
+
+    The data dict passed by nnUNet's dataloader uses the ``image`` key
+    (see ``nnUNetDataLoader.__getitem__``).
+    """
+
+    def __init__(self, transform: BasicTransform):
+        super().__init__()
+        self.transform = transform
+
+    def __call__(self, **data_dict) -> dict:
+        img = data_dict["image"]
+        out = self.transform(**{**data_dict, "image": img[0:1]})
+        data_dict["image"] = torch.cat([out["image"], img[1:]], dim=0)
+        return data_dict
+
+
+# Intensity transforms that must not touch the SDM channel
+_INTENSITY_TRANSFORMS = (
+    GaussianNoiseTransform,
+    GaussianBlurTransform,
+    MultiplicativeBrightnessTransform,
+    ContrastTransform,
+    GammaTransform,
+)
+
+
+class nnUNetTrainerScarGaussianSDM(nnUNetTrainerScarGaussian):
+    """ScarGaussian trainer for the 2-channel (LGE + cavity SDM) dataset.
+
+    Uses the same ScarGaussian loss as the final configuration, but the
+    training-time intensity augmentations are masked to the LGE channel so
+    the SDM channel keeps its [-1, 1] signed-distance values throughout
+    training.  The SDM channel is also ``NoNormalization`` in plans.json
+    (the prep script names it ``"nonorm"``), matching inference behaviour.
+
+    Usage::
+
+        export nnUNet_extTrainer="$PWD/models"
+        nnUNetv2_train 524 3d_fullres 0 -tr nnUNetTrainerScarGaussianSDM
+    """
+
+    def get_training_transforms(
+        self,
+        patch_size,
+        rotation_for_DA,
+        deep_supervision_scales,
+        mirror_axes,
+        do_dummy_2d_data_aug,
+        use_mask_for_norm=None,
+        is_cascaded=False,
+        foreground_labels=None,
+        regions=None,
+        ignore_label=None,
+    ):
+        transforms = super().get_training_transforms(
+            patch_size,
+            rotation_for_DA,
+            deep_supervision_scales,
+            mirror_axes,
+            do_dummy_2d_data_aug,
+            use_mask_for_norm,
+            is_cascaded,
+            foreground_labels,
+            regions,
+            ignore_label,
+        )
+        if not isinstance(transforms, ComposeTransforms):
+            return transforms
+        for i, t in enumerate(transforms.transforms):
+            inner = getattr(t, "transform", None)
+            if inner is not None and isinstance(inner, _INTENSITY_TRANSFORMS):
+                transforms.transforms[i] = RandomTransform(_Channel0OnlyTransform(inner), t.apply_probability)
+        return transforms
 
 
 # ---------------------------------------------------------------------------

@@ -23,7 +23,7 @@ import nibabel as nib
 import numpy as np
 import torch
 import torch.nn.functional as F
-from scipy.ndimage import binary_dilation
+from scipy.ndimage import binary_dilation, distance_transform_edt
 from scipy.ndimage import label as _nd_label
 from torch_ecg.cfg import CFG
 
@@ -346,6 +346,20 @@ def _zscore(arr: np.ndarray) -> np.ndarray:
     return (arr - arr.mean()) / (arr.std() + 1e-8)
 
 
+def _la_sdm_channel(la_crop: np.ndarray, wall_mm: float = 4.0, spacing: float = 0.625) -> np.ndarray:
+    """Signed distance field from an LA cavity mask as a second input channel.
+
+    Negative inside the cavity, positive outside, roughly zero at the wall,
+    clipped to [-1, 1].  Must match the SDM written at training time by
+    ``scripts/prep_nnunet_mri.py:_la_sdm_channel`` exactly (same formula,
+    same constants), so that train/test inputs are consistent.
+    """
+    sdf_out = distance_transform_edt(1 - la_crop)
+    sdf_in = distance_transform_edt(la_crop)
+    sdf = np.clip((sdf_out - sdf_in).astype(np.float32) * spacing / wall_mm, -1.0, 1.0)
+    return sdf
+
+
 def predict_mri_two_stage(
     img_path: Union[str, Path],
     stage1_model: torch.nn.Module,
@@ -454,6 +468,12 @@ def predict_mri_two_stage(
         crop, (x0, y0, z0), pad_xyz = centroid_crop_3d(img_input, (cx, cy, cz), _crop_vox)
         cH, cW, cD = _crop_vox
         (pb_x, pa_x), (pb_y, pa_y), (pb_z, pa_z) = pad_xyz
+
+        # 2-channel Stage 2 (LGE + cavity SDM): derive the SDM from the
+        # Phase-1 cavity prediction, cropped with the same window as the image.
+        if getattr(stage2_model, "num_input_channels", 1) == 2:
+            la_crop, _, _ = centroid_crop_3d(la_s1, (cx, cy, cz), _crop_vox)
+            crop = np.stack([crop, _la_sdm_channel(la_crop)], axis=0)
 
         # ── Stage 2: scar at native resolution ────────────────────────────
         scar_cls = getattr(stage2_model, "scar_class_index", 1)
@@ -576,14 +596,10 @@ def predict_mri_two_stage(
         img_s2_norm = _zscore(crop)
         use_sdf = "2ch" in str(cfg2.get("backbone", ""))
         if use_sdf:
-            from scipy.ndimage import distance_transform_edt
-
             la_crop = la_s1_canonical[xs:xe, ys:ye, zs:ze]
             if any(p > 0 for p in [px0, px1, py0, py1, pz0, pz1]):
                 la_crop = np.pad(la_crop, ((px0, px1), (py0, py1), (pz0, pz1)), mode="constant", constant_values=0.0)
-            sdf_out = distance_transform_edt(1 - la_crop)
-            sdf_in = distance_transform_edt(la_crop)
-            sdf = np.clip((sdf_out - sdf_in).astype(np.float32) * 0.625 / 4.0, -1.0, 1.0)
+            sdf = _la_sdm_channel(la_crop)
             sdf_resized = _resample_3d(sdf, (s2_hw, s2_hw, crop_d))
             img_s2_resized = _resample_3d(img_s2_norm, (s2_hw, s2_hw, crop_d))
             img_2ch = np.stack([img_s2_resized, sdf_resized], axis=0)
@@ -739,6 +755,14 @@ def predict_mri_two_stage_hybrid(
     crop_can, (xc0, yc0, zc0), pad_can = centroid_crop_3d(img_can, (cx_can, cy_can, cz_can), _s2_crop)
     (pb_x, pa_x), (pb_y, pa_y), (pb_z, pa_z) = pad_can
     cH_s2, cW_s2, cD_s2 = _s2_crop
+
+    # 2-channel Stage 2 (LGE + cavity SDM): derive the SDM from the Phase-1
+    # cavity prediction, resampled to canonical space and cropped with the
+    # same window as the image crop.
+    if getattr(stage2_model, "num_input_channels", 1) == 2:
+        la_s1_can = _resample_mask(la_s1, _can_shape)
+        la_crop_can, _, _ = centroid_crop_3d(la_s1_can, (cx_can, cy_can, cz_can), _s2_crop)
+        crop_can = np.stack([crop_can, _la_sdm_channel(la_crop_can)], axis=0)
 
     # ── Stage 2 inference (canonical spacing = training spacing) ─────────
     scar_cls = getattr(stage2_model, "scar_class_index", 1)
@@ -925,14 +949,10 @@ def predict_mri_two_stage_legacy(
         img_s2_norm = _zscore(crop)
         use_sdf = "2ch" in str(cfg2.get("backbone", ""))
         if use_sdf:
-            from scipy.ndimage import distance_transform_edt
-
             la_crop = la_s1_canonical[xs:xe, ys:ye, zs:ze]
             if any(p > 0 for p in [px0, px1, py0, py1, pz0, pz1]):
                 la_crop = np.pad(la_crop, ((px0, px1), (py0, py1), (pz0, pz1)), mode="constant", constant_values=0.0)
-            sdf_out = distance_transform_edt(1 - la_crop)
-            sdf_in = distance_transform_edt(la_crop)
-            sdf = np.clip((sdf_out - sdf_in).astype(np.float32) * 0.625 / 4.0, -1.0, 1.0)
+            sdf = _la_sdm_channel(la_crop)
             sdf_resized = _resample_3d(sdf, (s2_hw, s2_hw, crop_d))
             img_s2_resized = _resample_3d(img_s2_norm, (s2_hw, s2_hw, crop_d))
             img_2ch = np.stack([img_s2_resized, sdf_resized], axis=0)

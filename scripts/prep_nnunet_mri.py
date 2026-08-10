@@ -16,6 +16,12 @@ Multi-class (cavity + scar joint label)
 - **Dataset 531** — Same as 521 but with MCLAHE.
 - **Dataset 600** — 60 full-volume cases, 2-class label.
 
+SDM input (2-channel: LGE + cavity signed distance field)
+---------------------------------------------------------
+- **Dataset 524** — Same as 521 but with a second input channel: the cavity
+  SDM (from GT, ``_la_sdm_channel``), ``"nonorm"`` normalization (see
+  ``nnUNetTrainerScarGaussianSDM``).  Requires ``--sdm --multi-class``.
+
 Usage::
 
     # Standard (binary scar, no CLAHE)
@@ -40,6 +46,7 @@ from typing import Tuple
 
 import nibabel as nib
 import numpy as np
+from scipy.ndimage import distance_transform_edt
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -88,13 +95,26 @@ def _scar_weight_map(
     return (1.0 + w0 * np.exp(-(d**2) / (2 * sigma_px**2))).astype(np.float32)
 
 
+def _la_sdm_channel(la_crop: np.ndarray, wall_mm: float = 4.0, spacing: float = 0.625) -> np.ndarray:
+    """Signed distance field from an LA cavity mask as a spatial prior channel.
+
+    Negative inside the cavity (blood pool), positive outside, roughly zero at
+    the wall.  Mirrors ``dataset.py:_la_sdf_channel`` and the SDM computed at
+    inference in ``predict.py`` — all use the same formula and constants.
+    """
+    sdf_out = distance_transform_edt(1 - la_crop)
+    sdf_in = distance_transform_edt(la_crop)
+    sdf = np.clip((sdf_out - sdf_in).astype(np.float32) * spacing / wall_mm, -1.0, 1.0)
+    return sdf
+
+
 def _centroid_crop(
     image: np.ndarray,
     la_mask: np.ndarray,
     scar_mask: np.ndarray,
     crop_shape: Tuple[int, int, int] = MRI_STAGE2_CROP_SHAPE,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Crop *image* and *scar_mask* around the LA cavity centroid.
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Crop *image*, *la_mask*, and *scar_mask* around the LA cavity centroid.
 
     Parameters
     ----------
@@ -109,6 +129,7 @@ def _centroid_crop(
     Returns
     -------
     cropped_image : np.ndarray of shape *crop_shape*
+    cropped_la : np.ndarray of shape *crop_shape*
     cropped_scar : np.ndarray of shape *crop_shape*
     """
     H, W, D = image.shape
@@ -121,8 +142,9 @@ def _centroid_crop(
         cx, cy, cz = int(round(fg[0].mean())), int(round(fg[1].mean())), int(round(fg[2].mean()))
 
     img_crop, _, _ = centroid_crop_3d(image, (cx, cy, cz), crop_shape)
+    la_crop, _, _ = centroid_crop_3d(la_mask, (cx, cy, cz), crop_shape)
     scar_crop, _, _ = centroid_crop_3d(scar_mask, (cx, cy, cz), crop_shape)
-    return img_crop, scar_crop
+    return img_crop, la_crop, scar_crop
 
 
 def _process_crop_case(
@@ -136,6 +158,7 @@ def _process_crop_case(
     apply_mclahe: bool = False,
     multi_class: bool = False,
     save_weight_map: bool = False,
+    sdm: bool = False,
 ) -> None:
     """Load, centroid-crop, and save one case for Task 1.
 
@@ -144,6 +167,10 @@ def _process_crop_case(
 
     When ``multi_class`` is True, the label is 2-class (1=cavity, 2=scar);
     scar overwrites cavity where both are present.
+
+    When ``sdm`` is True, the cavity signed distance field (from the cropped
+    GT cavity mask) is saved as a second input channel (``_0001``) — matching
+    ``predict.py`` which derives the same SDM from the Phase-1 prediction.
 
     *scar_src* may be None for no-scar cases (hard negatives); in that case
     the label is saved as an all-zero mask of *crop_shape*.
@@ -163,28 +190,31 @@ def _process_crop_case(
             label = la_bin.astype(np.uint8) + scar_bin.astype(np.uint8) * 2
             # Fix overlap: scar=2 wherever scar is present
             label[scar_bin > 0] = 2
-            cropped_img, cropped_label = _centroid_crop(image, la_bin, label, crop_shape)
+            cropped_img, cropped_la, cropped_label = _centroid_crop(image, la_bin, label, crop_shape)
         else:
-            cropped_img, cropped_label = _centroid_crop(image, la_bin, scar_bin, crop_shape)
+            cropped_img, cropped_la, cropped_label = _centroid_crop(image, la_bin, scar_bin, crop_shape)
     else:
         if multi_class:
             # No-scar case with multi-class: cavity-only label
             label = la_bin.astype(np.uint8)
             zero = np.zeros_like(image, dtype=np.uint8)
-            cropped_img, _ = _centroid_crop(image, la_bin, zero, crop_shape)
+            cropped_img, cropped_la, _ = _centroid_crop(image, la_bin, zero, crop_shape)
             cropped_label = np.zeros(crop_shape, dtype=np.uint8)
         else:
             zero_scar = np.zeros_like(image, dtype=np.uint8)
-            cropped_img, _ = _centroid_crop(image, la_bin, zero_scar, crop_shape)
+            cropped_img, cropped_la, _ = _centroid_crop(image, la_bin, zero_scar, crop_shape)
             cropped_label = np.zeros(crop_shape, dtype=np.uint8)
 
     _save_nifti(cropped_img, affine, img_dir / f"{case_id}_0000.nii.gz")
+    if sdm:
+        sdm_channel = _la_sdm_channel(cropped_la)
+        _save_nifti(sdm_channel, affine, img_dir / f"{case_id}_0001.nii.gz")
     _save_nifti(cropped_label, affine, lbl_dir / f"{case_id}.nii.gz")
     if save_weight_map:
         if scar_src is not None:
             scar_data, _ = _load_nifti(scar_src)
             scar_bin = (scar_data > 0).astype(np.uint8)
-            _, cropped_scar = _centroid_crop(np.zeros_like(image, dtype=np.uint8), la_bin, scar_bin, crop_shape)
+            _, _, cropped_scar = _centroid_crop(np.zeros_like(image, dtype=np.uint8), la_bin, scar_bin, crop_shape)
             wm = _scar_weight_map(cropped_scar)
         else:
             wm = np.ones(crop_shape, dtype=np.float32)
@@ -234,6 +264,12 @@ def main():
         default=False,
         help="Apply MCLAHE contrast enhancement to images before saving",
     )
+    parser.add_argument(
+        "--sdm",
+        action="store_true",
+        default=False,
+        help="Add cavity signed distance field as a second input channel (Dataset 524; requires --multi-class)",
+    )
     args = parser.parse_args()
 
     # MCLAHE variant uses +10 dataset ID to keep non-MCLAHE data intact
@@ -242,6 +278,17 @@ def main():
             args.dataset_id_task1 = 511
         if args.dataset_id_task2 == 502:
             args.dataset_id_task2 = 512
+
+    # SDM variant: 2-channel dataset, requires multi-class cropped labels
+    if args.sdm:
+        if args.mclahe:
+            parser.error("--sdm is not supported with --mclahe (final configuration uses plain LGE)")
+        if not args.multi_class:
+            parser.error("--sdm requires --multi-class")
+        if args.no_crop:
+            parser.error("--sdm is only supported with cropping (drop --no-crop)")
+        if args.dataset_id_task1 == 501:
+            args.dataset_id_task1 = 524
 
     db_dir = Path(args.db_dir)
     task1_dir = db_dir / "LA scar quantification（MRI）" / "train_data"
@@ -385,6 +432,7 @@ def main():
                     apply_mclahe=args.mclahe,
                     multi_class=args.multi_class,
                     save_weight_map=args.weight_map,
+                    sdm=args.sdm,
                 )
 
             case_idx += 1
@@ -426,6 +474,7 @@ def main():
                             apply_mclahe=args.mclahe,
                             multi_class=args.multi_class,
                             save_weight_map=args.weight_map,
+                            sdm=args.sdm,
                         )
 
                     no_scar_cases.append(case_id)
@@ -435,8 +484,15 @@ def main():
             labels = {"background": 0, "LA_cavity": 1, "LA_scar": 2}
         else:
             labels = {"background": 0, "LA_scar": 1}
+        if args.sdm:
+            # Channel 1 named "nonorm" so the nnUNet planner maps it to
+            # NoNormalization (see nnunetv2 map_channel_name_to_normalization).
+            # The SDM is already in [-1, 1]; z-scoring would destroy it.
+            channel_names = {"0": "LGE-MRI", "1": "nonorm"}
+        else:
+            channel_names = {"0": "LGE-MRI"}
         dataset_json = {
-            "channel_names": {"0": "LGE-MRI"},
+            "channel_names": channel_names,
             "labels": labels,
             "numTraining": case_idx,
             "file_ending": ".nii.gz",
@@ -450,6 +506,8 @@ def main():
         print(f"  labelsTr: {len(list(lbl_dir.glob('*.nii.gz')))} files")
         print(f"  Crop shape: {crop_shape}" if not args.no_crop else "  Full volume (no crop)")
         print(f"  Scar cases: {n_scar_cases}")
+        if args.sdm:
+            print("  SDM channel: enabled (2-channel input, NoNormalization)")
         if args.mclahe:
             print("  MCLAHE: enabled (applied to full image before crop)")
         if no_scar_cases:
