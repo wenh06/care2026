@@ -1298,6 +1298,11 @@ class CARE2026_MRI_nnUNet(nn.Module, SizeMixin, CkptMixin, CitationMixin):
         elif image_npy.ndim == 4:
             # (C, H, W, D) → (C, Z, Y, X), same per-channel transpose
             image_npy = np.transpose(image_npy, (0, 3, 2, 1))
+        else:
+            raise ValueError(
+                f"Unsupported image_npy.ndim={image_npy.ndim} (shape={image_npy.shape}); "
+                "expected a 3D (H, W, D) or 4D (C, H, W, D) array"
+            )
         spacing_nnunet = (float(spacing[2]), float(spacing[1]), float(spacing[0]))
         ret = self._predictor.predict_from_list_of_npy_arrays(
             image_or_list_of_images=image_npy.astype(np.float32),
