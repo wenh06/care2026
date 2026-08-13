@@ -438,22 +438,23 @@ nnUNet PlainConvUNet (6-stage, 30.6M) trained on Task 1 (scar, Dataset 501,
 
 **Task 1 — LA Scar (60 labeled cases, 5-fold ensemble, training-set evaluation):**
 
-| S1 | S2 | Multi-class | MCLAHE | Dilation | G-DSC | ACC | SEN | Loss |
-|----|----|:----------:|:------:|:--------:|-------|-----|-----|------|
-| VNet S1 | VNet S2 | — | ✅ | 2mm | 0.2034 | 0.9997 | 0.1946 | ScarLoss |
-| 502 | 501 | — | — | 2mm | 0.3529 | 0.9998 | 0.2573 | default[^nnunet-loss] |
-| 512 | 511 | — | ✅ | 2mm | 0.3335 | 0.9998 | 0.2390 | default[^nnunet-loss] |
-| 502 | 521 | ✅ | — | 2mm | 0.3533 | 0.9998 | 0.2577 | default[^nnunet-loss] |
-| 502 | 501 | — | — | 5mm | 0.6211 | 0.9998 | 0.6242 | default[^nnunet-loss] |
-| 502 | 521 | ✅ | — | 5mm | **0.6221** | 0.9998 | 0.6267 | default[^nnunet-loss] |
-| 502 | 531 | ✅ | ✅ | 5mm | 0.6016 | 0.9998 | 0.5775 | default[^nnunet-loss] |
-| 512 | 511 | — | ✅ | 5mm | 0.5875 | 0.9998 | — | default[^nnunet-loss] |
-| 502 | 501 | — | — | none | 0.6317 | 0.9998 | 0.6490 | default[^nnunet-loss] |
-| 502 | 521 | ✅ | — | none | 0.6333 | 0.9998 | 0.6517 | default[^nnunet-loss] |
-| 512 | 511 | — | ✅ | none | 0.5976 | 0.9998 | 0.5788 | default[^nnunet-loss] |
-| 502 | 521 | ✅ | — | none | **0.6631** | 0.9998 | 0.6765 | ScarGaussian |
-| 502 | 521 | ✅ | — | none | 0.6629 | 0.9998 | **0.6837** | ScarCavityWall |
-| 502 | 521 | ✅ | — | none | **0.6682** | **0.9999** | 0.6779 | ScarGaussian + ResEnc M |
+| S1 | S2 | Multi-class | MCLAHE | Dilation | Dice | Official G-DSC | ACC | SEN | Loss |
+|----|----|:----------:|:------:|:--------:|------:|:--------------:|-----|-----|------|
+| VNet S1 | VNet S2 | — | ✅ | 2mm | 0.2034 | — | 0.9997 | 0.1946 | ScarLoss |
+| 502 | 501 | — | — | 2mm | 0.3529 | — | 0.9998 | 0.2573 | default[^nnunet-loss] |
+| 512 | 511 | — | ✅ | 2mm | 0.3335 | — | 0.9998 | 0.2390 | default[^nnunet-loss] |
+| 502 | 521 | ✅ | — | 2mm | 0.3533 | — | 0.9998 | 0.2577 | default[^nnunet-loss] |
+| 502 | 501 | — | — | 5mm | 0.6211 | — | 0.9998 | 0.6242 | default[^nnunet-loss] |
+| 502 | 521 | ✅ | — | 5mm | **0.6221** | — | 0.9998 | 0.6267 | default[^nnunet-loss] |
+| 502 | 531 | ✅ | ✅ | 5mm | 0.6016 | — | 0.9998 | 0.5775 | default[^nnunet-loss] |
+| 512 | 511 | — | ✅ | 5mm | 0.5875 | — | 0.9998 | — | default[^nnunet-loss] |
+| 502 | 501 | — | — | none | 0.6317 | 0.6561 | 0.9998 | 0.6490 | default[^nnunet-loss] |
+| 502 | 521 | ✅ | — | none | 0.6333 | 0.6563 | 0.9998 | 0.6517 | default[^nnunet-loss] |
+| 512 | 511 | — | ✅ | none | 0.5976 | — | 0.9998 | 0.5788 | default[^nnunet-loss] |
+| 502 | 521 | ✅ | — | none | **0.6631** | 0.6600 | 0.9998 | 0.6765 | ScarGaussian |
+| 502 | 521 | ✅ | — | none | 0.6629 | 0.6630 | 0.9998 | **0.6837** | ScarCavityWall |
+| 502 | 521 | ✅ | — | none | **0.6682** | 0.6682 | **0.9999** | 0.6779 | ScarGaussian + ResEnc M |
+| 502 | 524 | ✅ | — | none | 0.6224 | 0.6225 | 0.9998 | 0.6387 | ScarGaussianSDM |
 
 [^nnunet-loss]: nnUNet's default ``DC_and_CE_loss`` (Dice + Cross-Entropy).
 
@@ -500,6 +501,17 @@ Key findings:
 - Default changed: ``postprocess_mri_masks(dilation_mm=None)`` — no LA constraint.
   Top-1 result is dilation, not data strategy.
   531 only tested at 5mm (``eval_all_models.py`` default at the time).
+
+**6-stage hybrid dilation sweep (ScarGaussian, official G-DSC):**
+
+| Dilation | G-DSC | ACC | SEN |
+|----------|-------|------|------|
+| none | 0.6372 | 0.9998 | 0.6553 |
+| 3.0mm | 0.5704 | 0.9998 | 0.5237 |
+| 5.0mm | 0.6268 | 0.9998 | 0.6317 |
+| 7.0mm | 0.6336 | 0.9998 | 0.6481 |
+
+Conclusion: `none` remains best; dilation still provides no benefit.
 
 CLAHE is harmful for nnUNet (−5.5 % vs no CLAHE), consistent with the
 observation that nnUNet's ZScoreNormalization already handles intensity
@@ -561,11 +573,11 @@ performance frontier, with further architectural complexity bringing no benefit.
 
 All on VNet (4-stage, 6.9M params, SGD, CLAHE).  Training-set 5-fold CV without TTA.
 
-| Configuration | Train G-DSC | Val G-DSC | Notes |
-|---------------|:---:|:---:|-------|
-| Baseline (1ch, DC+CE) | 0.3463 | 0.2189 | sub 2 config |
-| + Cavity SDM (2ch) | 0.3573 | 0.1882 | sub 3 config |
-| + 5mm cavity dilation | 0.3309 | — | post-processing only |
+| Configuration | Train Dice | Train G-DSC | Val G-DSC | Notes |
+|---------------|:---:|:---:|:---:|-------|
+| Baseline (1ch, DC+CE) | 0.3463 | 0.3465 | 0.2189 | sub 2 config |
+| + Cavity SDM (2ch) | 0.3573 | 0.3574 | 0.1882 | sub 3 config |
+| + 5mm cavity dilation | 0.3309 | 0.3310 | — | post-processing only |
 
 Key: SDM improves train (+0.0110) but degrades val (−0.0307); hard dilation hurts both.
 
