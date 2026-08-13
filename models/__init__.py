@@ -1294,12 +1294,13 @@ class CARE2026_MRI_nnUNet(nn.Module, SizeMixin, CkptMixin, CitationMixin):
         # nnUNet's NibabelIOWithReorient transposes (x,y,z) → (z,y,x)
         if image_npy.ndim == 3:
             image_npy = np.transpose(image_npy, (2, 1, 0))
+            image_npy = image_npy[None]
         elif image_npy.ndim == 4:
             # (C, H, W, D) → (C, Z, Y, X), same per-channel transpose
             image_npy = np.transpose(image_npy, (0, 3, 2, 1))
         spacing_nnunet = (float(spacing[2]), float(spacing[1]), float(spacing[0]))
         ret = self._predictor.predict_from_list_of_npy_arrays(
-            image_or_list_of_images=image_npy[None].astype(np.float32),
+            image_or_list_of_images=image_npy.astype(np.float32),
             segs_from_prev_stage_or_list_of_segs_from_prev_stage=None,
             properties_or_list_of_properties={"spacing": spacing_nnunet},
             truncated_ofname=None,
