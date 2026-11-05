@@ -41,7 +41,7 @@ from const import (
 from data_reader import CARE2026_CT
 from outputs import CARE2026Outputs
 from utils.centroid_crop import centroid_crop_3d
-from utils.mclahe import mclahe as _mclahe
+from utils.mclahe_np import mclahe as _mclahe
 
 __all__ = [
     "predict_mri_two_stage",

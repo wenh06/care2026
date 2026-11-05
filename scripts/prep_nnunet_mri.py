@@ -54,7 +54,7 @@ from tqdm.auto import tqdm
 
 from const import MRI_STAGE2_CROP_SHAPE
 from utils.centroid_crop import centroid_crop_3d
-from utils.mclahe import mclahe as _mclahe
+from utils.mclahe_np import mclahe as _mclahe
 
 # ---------------------------------------------------------------------------
 # Helpers

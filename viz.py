@@ -23,7 +23,7 @@ from ipywidgets import Dropdown, IntSlider, interact
 from const import MRI_CANONICAL_SHAPE, MRI_STAGE1_SHAPE
 from data_reader import CARE2026_MRI
 from predict import predict_mri_two_stage
-from utils.mclahe import mclahe as _mclahe
+from utils.mclahe_np import mclahe as _mclahe
 from utils.viz_utils import _hatch_for, _is_notebook
 
 __all__ = [

@@ -34,7 +34,7 @@ from const import (
     MRI_STAGE2_CROP_SHAPE,
 )
 from data_reader import CARE2026_CT, CARE2026_MRI
-from utils.mclahe import mclahe as _mclahe
+from utils.mclahe_np import mclahe as _mclahe
 
 __all__ = [
     "CARE2026_MRI_Stage1_Dataset",

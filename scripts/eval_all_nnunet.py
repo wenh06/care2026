@@ -221,7 +221,7 @@ def main():
                 img = nii.get_fdata().astype(np.float32)
                 zooms = tuple(float(s) for s in nii.header.get_zooms()[:3])
                 if use_mclahe:
-                    from utils.mclahe import mclahe as _mc
+                    from utils.mclahe_np import mclahe as _mc
 
                     img = _mc(img)
                 pred = model.predict(img, zooms)

@@ -294,7 +294,7 @@ def main():
                     continue
                 img = nib.load(str(img_path)).get_fdata().astype(np.float32)
                 if use_mclahe:
-                    from utils.mclahe import mclahe as _mc
+                    from utils.mclahe_np import mclahe as _mc
 
                     img = _mc(img)
                 if hasattr(model, "predict"):

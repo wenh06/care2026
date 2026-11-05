@@ -127,7 +127,7 @@ Data are provided in NIfTI format:
     - [region_loss.py](models/loss/region_loss.py): `IoULoss`, `GeneralizedDiceLoss`, `LovaszSoftmaxLoss`.
 - [utils](utils): utility functions.
   - [scoring_metrics.py](utils/scoring_metrics.py): evaluation metrics specification for all three tasks (G-DSC, ACC, SEN for Task 1; DSC, HD for Tasks 2 & 3). Metric computation is inline in `trainer.py`.
-  - [mclahe.py](utils/mclahe.py): Multi-dimensional Contrast Limited Adaptive Histogram Equalization (MCLAHE) for LGE-MRI contrast enhancement, via TensorFlow 1.x compatibility mode.
+  - [mclahe_np.py](utils/mclahe_np.py): Multi-dimensional Contrast Limited Adaptive Histogram Equalization (MCLAHE) for LGE-MRI contrast enhancement. Pure-numpy, numerically equivalent (max |Δ| ≤ 3e-7) to the original TensorFlow implementation kept in [mclahe.py](utils/mclahe.py) for reference.
   - [centroid_crop.py](utils/centroid_crop.py): centroid-based 3D cropping shared by data prep and inference.
   - [parse_nnunet_log.py](utils/parse_nnunet_log.py): parse epoch-level metrics from nnUNet training logs.
   - [viz_utils.py](utils/viz_utils.py): low-level visualisation helpers shared by `data_reader` and `viz`.

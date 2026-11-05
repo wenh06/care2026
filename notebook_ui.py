@@ -23,7 +23,7 @@ from ipywidgets import HTML, Button, Checkbox, Dropdown, FloatSlider, HBox, IntS
 
 from outputs import package_submission
 from predict import predict_ct, predict_mri_two_stage
-from utils.mclahe import mclahe as _mclahe
+from utils.mclahe_np import mclahe as _mclahe
 from utils.viz_utils import _is_notebook
 
 __all__ = ["InferencePanel"]
