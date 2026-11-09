@@ -15,8 +15,9 @@ Only the ``adaptive_hist_range=False`` path is implemented; that is the only
 configuration used in this repo (``mclahe(image)`` with defaults).
 """
 
-import numpy as np
 from itertools import product
+
+import numpy as np
 
 __all__ = ["mclahe"]
 
@@ -35,9 +36,7 @@ def mclahe(x, kernel_size=None, clip_limit=0.01, nbins=128, adaptive_hist_range=
     Drop-in replacement for ``utils.mclahe.mclahe``; output scaled to [0, 1].
     """
     if adaptive_hist_range:
-        raise NotImplementedError(
-            "adaptive_hist_range=True is not ported (unused in this repo)"
-        )
+        raise NotImplementedError("adaptive_hist_range=True is not ported (unused in this repo)")
 
     x = np.asarray(x, dtype=np.float32)
     n_bins = int(nbins)
@@ -102,9 +101,7 @@ def mclahe(x, kernel_size=None, clip_limit=0.01, nbins=128, adaptive_hist_range=
     # Gather via flat indices: row_base maps block coords -> row offset in the
     # flattened (n_blocks_hist..., nbins) mapping table.
     map_flat = mapping.reshape(-1)
-    row_base = (np.arange(int(np.prod(n_blocks_hist)), dtype=np.int32) * n_bins).reshape(
-        tuple(n_blocks_hist)
-    )
+    row_base = (np.arange(int(np.prod(n_blocks_hist)), dtype=np.int32) * n_bins).reshape(tuple(n_blocks_hist))
     res = np.zeros(block_bins.shape, dtype=np.float32)
     for ind_map in product([0, 1], repeat=dim):
         corner = tuple(slice(im, im + nb) for im, nb in zip(ind_map, n_blocks))
@@ -127,8 +124,6 @@ def mclahe(x, kernel_size=None, clip_limit=0.01, nbins=128, adaptive_hist_range=
 
     # Blocks back to grid layout, crop the half-tile padding
     inv_perm = tuple(j for axis in range(dim) for j in (axis, axis + dim))
-    res_grid = np.transpose(res, inv_perm).reshape(
-        tuple(int(n * k) for n, k in zip(n_blocks, kernel_size))
-    )
+    res_grid = np.transpose(res, inv_perm).reshape(tuple(int(n * k) for n, k in zip(n_blocks, kernel_size)))
     crop = tuple(slice(int(px), int(px) + s) for px, s in zip(padding_x[:, 0], x_shape))
     return res_grid[crop]
