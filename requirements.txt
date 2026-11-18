@@ -29,7 +29,7 @@ IPython
 bib-lookup
 diff-binom-confint
 nnunetv2
-acvl-utils>=0.2.6,<0.3
+acvl-utils>=0.2.7,<0.3
 dynamic-network-architectures>=0.4.4,<0.5
 batchgenerators>=0.25.1
 batchgeneratorsv2>=0.3.2

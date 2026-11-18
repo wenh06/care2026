@@ -32,7 +32,7 @@ diff-binom-confint
 
 # nnUNet dependencies (nnunetv2 installed with --no-deps in Dockerfile
 # to avoid pip touching the pre-installed torch)
-acvl-utils>=0.2.6,<0.3
+acvl-utils>=0.2.7,<0.3
 dynamic-network-architectures>=0.4.4,<0.5
 batchgenerators>=0.25.1
 batchgeneratorsv2>=0.3.2
